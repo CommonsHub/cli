@@ -18,6 +18,7 @@ func PrintHelp(version string) {
   %sbookings sync%s       Sync room booking calendars
   %stransactions sync%s   Fetch blockchain transactions
   %smessages sync%s       Fetch Discord messages
+  %ssync%s                Sync everything (events, transactions, bookings, messages)
   %sreport%s <period>     Generate monthly/yearly report
 
 %sOPTIONS%s
@@ -42,6 +43,7 @@ func PrintHelp(version string) {
 		f.Bold, f.Reset,
 		f.Cyan, f.Reset,
 		f.Bold, f.Reset,
+		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,

@@ -62,6 +62,11 @@ func main() {
 			fmt.Fprintf(os.Stderr, "%sUsage: chb messages sync%s\n", cmd.Fmt.Yellow, cmd.Fmt.Reset)
 			os.Exit(1)
 		}
+	case "sync":
+		if err := cmd.SyncAll(args[1:], VERSION); err != nil {
+			fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
+			os.Exit(1)
+		}
 	case "report":
 		if err := cmd.Report(args[1:]); err != nil {
 			fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
