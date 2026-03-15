@@ -13,6 +13,35 @@ import (
 	"time"
 )
 
+// StripeTransaction represents a Stripe balance transaction
+type StripeTransaction struct {
+	ID                string                 `json:"id"`
+	Created           int64                  `json:"created"`
+	Amount            int64                  `json:"amount"`
+	Fee               int64                  `json:"fee"`
+	Net               int64                  `json:"net"`
+	Currency          string                 `json:"currency"`
+	Type              string                 `json:"type"`
+	Description       string                 `json:"description,omitempty"`
+	Source             json.RawMessage        `json:"source,omitempty"`
+	ReportingCategory string                 `json:"reporting_category"`
+	Metadata          map[string]interface{} `json:"metadata,omitempty"`
+}
+
+// StripeListResponse is the response from /v1/balance_transactions
+type StripeListResponse struct {
+	Data    []StripeTransaction `json:"data"`
+	HasMore bool                `json:"has_more"`
+}
+
+// StripeCacheFile is the structure saved to disk
+type StripeCacheFile struct {
+	Transactions []StripeTransaction `json:"transactions"`
+	CachedAt     string              `json:"cachedAt"`
+	AccountID    string              `json:"accountId,omitempty"`
+	Currency     string              `json:"currency"`
+}
+
 // EtherscanResponse represents the Etherscan V2 API response
 type EtherscanResponse struct {
 	Status  string            `json:"status"`
@@ -168,6 +197,89 @@ func TransactionsSync(args []string) error {
 		time.Sleep(400 * time.Millisecond)
 	}
 
+	// --- Stripe sync ---
+	stripeAccounts := make([]FinanceAccount, 0)
+	for _, acc := range settings.Finance.Accounts {
+		if acc.Provider == "stripe" {
+			stripeAccounts = append(stripeAccounts, acc)
+		}
+	}
+
+	if len(stripeAccounts) > 0 {
+		stripeKey := os.Getenv("STRIPE_SECRET_KEY")
+		if stripeKey == "" {
+			fmt.Printf("\n%s⚠ STRIPE_SECRET_KEY not set, skipping Stripe sync%s\n", Fmt.Yellow, Fmt.Reset)
+		} else {
+			fmt.Printf("\n%s💳 Syncing Stripe transactions%s\n\n", Fmt.Bold, Fmt.Reset)
+			for _, acc := range stripeAccounts {
+				fmt.Printf("  %s%s%s", Fmt.Bold, acc.Name, Fmt.Reset)
+				if acc.AccountID != "" {
+					fmt.Printf(" (%s)", acc.AccountID)
+				}
+				fmt.Println()
+
+				stripeTxs, err := fetchStripeTransactions(stripeKey, startMonth, endMonth)
+				if err != nil {
+					fmt.Printf("    %s✗ Error: %v%s\n", Fmt.Red, err, Fmt.Reset)
+					continue
+				}
+
+				fmt.Printf("    %sFetched %d transactions%s\n", Fmt.Dim, len(stripeTxs), Fmt.Reset)
+
+				// Group by month
+				byMonth := groupStripeByMonth(stripeTxs)
+				saved := 0
+
+				for ym, monthTxs := range byMonth {
+					if ym < startMonth || ym > endMonth {
+						continue
+					}
+
+					parts := strings.Split(ym, "-")
+					if len(parts) != 2 {
+						continue
+					}
+					year, month := parts[0], parts[1]
+
+					dir := filepath.Join(DataDir(), year, month, "finance", "stripe")
+					filePath := filepath.Join(dir, "transactions.json")
+
+					// Skip if exists and not force (but always update current month)
+					if !force && fileExists(filePath) {
+						if ym != fmt.Sprintf("%d-%02d", now.Year(), now.Month()) {
+							continue
+						}
+					}
+
+					if err := os.MkdirAll(dir, 0755); err != nil {
+						fmt.Printf("    %s✗ Failed to create dir: %v%s\n", Fmt.Red, err, Fmt.Reset)
+						continue
+					}
+
+					cache := StripeCacheFile{
+						Transactions: monthTxs,
+						CachedAt:     time.Now().UTC().Format(time.RFC3339),
+						AccountID:    acc.AccountID,
+						Currency:     acc.Currency,
+					}
+
+					data, _ := json.MarshalIndent(cache, "", "  ")
+					if err := os.WriteFile(filePath, data, 0644); err != nil {
+						fmt.Printf("    %s✗ Failed to write: %v%s\n", Fmt.Red, err, Fmt.Reset)
+						continue
+					}
+
+					saved++
+					totalProcessed += len(monthTxs)
+				}
+
+				if saved > 0 {
+					fmt.Printf("    %s✓ Saved %d months%s\n", Fmt.Green, saved, Fmt.Reset)
+				}
+			}
+		}
+	}
+
 	fmt.Printf("\n%s✓ Done!%s %d transactions processed\n\n", Fmt.Green, Fmt.Reset, totalProcessed)
 	return nil
 }
@@ -253,10 +365,96 @@ func parseTokenValue(rawValue string, decimals int) float64 {
 	return f
 }
 
+func fetchStripeTransactions(apiKey, startMonth, endMonth string) ([]StripeTransaction, error) {
+	tz := BrusselsTZ()
+	var allTxs []StripeTransaction
+
+	// Parse month range to timestamps
+	startParts := strings.Split(startMonth, "-")
+	if len(startParts) != 2 {
+		return nil, fmt.Errorf("invalid start month: %s", startMonth)
+	}
+	startYear, _ := strconv.Atoi(startParts[0])
+	startMon, _ := strconv.Atoi(startParts[1])
+	rangeStart := time.Date(startYear, time.Month(startMon), 1, 0, 0, 0, 0, tz)
+
+	endParts := strings.Split(endMonth, "-")
+	if len(endParts) != 2 {
+		return nil, fmt.Errorf("invalid end month: %s", endMonth)
+	}
+	endYear, _ := strconv.Atoi(endParts[0])
+	endMon, _ := strconv.Atoi(endParts[1])
+	rangeEnd := time.Date(endYear, time.Month(endMon)+1, 1, 0, 0, 0, 0, tz) // first day of month after end
+
+	createdGte := rangeStart.Unix()
+	createdLt := rangeEnd.Unix()
+
+	var startingAfter string
+	for {
+		url := fmt.Sprintf("https://api.stripe.com/v1/balance_transactions?limit=100&created[gte]=%d&created[lt]=%d",
+			createdGte, createdLt)
+		if startingAfter != "" {
+			url += "&starting_after=" + startingAfter
+		}
+
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			return nil, err
+		}
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			return nil, fmt.Errorf("stripe API error: %w", err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode == 429 {
+			// Rate limited — wait and retry
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		if resp.StatusCode != 200 {
+			return nil, fmt.Errorf("stripe API returned %d", resp.StatusCode)
+		}
+
+		var listResp StripeListResponse
+		if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
+			return nil, fmt.Errorf("failed to decode stripe response: %w", err)
+		}
+
+		allTxs = append(allTxs, listResp.Data...)
+
+		if !listResp.HasMore || len(listResp.Data) == 0 {
+			break
+		}
+		startingAfter = listResp.Data[len(listResp.Data)-1].ID
+
+		// Small delay between pages to be polite
+		time.Sleep(200 * time.Millisecond)
+	}
+
+	return allTxs, nil
+}
+
+func groupStripeByMonth(txs []StripeTransaction) map[string][]StripeTransaction {
+	byMonth := make(map[string][]StripeTransaction)
+	tz := BrusselsTZ()
+
+	for _, tx := range txs {
+		t := time.Unix(tx.Created, 0).In(tz)
+		ym := fmt.Sprintf("%d-%02d", t.Year(), t.Month())
+		byMonth[ym] = append(byMonth[ym], tx)
+	}
+
+	return byMonth
+}
+
 func printTransactionsSyncHelp() {
 	f := Fmt
 	fmt.Printf(`
-%schb transactions sync%s — Fetch blockchain transactions
+%schb transactions sync%s — Fetch blockchain + Stripe transactions
 
 %sUSAGE%s
   %schb transactions sync%s [options]
@@ -269,6 +467,7 @@ func printTransactionsSyncHelp() {
 %sENVIRONMENT%s
   %sETHERSCAN_API_KEY%s    Etherscan/Gnosisscan API key
   %sGNOSISSCAN_API_KEY%s   Fallback API key for Gnosis chain
+  %sSTRIPE_SECRET_KEY%s    Stripe secret key (for Stripe sync)
 `,
 		f.Bold, f.Reset,
 		f.Bold, f.Reset,
@@ -278,6 +477,7 @@ func printTransactionsSyncHelp() {
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Bold, f.Reset,
+		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 	)
