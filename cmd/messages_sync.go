@@ -81,6 +81,9 @@ func MessagesSync(args []string) error {
 	monthFilter := GetOption(args, "--month")
 	channelFilter := GetOption(args, "--channel")
 
+	// Positional year/month arg (e.g. "2025" or "2025/03")
+	posYear, posMonth, posFound := ParseYearMonthArg(args)
+
 	fmt.Printf("\n%s💬 Syncing Discord messages%s\n", Fmt.Bold, Fmt.Reset)
 	fmt.Printf("%sDATA_DIR: %s%s\n", Fmt.Dim, DataDir(), Fmt.Reset)
 	fmt.Printf("%sGuild: %s%s\n\n", Fmt.Dim, settings.Discord.GuildID, Fmt.Reset)
@@ -114,6 +117,18 @@ func MessagesSync(args []string) error {
 		for ym, monthMsgs := range byMonth {
 			if monthFilter != "" && ym != monthFilter {
 				continue
+			}
+			// Positional year/month filter
+			if posFound {
+				if posMonth != "" {
+					if ym != fmt.Sprintf("%s-%s", posYear, posMonth) {
+						continue
+					}
+				} else {
+					if !strings.HasPrefix(ym, posYear+"-") {
+						continue
+					}
+				}
 			}
 
 			parts := strings.Split(ym, "-")
@@ -254,9 +269,11 @@ func printMessagesSyncHelp() {
 %schb messages sync%s — Fetch Discord messages
 
 %sUSAGE%s
-  %schb messages sync%s [options]
+  %schb messages sync%s [year[/month]] [options]
 
 %sOPTIONS%s
+  %s<year>%s               Sync all months of the given year (e.g. 2025)
+  %s<year/month>%s         Sync a specific month (e.g. 2025/03)
   %s--month%s <YYYY-MM>    Fetch specific month only
   %s--channel%s <id|name>  Fetch specific channel only
   %s--help, -h%s           Show this help
@@ -268,6 +285,8 @@ func printMessagesSyncHelp() {
 		f.Bold, f.Reset,
 		f.Cyan, f.Reset,
 		f.Bold, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,

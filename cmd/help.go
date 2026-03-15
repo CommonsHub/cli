@@ -28,8 +28,13 @@ func PrintHelp(version string) {
 %sEXAMPLES%s
   %s$ chb events                          # next 10 upcoming events
   $ chb events sync                      # sync events from Luma
-  $ chb transactions sync                # sync blockchain transactions
-  $ chb messages sync                    # sync Discord messages
+  $ chb events sync 2025/11              # sync events for Nov 2025
+  $ chb events sync 2025                 # sync events for all of 2025
+  $ chb sync 2025/11 --force             # resync everything for Nov 2025
+  $ chb sync 2025 --force                # resync everything for all of 2025
+  $ chb transactions sync 2025/03        # sync transactions for Mar 2025
+  $ chb messages sync 2025              # sync messages for all of 2025
+  $ chb bookings sync 2025/06            # sync bookings for Jun 2025
   $ chb report 2025/11                   # monthly report
   $ chb report 2025                      # yearly report%s
 
@@ -62,6 +67,40 @@ func PrintHelp(version string) {
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
+	)
+}
+
+func PrintSyncAllHelp() {
+	f := Fmt
+	fmt.Printf(`
+%schb sync%s — Sync all data (events, transactions, bookings, messages)
+
+%sUSAGE%s
+  %schb sync%s [year[/month]] [options]
+
+%sOPTIONS%s
+  %s<year>%s               Sync all months of the given year (e.g. 2025)
+  %s<year/month>%s         Sync a specific month (e.g. 2025/11)
+  %s--force%s              Re-fetch even if cached data exists
+  %s--help, -h%s           Show this help
+
+%sEXAMPLES%s
+  %schb sync%s                     Sync current data
+  %schb sync 2025 --force%s        Resync all of 2025
+  %schb sync 2025/11 --force%s     Resync November 2025
+`,
+		f.Bold, f.Reset,
+		f.Bold, f.Reset,
+		f.Cyan, f.Reset,
+		f.Bold, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
+		f.Bold, f.Reset,
+		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
 	)
 }
 
@@ -98,9 +137,11 @@ func PrintEventsSyncHelp() {
 %schb events sync%s — Fetch events from Luma and regenerate data
 
 %sUSAGE%s
-  %schb events sync%s [options]
+  %schb events sync%s [year[/month]] [options]
 
 %sOPTIONS%s
+  %s<year>%s               Sync all months of the given year (e.g. 2025)
+  %s<year/month>%s         Sync a specific month (e.g. 2025/11)
   %s--since%s <YYYYMMDD>   Start syncing from this date (default: last month)
   %s--force%s              Re-fetch even if cached data exists
   %s--history%s            Rebuild entire event history
@@ -114,6 +155,8 @@ func PrintEventsSyncHelp() {
 		f.Bold, f.Reset,
 		f.Cyan, f.Reset,
 		f.Bold, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
@@ -157,9 +200,11 @@ func PrintBookingsSyncHelp() {
 %schb bookings sync%s — Sync room booking calendars from Google Calendar
 
 %sUSAGE%s
-  %schb bookings sync%s [options]
+  %schb bookings sync%s [year[/month]] [options]
 
 %sOPTIONS%s
+  %s<year>%s               Sync all months of the given year (e.g. 2025)
+  %s<year/month>%s         Sync a specific month (e.g. 2025/06)
   %s--room%s <slug>        Only sync a specific room (e.g. satoshi)
   %s--force%s              Re-fetch even if cached data exists
   %s--since%s <YYYYMMDD>   Start syncing from this date
@@ -169,6 +214,8 @@ func PrintBookingsSyncHelp() {
 		f.Bold, f.Reset,
 		f.Cyan, f.Reset,
 		f.Bold, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,

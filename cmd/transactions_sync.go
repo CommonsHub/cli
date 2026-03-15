@@ -85,11 +85,22 @@ func TransactionsSync(args []string) error {
 	force := HasFlag(args, "--force")
 	monthFilter := GetOption(args, "--month")
 
+	// Positional year/month arg (e.g. "2025" or "2025/03")
+	posYear, posMonth, posFound := ParseYearMonthArg(args)
+
 	// Determine which months to process
 	now := time.Now().In(BrusselsTZ())
 	var startMonth, endMonth string
 
-	if monthFilter != "" {
+	if posFound {
+		if posMonth != "" {
+			startMonth = fmt.Sprintf("%s-%s", posYear, posMonth)
+			endMonth = startMonth
+		} else {
+			startMonth = fmt.Sprintf("%s-01", posYear)
+			endMonth = fmt.Sprintf("%s-12", posYear)
+		}
+	} else if monthFilter != "" {
 		startMonth = monthFilter
 		endMonth = monthFilter
 	} else {
@@ -457,9 +468,11 @@ func printTransactionsSyncHelp() {
 %schb transactions sync%s — Fetch blockchain + Stripe transactions
 
 %sUSAGE%s
-  %schb transactions sync%s [options]
+  %schb transactions sync%s [year[/month]] [options]
 
 %sOPTIONS%s
+  %s<year>%s               Sync all months of the given year (e.g. 2025)
+  %s<year/month>%s         Sync a specific month (e.g. 2025/03)
   %s--month%s <YYYY-MM>    Fetch specific month only
   %s--force%s              Re-fetch even if cached data exists
   %s--help, -h%s           Show this help
@@ -473,6 +486,8 @@ func printTransactionsSyncHelp() {
 		f.Bold, f.Reset,
 		f.Cyan, f.Reset,
 		f.Bold, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,

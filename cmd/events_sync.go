@@ -75,6 +75,9 @@ func EventsSync(args []string, version string) error {
 	force := HasFlag(args, "--force")
 	sinceStr := GetOption(args, "--since")
 
+	// Positional year/month arg (e.g. "2025" or "2025/11")
+	posYear, posMonth, posFound := ParseYearMonthArg(args)
+
 	dataDir := DataDir()
 	lumaAPIKey := os.Getenv("LUMA_API_KEY")
 
@@ -121,9 +124,20 @@ func EventsSync(args []string, version string) error {
 	// Group by month and save ICS files
 	byMonth := ical.GroupByMonth(events)
 
-	// Determine which months to process based on --since
+	// Determine which months to process based on --since or positional year/month
 	var sinceMonth string
-	if sinceStr != "" {
+	var untilMonth string // exclusive upper bound (empty = no upper bound)
+	if posFound {
+		if posMonth != "" {
+			// Specific month: only process that month
+			sinceMonth = fmt.Sprintf("%s-%s", posYear, posMonth)
+			untilMonth = sinceMonth // will be handled as inclusive below
+		} else {
+			// Whole year
+			sinceMonth = fmt.Sprintf("%s-01", posYear)
+			untilMonth = fmt.Sprintf("%s-12", posYear)
+		}
+	} else if sinceStr != "" {
 		if d, ok := ParseSinceDate(sinceStr); ok {
 			sinceMonth = fmt.Sprintf("%d-%02d", d.Year(), d.Month())
 		}
@@ -135,6 +149,9 @@ func EventsSync(args []string, version string) error {
 
 	for ym, monthEvents := range byMonth {
 		if sinceMonth != "" && ym < sinceMonth {
+			continue
+		}
+		if untilMonth != "" && ym > untilMonth {
 			continue
 		}
 		affectedMonths = append(affectedMonths, ym)

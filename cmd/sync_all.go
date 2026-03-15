@@ -4,6 +4,11 @@ import "fmt"
 
 // SyncAll runs all sync commands sequentially.
 func SyncAll(args []string, version string) error {
+	if HasFlag(args, "--help", "-h") {
+		PrintSyncAllHelp()
+		return nil
+	}
+
 	fmt.Printf("\n%s🔄 Syncing everything...%s\n", Fmt.Bold, Fmt.Reset)
 
 	fmt.Printf("\n%s━━━ Events ━━━%s\n", Fmt.Bold, Fmt.Reset)

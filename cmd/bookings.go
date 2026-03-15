@@ -227,22 +227,35 @@ func BookingsSync(args []string) error {
 	roomSlug := GetOption(args, "--room")
 	sinceStr := GetOption(args, "--since")
 
+	// Positional year/month arg (e.g. "2025" or "2025/06")
+	posYear, posMonth, posFound := ParseYearMonthArg(args)
+
 	now := time.Now()
 	var startMonth, endMonth string
 
-	if sinceStr != "" {
+	if posFound {
+		if posMonth != "" {
+			startMonth = fmt.Sprintf("%s-%s", posYear, posMonth)
+			endMonth = startMonth
+		} else {
+			startMonth = fmt.Sprintf("%s-01", posYear)
+			endMonth = fmt.Sprintf("%s-12", posYear)
+		}
+	} else if sinceStr != "" {
 		if d, ok := ParseSinceDate(sinceStr); ok {
 			startMonth = fmt.Sprintf("%d-%02d", d.Year(), d.Month())
 		} else {
 			prev := time.Date(now.Year(), now.Month()-1, 1, 0, 0, 0, 0, time.UTC)
 			startMonth = fmt.Sprintf("%d-%02d", prev.Year(), prev.Month())
 		}
+		future := time.Date(now.Year(), now.Month()+2, 1, 0, 0, 0, 0, time.UTC)
+		endMonth = fmt.Sprintf("%d-%02d", future.Year(), future.Month())
 	} else {
 		prev := time.Date(now.Year(), now.Month()-1, 1, 0, 0, 0, 0, time.UTC)
 		startMonth = fmt.Sprintf("%d-%02d", prev.Year(), prev.Month())
+		future := time.Date(now.Year(), now.Month()+2, 1, 0, 0, 0, 0, time.UTC)
+		endMonth = fmt.Sprintf("%d-%02d", future.Year(), future.Month())
 	}
-	future := time.Date(now.Year(), now.Month()+2, 1, 0, 0, 0, 0, time.UTC)
-	endMonth = fmt.Sprintf("%d-%02d", future.Year(), future.Month())
 
 	target := "all rooms"
 	if roomSlug != "" {
