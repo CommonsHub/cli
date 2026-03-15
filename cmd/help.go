@@ -16,6 +16,9 @@ func PrintHelp(version string) {
   %srooms%s               List all rooms with pricing
   %sbookings%s            List upcoming room bookings
   %sbookings sync%s       Sync room booking calendars
+  %stransactions sync%s   Fetch blockchain transactions
+  %smessages sync%s       Fetch Discord messages
+  %sreport%s <period>     Generate monthly/yearly report
 
 %sOPTIONS%s
   %s--help, -h%s          Show help for a command
@@ -24,19 +27,24 @@ func PrintHelp(version string) {
 %sEXAMPLES%s
   %s$ chb events                          # next 10 upcoming events
   $ chb events sync                      # sync events from Luma
-  $ chb rooms                            # list rooms + pricing
-  $ chb bookings                         # next 10 bookings
-  $ chb bookings sync                    # sync all room calendars
-  $ chb bookings sync --room satoshi     # sync one room only%s
+  $ chb transactions sync                # sync blockchain transactions
+  $ chb messages sync                    # sync Discord messages
+  $ chb report 2025/11                   # monthly report
+  $ chb report 2025                      # yearly report%s
 
 %sENVIRONMENT%s
   %sDATA_DIR%s            Data directory (default: ./data)
   %sLUMA_API_KEY%s        Luma API key (enables rich event data)
+  %sETHERSCAN_API_KEY%s   Etherscan/Gnosisscan API key
+  %sDISCORD_BOT_TOKEN%s   Discord bot token
 `,
 		f.Bold, f.Reset, f.Dim, version, f.Reset,
 		f.Bold, f.Reset,
 		f.Cyan, f.Reset,
 		f.Bold, f.Reset,
+		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
@@ -48,6 +56,8 @@ func PrintHelp(version string) {
 		f.Bold, f.Reset,
 		f.Dim, f.Reset,
 		f.Bold, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 	)

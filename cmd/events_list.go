@@ -20,7 +20,10 @@ type EventEntry struct {
 	Source         string     `json:"source"`
 	CalendarSource string     `json:"calendarSource,omitempty"`
 	Tags           []EventTag `json:"tags,omitempty"`
+	Metadata       EventMetadata `json:"metadata"`
 }
+
+
 
 type EventTag struct {
 	Name  string `json:"name"`
