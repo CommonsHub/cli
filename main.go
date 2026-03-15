@@ -28,6 +28,8 @@ func main() {
 				fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
 				os.Exit(1)
 			}
+		} else if len(args) > 1 && args[1] == "stats" {
+			cmd.EventsStats(args[2:])
 		} else {
 			cmd.EventsList(args[1:])
 		}
@@ -39,6 +41,8 @@ func main() {
 				fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
 				os.Exit(1)
 			}
+		} else if len(args) > 1 && args[1] == "stats" {
+			cmd.BookingsStats(args[2:])
 		} else {
 			cmd.BookingsList(args[1:])
 		}
@@ -48,8 +52,10 @@ func main() {
 				fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
 				os.Exit(1)
 			}
+		} else if len(args) > 1 && args[1] == "stats" {
+			cmd.TransactionsStats(args[2:])
 		} else {
-			fmt.Fprintf(os.Stderr, "%sUsage: chb transactions sync%s\n", cmd.Fmt.Yellow, cmd.Fmt.Reset)
+			fmt.Fprintf(os.Stderr, "%sUsage: chb transactions [sync|stats]%s\n", cmd.Fmt.Yellow, cmd.Fmt.Reset)
 			os.Exit(1)
 		}
 	case "messages":
@@ -58,8 +64,10 @@ func main() {
 				fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
 				os.Exit(1)
 			}
+		} else if len(args) > 1 && args[1] == "stats" {
+			cmd.MessagesStats(args[2:])
 		} else {
-			fmt.Fprintf(os.Stderr, "%sUsage: chb messages sync%s\n", cmd.Fmt.Yellow, cmd.Fmt.Reset)
+			fmt.Fprintf(os.Stderr, "%sUsage: chb messages [sync|stats]%s\n", cmd.Fmt.Yellow, cmd.Fmt.Reset)
 			os.Exit(1)
 		}
 	case "sync":

@@ -13,11 +13,15 @@ func PrintHelp(version string) {
 %sCOMMANDS%s
   %sevents%s              List upcoming events
   %sevents sync%s         Fetch events from Luma feeds
+  %sevents stats%s        Show event statistics
   %srooms%s               List all rooms with pricing
   %sbookings%s            List upcoming room bookings
   %sbookings sync%s       Sync room booking calendars
+  %sbookings stats%s      Show booking statistics
   %stransactions sync%s   Fetch blockchain transactions
+  %stransactions stats%s  Show transaction statistics
   %smessages sync%s       Fetch Discord messages
+  %smessages stats%s      Show message statistics
   %ssync%s                Sync everything (events, transactions, bookings, messages)
   %sreport%s <period>     Generate monthly/yearly report
 
@@ -48,6 +52,10 @@ func PrintHelp(version string) {
 		f.Bold, f.Reset,
 		f.Cyan, f.Reset,
 		f.Bold, f.Reset,
+		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
@@ -189,6 +197,90 @@ func PrintBookingsHelp() {
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
+	)
+}
+
+func PrintEventsStatsHelp() {
+	f := Fmt
+	fmt.Printf(`
+%schb events stats%s — Show event statistics
+
+%sUSAGE%s
+  %schb events stats%s [options]
+
+%sOPTIONS%s
+  %s--format json%s        Output as JSON
+  %s--help, -h%s           Show this help
+`,
+		f.Bold, f.Reset,
+		f.Bold, f.Reset,
+		f.Cyan, f.Reset,
+		f.Bold, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
+	)
+}
+
+func PrintTransactionsStatsHelp() {
+	f := Fmt
+	fmt.Printf(`
+%schb transactions stats%s — Show transaction statistics
+
+%sUSAGE%s
+  %schb transactions stats%s [options]
+
+%sOPTIONS%s
+  %s--format json%s        Output as JSON
+  %s--help, -h%s           Show this help
+`,
+		f.Bold, f.Reset,
+		f.Bold, f.Reset,
+		f.Cyan, f.Reset,
+		f.Bold, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
+	)
+}
+
+func PrintBookingsStatsHelp() {
+	f := Fmt
+	fmt.Printf(`
+%schb bookings stats%s — Show booking statistics
+
+%sUSAGE%s
+  %schb bookings stats%s [options]
+
+%sOPTIONS%s
+  %s--format json%s        Output as JSON
+  %s--help, -h%s           Show this help
+`,
+		f.Bold, f.Reset,
+		f.Bold, f.Reset,
+		f.Cyan, f.Reset,
+		f.Bold, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
+	)
+}
+
+func PrintMessagesStatsHelp() {
+	f := Fmt
+	fmt.Printf(`
+%schb messages stats%s — Show message statistics
+
+%sUSAGE%s
+  %schb messages stats%s [options]
+
+%sOPTIONS%s
+  %s--format json%s        Output as JSON
+  %s--help, -h%s           Show this help
+`,
+		f.Bold, f.Reset,
+		f.Bold, f.Reset,
+		f.Cyan, f.Reset,
+		f.Bold, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 	)
