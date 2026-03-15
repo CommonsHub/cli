@@ -453,31 +453,33 @@ func processMonth(dataDir, calendarID, year, month string) (*monthResult, error)
 			location = "Commons Hub Brussels, Rue de la Madeleine 51, 1000 Bruxelles, Belgium"
 		}
 
-		// Try to find Luma data
+		// Try to find Luma data — check cache first, avoid API calls
 		var lumaEv *luma.Event
 
-		// Extract luma event ID from URL
-		lumaSlug := extractLumaSlug(eventURL)
-		if lumaSlug == "" {
-			lumaSlug = extractLumaSlug(icsEv.Location)
-		}
-		if lumaSlug != "" {
-			lumaEv = lumaEventsMap[lumaSlug]
+		// 1. Direct match by evt- API ID (most reliable)
+		if strings.HasPrefix(eventID, "evt-") {
+			lumaEv = lumaEventsMap[eventID]
 		}
 
-		// Try name matching
+		// 2. Match by slug extracted from URL
+		if lumaEv == nil {
+			lumaSlug := extractLumaSlug(eventURL)
+			if lumaSlug == "" {
+				lumaSlug = extractLumaSlug(icsEv.Location)
+			}
+			if lumaSlug != "" {
+				lumaEv = lumaEventsMap[lumaSlug]
+			}
+		}
+
+		// 3. Match by name
 		if lumaEv == nil {
 			lumaEv = lumaEventsNameMap[strings.ToLower(name)]
 		}
 
-		// Try API fetch for evt- IDs
-		if lumaEv == nil && strings.HasPrefix(eventID, "evt-") && os.Getenv("LUMA_API_KEY") != "" {
-			fetched, _ := luma.GetEvent(eventID)
-			if fetched != nil {
-				lumaEventsMap[eventID] = fetched
-				lumaEv = fetched
-			}
-		}
+		// 4. No API call — events not in cache are community events
+		//    we don't own (GetEvent returns 403 anyway). Fall through
+		//    to OG scraping instead.
 
 		var coverImage string
 		startAt := icsEv.Start.Format(time.RFC3339)
