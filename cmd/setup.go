@@ -18,7 +18,7 @@ var envKeys = []envKey{
 	{"LUMA_API_KEY", "Luma calendar (event sync)", "https://docs.lu.ma/reference/getting-started"},
 	{"ETHERSCAN_API_KEY", "Gnosisscan (transaction sync)", "https://gnosisscan.io/myapikey"},
 	{"DISCORD_BOT_TOKEN", "Discord (message sync)", "https://discord.com/developers/applications"},
-	{"STRIPE_API_KEY", "Stripe (member sync)", "https://dashboard.stripe.com/apikeys"},
+	{"STRIPE_SECRET_KEY", "Stripe (member/transaction sync)", "https://dashboard.stripe.com/apikeys"},
 }
 
 // Setup runs the interactive key configuration wizard
