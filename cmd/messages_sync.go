@@ -176,8 +176,19 @@ func MessagesSync(args []string) error {
 			totalMessages += len(monthMsgs)
 		}
 
+		channelMsgCount := 0
+		for _, msgs := range byMonth {
+			channelMsgCount += len(msgs)
+		}
+		skippedMonths := len(byMonth) - saved
+
 		if saved > 0 {
 			fmt.Printf("    %s✓ Saved %d months%s\n", Fmt.Green, saved, Fmt.Reset)
+			if skippedMonths > 0 {
+				fmt.Printf("    %s(%d months filtered out)%s\n", Fmt.Dim, skippedMonths, Fmt.Reset)
+			}
+		} else if len(byMonth) > 0 {
+			fmt.Printf("    %s⚠ %d months with data but none saved (filtered out)%s\n", Fmt.Yellow, len(byMonth), Fmt.Reset)
 		}
 
 		// Rate limit between channels
