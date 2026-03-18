@@ -8,7 +8,25 @@ import (
 
 // Update runs go install to update chb to the latest version
 func Update() error {
-	fmt.Printf("%sUpdating chb...%s\n", Fmt.Dim, Fmt.Reset)
+	// Show what we're updating from
+	bi := getBuildInfo()
+	if bi.SHA != "" {
+		short := bi.SHA
+		if len(short) > 7 {
+			short = short[:7]
+		}
+		fmt.Printf("Current: %s (%s)\n", short, bi.Date)
+	}
+
+	// Check latest before updating
+	latest, err := getLatestCommit()
+	if err == nil && latest != nil {
+		ts := formatCommitDate(latest.Commit.Author.Date)
+		msg := firstLine(latest.Commit.Message)
+		fmt.Printf("Latest:  %s (%s) %s%s%s\n", latest.SHA[:7], ts, Fmt.Dim, msg, Fmt.Reset)
+	}
+
+	fmt.Printf("\n%sUpdating...%s\n", Fmt.Dim, Fmt.Reset)
 
 	goCmd := exec.Command("go", "install", "github.com/CommonsHub/chb@latest")
 	goCmd.Env = append(os.Environ(), "GOPROXY=direct")
@@ -20,6 +38,5 @@ func Update() error {
 	}
 
 	fmt.Printf("%s✓ Updated successfully%s\n", Fmt.Green, Fmt.Reset)
-	fmt.Println("Run `chb version` to verify")
 	return nil
 }
