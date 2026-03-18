@@ -37,6 +37,13 @@ func Update() error {
 		return fmt.Errorf("update failed: %w", err)
 	}
 
-	fmt.Printf("%s✓ Updated successfully%s\n", Fmt.Green, Fmt.Reset)
+	fmt.Printf("%s✓ Updated successfully%s\n\n", Fmt.Green, Fmt.Reset)
+
+	// Refresh settings from GitHub
+	fmt.Printf("%sRefreshing settings...%s\n", Fmt.Dim, Fmt.Reset)
+	if err := DownloadSettings(chbDir()); err != nil {
+		fmt.Printf("%sCould not refresh settings:%s %v\n", Fmt.Yellow, Fmt.Reset, err)
+	}
+
 	return nil
 }

@@ -3,21 +3,83 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 )
 
-// settingsDir returns the directory to look for settings files.
-// Checks ~/.chb/ first, falls back to src/settings/ for monorepo compat.
-func settingsDir() string {
+const settingsRepo = "https://raw.githubusercontent.com/CommonsHub/commonshub.brussels/main/src/settings"
+
+var settingsFiles = []string{"settings.json", "rooms.json"}
+
+// chbDir returns ~/.chb/, creating it if needed
+func chbDir() string {
 	home, err := os.UserHomeDir()
-	if err == nil {
-		chbDir := filepath.Join(home, ".chb")
-		if _, err := os.Stat(filepath.Join(chbDir, "settings.json")); err == nil {
-			return chbDir
-		}
+	if err != nil {
+		return "."
 	}
-	return filepath.Join("src", "settings")
+	dir := filepath.Join(home, ".chb")
+	os.MkdirAll(dir, 0755)
+	return dir
+}
+
+// settingsDir returns the directory to look for settings files.
+// Downloads from GitHub if missing. Falls back to src/settings/ for monorepo compat.
+func settingsDir() string {
+	dir := chbDir()
+	settingsPath := filepath.Join(dir, "settings.json")
+
+	if _, err := os.Stat(settingsPath); err == nil {
+		return dir
+	}
+
+	// Try src/settings/ (monorepo compat)
+	if _, err := os.Stat(filepath.Join("src", "settings", "settings.json")); err == nil {
+		return filepath.Join("src", "settings")
+	}
+
+	// Download from GitHub
+	fmt.Printf("%sDownloading settings...%s\n", Fmt.Dim, Fmt.Reset)
+	if err := DownloadSettings(dir); err != nil {
+		fmt.Printf("%sCould not download settings:%s %v\n", Fmt.Yellow, Fmt.Reset, err)
+		return dir
+	}
+
+	return dir
+}
+
+// DownloadSettings fetches settings files from the commonshub.brussels repo
+func DownloadSettings(dir string) error {
+	client := &http.Client{Timeout: 10 * time.Second}
+	os.MkdirAll(dir, 0755)
+
+	for _, file := range settingsFiles {
+		url := settingsRepo + "/" + file
+		resp, err := client.Get(url)
+		if err != nil {
+			return fmt.Errorf("failed to download %s: %w", file, err)
+		}
+		defer resp.Body.Close()
+
+		if resp.StatusCode != 200 {
+			return fmt.Errorf("failed to download %s: HTTP %d", file, resp.StatusCode)
+		}
+
+		data, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read %s: %w", file, err)
+		}
+
+		path := filepath.Join(dir, file)
+		if err := os.WriteFile(path, data, 0644); err != nil {
+			return fmt.Errorf("failed to write %s: %w", file, err)
+		}
+
+		fmt.Printf("  %s✓%s %s\n", Fmt.Green, Fmt.Reset, file)
+	}
+	return nil
 }
 
 // Settings represents settings.json
@@ -88,7 +150,7 @@ func LoadSettings() (*Settings, error) {
 	dir := settingsDir()
 	data, err := os.ReadFile(filepath.Join(dir, "settings.json"))
 	if err != nil {
-		return nil, fmt.Errorf("failed to load settings: %w\nPlace settings.json in ~/.chb/ or run from the website repo", err)
+		return nil, fmt.Errorf("failed to load settings: %w", err)
 	}
 	var s Settings
 	if err := json.Unmarshal(data, &s); err != nil {
