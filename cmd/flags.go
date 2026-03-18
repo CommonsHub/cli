@@ -129,9 +129,6 @@ func ParseSinceMonth(s string) (year string, month string, ok bool) {
 // Priority: --since flag > --history (scan cache) > default (current month)
 // sourceSubdir is the subdirectory to look for within each month (e.g. "events", "finance", "calendars", "channels")
 func ResolveSinceMonth(args []string, sourceSubdir string) (startMonth string, isHistory bool) {
-	now := time.Now()
-	currentYM := fmt.Sprintf("%d-%02d", now.Year(), now.Month())
-
 	// Check --since flag
 	sinceStr := GetOption(args, "--since")
 	if sinceStr != "" {
@@ -144,13 +141,11 @@ func ResolveSinceMonth(args []string, sourceSubdir string) (startMonth string, i
 		}
 	}
 
-	// Check --history flag
+	// Check --history flag: always start from 2024/01
+	// Each sync fetches all data in one API call anyway — the month range
+	// only controls which months get saved. Existing months are skipped
+	// unless --force is used, so no wasted work on subsequent runs.
 	if HasFlag(args, "--history") {
-		latest := findLatestCachedMonth(sourceSubdir, currentYM)
-		if latest != "" {
-			return latest, true
-		}
-		// No cache: start from 2024/01
 		return "2024-01", true
 	}
 
