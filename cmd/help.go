@@ -29,7 +29,9 @@ func PrintHelp(version string) {
 
 %sOPTIONS%s
   %s--help, -h%s          Show help for a command
-  %s--version, -v%s       Show version
+  %s--version, -v%s       Show version and check for updates
+  %sversion%s             Show version and check for updates
+  %supdate%s              Update chb to the latest version
 
 %sEXAMPLES%s
   %s$ chb events                          # next 10 upcoming events
@@ -70,6 +72,8 @@ func PrintHelp(version string) {
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Bold, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Bold, f.Reset,

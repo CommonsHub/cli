@@ -20,8 +20,13 @@ func main() {
 	switch args[0] {
 	case "--help", "-h", "help":
 		cmd.PrintHelp(VERSION)
-	case "--version", "-v":
-		fmt.Printf("chb v%s\n", VERSION)
+	case "--version", "-v", "version":
+		cmd.CheckLatestVersion(VERSION)
+	case "update":
+		if err := cmd.Update(); err != nil {
+			fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
+			os.Exit(1)
+		}
 	case "events":
 		if len(args) > 1 && args[1] == "sync" {
 			if err := cmd.EventsSync(args[2:], VERSION); err != nil {
