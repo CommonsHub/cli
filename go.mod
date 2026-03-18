@@ -1,4 +1,4 @@
-module github.com/CommonsHub/cli
+module github.com/CommonsHub/chb
 
 go 1.22
 

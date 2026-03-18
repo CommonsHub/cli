@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/CommonsHub/cli/ical"
-	"github.com/CommonsHub/cli/luma"
-	"github.com/CommonsHub/cli/og"
+	"github.com/CommonsHub/chb/ical"
+	"github.com/CommonsHub/chb/luma"
+	"github.com/CommonsHub/chb/og"
 )
 
 // FullEvent is the rich event structure written to events.json

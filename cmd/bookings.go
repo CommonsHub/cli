@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/CommonsHub/cli/ical"
+	"github.com/CommonsHub/chb/ical"
 )
 
 type BookingEntry struct {

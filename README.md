@@ -5,7 +5,7 @@ Command-line tool for managing [Commons Hub Brussels](https://commonshub.brussel
 ## Install
 
 ```bash
-go install github.com/CommonsHub/cli/cmd/chb@latest
+go install github.com/CommonsHub/chb@latest
 ```
 
 This installs the `chb` binary directly into your `$GOPATH/bin`.
@@ -13,9 +13,9 @@ This installs the `chb` binary directly into your `$GOPATH/bin`.
 Or clone and build directly:
 
 ```bash
-git clone https://github.com/CommonsHub/cli.git
-cd cli
-go build -o chb ./cmd/chb
+git clone https://github.com/CommonsHub/chb.git
+cd chb
+go build -o chb .
 ```
 
 ## Usage
