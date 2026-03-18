@@ -12,8 +12,8 @@ func SyncAll(args []string, version string) error {
 		return nil
 	}
 
-	if HasFlag(args, "--all") {
-		fmt.Printf("\n%s🔄 Syncing entire history...%s\n", Fmt.Bold, Fmt.Reset)
+	if HasFlag(args, "--history") || GetOption(args, "--since") != "" {
+		fmt.Printf("\n%s🔄 Syncing history...%s\n", Fmt.Bold, Fmt.Reset)
 	} else {
 		fmt.Printf("\n%s🔄 Syncing everything...%s\n", Fmt.Bold, Fmt.Reset)
 	}

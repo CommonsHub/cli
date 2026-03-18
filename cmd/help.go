@@ -107,24 +107,26 @@ messages (Discord), members (Stripe/Odoo)
   %schb members sync%s [options]
 
 %sTIME RANGE%s
-  %s(no args)%s            Sync current month only
+  %s(no args)%s            Sync latest data (current month + future)
   %s<year/month>%s         Sync a specific month (e.g. 2025/11)
   %s<year>%s               Sync all months of a given year (e.g. 2025)
-  %s--all%s                Sync entire history (all years/months)
+  %s--since%s YYYY/MM      Sync from a specific month to now (also: YYYYMM)
+  %s--history%s            Sync from earliest cached month (or 2024/01 if fresh)
 
 %sOPTIONS%s
   %s--force%s              Re-fetch even if cached data exists
   %s--help, -h%s           Show this help
 
 %sEXAMPLES%s
-  %schb sync%s                     Sync current month (all sources)
-  %schb sync --all%s               Sync entire history
-  %schb sync 2025%s                Sync all of 2025
-  %schb sync 2025/11%s             Sync November 2025
-  %schb sync 2025/11 --force%s     Resync November 2025 (overwrite cache)
-  %schb events sync%s              Sync events only (current month)
-  %schb events sync --all%s        Sync all event history
-  %schb transactions sync 2024%s   Sync transactions for 2024
+  %schb sync%s                        Sync latest data (all sources)
+  %schb sync --history%s              Sync history from where cache left off
+  %schb sync --since 2024/06%s       Sync from June 2024 to now
+  %schb sync 2025%s                   Sync all of 2025
+  %schb sync 2025/11%s                Sync November 2025
+  %schb sync 2025/11 --force%s        Resync November 2025 (overwrite cache)
+  %schb events sync%s                 Sync events only (latest)
+  %schb events sync --history%s       Sync event history
+  %schb transactions sync --since 202401%s  Sync transactions from Jan 2024
 `,
 		f.Bold, f.Reset,
 		f.Bold, f.Reset,
@@ -137,6 +139,8 @@ messages (Discord), members (Stripe/Odoo)
 		f.Cyan, f.Reset,
 		f.Bold, f.Reset,
 		f.Dim, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,

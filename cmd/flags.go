@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -99,4 +101,118 @@ func ParseSinceDate(s string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return t, true
+}
+
+// ParseSinceMonth parses a month string in formats: YYYY/MM, YYYYMM, YYYY-MM
+// Returns year, month as strings (zero-padded month), and whether parsing succeeded.
+func ParseSinceMonth(s string) (year string, month string, ok bool) {
+	if s == "" {
+		return "", "", false
+	}
+	// Normalize: remove slashes and dashes
+	clean := strings.ReplaceAll(strings.ReplaceAll(s, "/", ""), "-", "")
+	if len(clean) != 6 {
+		return "", "", false
+	}
+	y, err := strconv.Atoi(clean[:4])
+	if err != nil || y < 2000 || y > 2100 {
+		return "", "", false
+	}
+	m, err := strconv.Atoi(clean[4:6])
+	if err != nil || m < 1 || m > 12 {
+		return "", "", false
+	}
+	return clean[:4], fmt.Sprintf("%02d", m), true
+}
+
+// ResolveSinceMonth determines the start month for syncing.
+// Priority: --since flag > --history (scan cache) > default (current month)
+// sourceSubdir is the subdirectory to look for within each month (e.g. "events", "finance", "calendars", "channels")
+func ResolveSinceMonth(args []string, sourceSubdir string) (startMonth string, isHistory bool) {
+	now := time.Now()
+	currentYM := fmt.Sprintf("%d-%02d", now.Year(), now.Month())
+
+	// Check --since flag
+	sinceStr := GetOption(args, "--since")
+	if sinceStr != "" {
+		if y, m, ok := ParseSinceMonth(sinceStr); ok {
+			return fmt.Sprintf("%s-%s", y, m), true
+		}
+		// Also try as YYYYMMDD date
+		if d, ok := ParseSinceDate(sinceStr); ok {
+			return fmt.Sprintf("%d-%02d", d.Year(), d.Month()), true
+		}
+	}
+
+	// Check --history flag
+	if HasFlag(args, "--history") {
+		latest := findLatestCachedMonth(sourceSubdir, currentYM)
+		if latest != "" {
+			return latest, true
+		}
+		// No cache: start from 2024/01
+		return "2024-01", true
+	}
+
+	return "", false
+}
+
+// findLatestCachedMonth scans ~/.chb/data/YYYY/MM/<sourceSubdir> to find
+// the most recent cached month, ignoring months after currentYM.
+func findLatestCachedMonth(sourceSubdir string, currentYM string) string {
+	dataDir := DataDir()
+	latestYM := ""
+
+	years, err := os.ReadDir(dataDir)
+	if err != nil {
+		return ""
+	}
+
+	for _, yd := range years {
+		if !yd.IsDir() {
+			continue
+		}
+		year := yd.Name()
+		if len(year) != 4 {
+			continue
+		}
+		if _, err := strconv.Atoi(year); err != nil {
+			continue
+		}
+
+		months, err := os.ReadDir(filepath.Join(dataDir, year))
+		if err != nil {
+			continue
+		}
+
+		for _, md := range months {
+			if !md.IsDir() {
+				continue
+			}
+			month := md.Name()
+			if len(month) != 2 {
+				continue
+			}
+			if _, err := strconv.Atoi(month); err != nil {
+				continue
+			}
+
+			ym := year + "-" + month
+
+			// Ignore future months
+			if ym > currentYM {
+				continue
+			}
+
+			// Check if this source has data in this month
+			srcPath := filepath.Join(dataDir, year, month, sourceSubdir)
+			if _, err := os.Stat(srcPath); err == nil {
+				if latestYM == "" || ym > latestYM {
+					latestYM = ym
+				}
+			}
+		}
+	}
+
+	return latestYM
 }

@@ -84,6 +84,9 @@ func MessagesSync(args []string) error {
 	// Positional year/month arg (e.g. "2025" or "2025/03")
 	posYear, posMonth, posFound := ParseYearMonthArg(args)
 
+	// Check --since / --history
+	resolvedSince, isSince := ResolveSinceMonth(args, "channels")
+
 	fmt.Printf("\n%s💬 Syncing Discord messages%s\n", Fmt.Bold, Fmt.Reset)
 	fmt.Printf("%sDATA_DIR: %s%s\n", Fmt.Dim, DataDir(), Fmt.Reset)
 	fmt.Printf("%sGuild: %s%s\n\n", Fmt.Dim, settings.Discord.GuildID, Fmt.Reset)
@@ -116,6 +119,10 @@ func MessagesSync(args []string) error {
 		saved := 0
 		for ym, monthMsgs := range byMonth {
 			if monthFilter != "" && ym != monthFilter {
+				continue
+			}
+			// --since / --history filter
+			if isSince && ym < resolvedSince {
 				continue
 			}
 			// Positional year/month filter

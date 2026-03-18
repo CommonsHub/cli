@@ -233,10 +233,11 @@ func BookingsSync(args []string) error {
 	now := time.Now()
 	var startMonth, endMonth string
 
-	allHistory := HasFlag(args, "--all")
+	// Check --since / --history first
+	sinceMonth, isSince := ResolveSinceMonth(args, "calendars")
 
-	if allHistory {
-		startMonth = "2000-01"
+	if isSince {
+		startMonth = sinceMonth
 		future := time.Date(now.Year(), now.Month()+2, 1, 0, 0, 0, 0, time.UTC)
 		endMonth = fmt.Sprintf("%d-%02d", future.Year(), future.Month())
 	} else if posFound {
