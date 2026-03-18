@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/commonshub/commonshub.brussels/cli/cmd"
+	"github.com/CommonsHub/cli/cmd"
 )
 
 const VERSION = "2.0.0"

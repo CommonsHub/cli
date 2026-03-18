@@ -1,4 +1,4 @@
-module github.com/commonshub/commonshub.brussels/cli
+module github.com/CommonsHub/cli
 
 go 1.22
 
