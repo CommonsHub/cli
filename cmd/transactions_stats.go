@@ -91,12 +91,9 @@ func TransactionsStats(args []string) {
 					amount = tx.Amount
 				}
 
-				// Determine source label
-				source := tx.AccountSlug
-				if source == "" {
-					source = tx.AccountName
-				}
-				if source == "" && tx.Chain != nil {
+				// Determine source label (provider-level: stripe, gnosis, monerium, etc.)
+				source := tx.Provider
+				if source == "etherscan" && tx.Chain != nil {
 					source = *tx.Chain
 				}
 				if source == "" {
@@ -166,28 +163,20 @@ func TransactionsStats(args []string) {
 	// Pretty print
 	f := Fmt
 	net := totalIn - totalOut
-	sign := "+"
-	if net < 0 {
-		sign = ""
-	}
 
 	fmt.Printf("\n%s💰 Transactions: %d total%s\n", f.Bold, totalCount, f.Reset)
-	fmt.Printf("   %s↑ In:%s  €%.2f\n", f.Green, f.Reset, totalIn)
-	fmt.Printf("   %s↓ Out:%s €%.2f\n", f.Red, f.Reset, totalOut)
-	fmt.Printf("   %sNet:%s  %s€%.2f\n\n", f.Bold, f.Reset, sign, net)
+	fmt.Printf("   %s↑ In:%s  %s\n", f.Green, f.Reset, fmtEUR(totalIn))
+	fmt.Printf("   %s↓ Out:%s %s\n", f.Red, f.Reset, fmtEUR(totalOut))
+	fmt.Printf("   %sNet:%s  %s\n\n", f.Bold, f.Reset, fmtEURSigned(net))
 
 	for _, ms := range months {
 		mNet := ms.In - ms.Out
-		mSign := "+"
-		if mNet < 0 {
-			mSign = ""
-		}
-		fmt.Printf("  %s%s%s  %d tx  %s↑%s€%.0f  %s↓%s€%.0f  %snet %s€%.0f%s\n",
+		fmt.Printf("  %s%s%s  %d tx  %s↑%s%s  %s↓%s%s  %snet %s%s\n",
 			f.Bold, ms.Month, f.Reset,
 			ms.Count,
-			f.Green, f.Reset, ms.In,
-			f.Red, f.Reset, ms.Out,
-			f.Dim, mSign, mNet, f.Reset,
+			f.Green, f.Reset, fmtEUR(ms.In),
+			f.Red, f.Reset, fmtEUR(ms.Out),
+			f.Dim, fmtEURSigned(mNet), f.Reset,
 		)
 
 		// Sources sorted by volume
@@ -208,10 +197,10 @@ func TransactionsStats(args []string) {
 		for _, s := range sources {
 			parts := []string{}
 			if s.ss.In > 0 {
-				parts = append(parts, fmt.Sprintf("%s↑%s€%.0f", f.Green, f.Reset, s.ss.In))
+				parts = append(parts, fmt.Sprintf("%s↑%s%s", f.Green, f.Reset, fmtEUR(s.ss.In)))
 			}
 			if s.ss.Out > 0 {
-				parts = append(parts, fmt.Sprintf("%s↓%s€%.0f", f.Red, f.Reset, s.ss.Out))
+				parts = append(parts, fmt.Sprintf("%s↓%s%s", f.Red, f.Reset, fmtEUR(s.ss.Out)))
 			}
 			fmt.Printf("    %s%-14s%s %d tx  %s\n",
 				f.Dim, s.name, f.Reset,
@@ -221,6 +210,41 @@ func TransactionsStats(args []string) {
 		}
 	}
 	fmt.Println()
+}
+
+// fmtEUR formats a number as €12,345.67
+func fmtEUR(v float64) string {
+	return "€" + fmtNumber(math.Abs(v))
+}
+
+// fmtEURSigned formats with +/- prefix
+func fmtEURSigned(v float64) string {
+	if v >= 0 {
+		return "+" + fmtEUR(v)
+	}
+	return "-" + fmtEUR(-v)
+}
+
+// fmtNumber formats a float with thousands separators: 12,345.67
+func fmtNumber(v float64) string {
+	// Split integer and decimal parts
+	intPart := int64(v)
+	decPart := v - float64(intPart)
+	dec := fmt.Sprintf("%.2f", decPart)[1:] // ".67"
+
+	// Format integer with commas
+	s := fmt.Sprintf("%d", intPart)
+	if len(s) <= 3 {
+		return s + dec
+	}
+	var result []byte
+	for i, c := range s {
+		if i > 0 && (len(s)-i)%3 == 0 {
+			result = append(result, ',')
+		}
+		result = append(result, byte(c))
+	}
+	return string(result) + dec
 }
 
 func joinStrings(ss []string) string {
