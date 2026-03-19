@@ -400,7 +400,7 @@ func getAllChannelIDs() []string {
 // ── Generate command ────────────────────────────────────────────────────────
 
 func Generate(args []string) error {
-	if HasFlag(args, "--help", "-h", "help") {
+	if HasFlag(args, "--help", "-h") {
 		printGenerateHelp()
 		return nil
 	}
@@ -460,6 +460,13 @@ func Generate(args []string) error {
 			}
 		}
 	}
+	// Also generate for latest/
+	if _, err := os.Stat(latestDir); err == nil {
+		n := generateMonthContributorsGo(dataDir, "latest", "", settings)
+		if n > 0 {
+			fmt.Printf("  ✓ latest: %d contributor(s)\n", n)
+		}
+	}
 	fmt.Println()
 
 	// 4. Generate top contributors (global contributors.json)
@@ -490,6 +497,13 @@ func Generate(args []string) error {
 			}
 		}
 	}
+	// Also generate for latest/
+	if _, err := os.Stat(latestDir); err == nil {
+		n := generateTransactionsGo(dataDir, "latest", "", settings)
+		if n > 0 {
+			fmt.Printf("  ✓ latest: %d transaction(s)\n", n)
+		}
+	}
 	fmt.Println()
 
 	// 8. Generate counterparties
@@ -500,11 +514,10 @@ func Generate(args []string) error {
 			generateCounterpartiesGo(dataDir, year, month)
 		}
 	}
-	fmt.Println()
-
-	// 9. Maintain latest/ directory
-	fmt.Printf("📁 Updating latest/ symlink...\n")
-	updateLatestDir(dataDir, years)
+	// Also generate for latest/
+	if _, err := os.Stat(latestDir); err == nil {
+		generateCounterpartiesGo(dataDir, "latest", "")
+	}
 	fmt.Println()
 
 	fmt.Printf("\n%s✅ All data generation complete!%s\n\n", Fmt.Green, Fmt.Reset)
@@ -624,10 +637,9 @@ func generateMonthImagesGo(dataDir, year, month string) int {
 	}
 	images = unique
 
-	outputPath := filepath.Join(dataDir, year, month, "channels", "discord", "images.json")
-	os.MkdirAll(filepath.Dir(outputPath), 0755)
 	out := ImagesFile{Year: year, Month: month, Count: len(images), Images: images}
-	writeJSONFile(outputPath, out)
+	imgData, _ := json.MarshalIndent(out, "", "  ")
+	writeMonthFile(dataDir, year, month, filepath.Join("channels", "discord", "images.json"), imgData)
 
 	return len(images)
 }
@@ -863,7 +875,7 @@ func generateMonthContributorsGo(dataDir, year, month string, settings *Settings
 	decimals := 6 // CHT default
 	if settings != nil {
 		// Try reading from settings contributionToken
-		data, _ := os.ReadFile(filepath.Join(settingsDir(), "settings.json"))
+		data, _ := os.ReadFile(filepath.Join("src", "settings", "settings.json"))
 		if data != nil {
 			var s struct {
 				ContributionToken struct {
@@ -944,9 +956,8 @@ func generateMonthContributorsGo(dataDir, year, month string, settings *Settings
 		GeneratedAt:  time.Now().UTC().Format(time.RFC3339),
 	}
 
-	outputPath := filepath.Join(dataDir, year, month, "contributors.json")
-	os.MkdirAll(filepath.Dir(outputPath), 0755)
-	writeJSONFile(outputPath, out)
+	contribData, _ := json.MarshalIndent(out, "", "  ")
+	writeMonthFile(dataDir, year, month, "contributors.json", contribData)
 
 	return len(contributors)
 }
@@ -1571,9 +1582,8 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 		Transactions: transactions,
 	}
 
-	outputPath := filepath.Join(dataDir, year, month, "transactions.json")
-	os.MkdirAll(filepath.Dir(outputPath), 0755)
-	writeJSONFile(outputPath, out)
+	txData, _ := json.MarshalIndent(out, "", "  ")
+	writeMonthFile(dataDir, year, month, "transactions.json", txData)
 
 	return len(transactions)
 }
@@ -1626,48 +1636,8 @@ func generateCounterpartiesGo(dataDir, year, month string) {
 		Counterparties: counterparties,
 	}
 
-	outputPath := filepath.Join(dataDir, year, month, "counterparties.json")
-	writeJSONFile(outputPath, out)
-}
-
-// ── Latest directory ────────────────────────────────────────────────────────
-
-func updateLatestDir(dataDir string, years []string) {
-	if len(years) == 0 {
-		return
-	}
-
-	// Find most recent year/month
-	latestYear := years[len(years)-1]
-	months := getAvailableMonths(dataDir, latestYear)
-	if len(months) == 0 {
-		return
-	}
-	latestMonth := months[len(months)-1]
-
-	srcDir := filepath.Join(dataDir, latestYear, latestMonth)
-	latestDir := filepath.Join(dataDir, "latest")
-
-	// Copy key files from most recent month to latest/
-	filesToCopy := []string{
-		"events.json",
-		"transactions.json",
-		"counterparties.json",
-		"contributors.json",
-		"members.json",
-	}
-
-	os.MkdirAll(latestDir, 0755)
-
-	for _, f := range filesToCopy {
-		src := filepath.Join(srcDir, f)
-		dst := filepath.Join(latestDir, f)
-		if data, err := os.ReadFile(src); err == nil {
-			os.WriteFile(dst, data, 0644)
-		}
-	}
-
-	fmt.Printf("  ✓ Updated latest/ → %s/%s\n", latestYear, latestMonth)
+	cpData, _ := json.MarshalIndent(out, "", "  ")
+	writeMonthFile(dataDir, year, month, "counterparties.json", cpData)
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────

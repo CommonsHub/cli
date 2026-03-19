@@ -67,7 +67,7 @@ type monthResult struct {
 }
 
 func EventsSync(args []string, version string) error {
-	if HasFlag(args, "--help", "-h", "help") {
+	if HasFlag(args, "--help", "-h") {
 		PrintEventsSyncHelp()
 		return nil
 	}
@@ -124,25 +124,20 @@ func EventsSync(args []string, version string) error {
 	// Group by month and save ICS files
 	byMonth := ical.GroupByMonth(events)
 
-	// Determine which months to process based on --since/--history or positional year/month
+	// Determine which months to process based on --since or positional year/month
 	var sinceMonth string
 	var untilMonth string // exclusive upper bound (empty = no upper bound)
-
-	// Check --since / --history
-	resolvedSince, isSince := ResolveSinceMonth(args, "events")
-
 	if posFound {
 		if posMonth != "" {
+			// Specific month: only process that month
 			sinceMonth = fmt.Sprintf("%s-%s", posYear, posMonth)
-			untilMonth = sinceMonth
+			untilMonth = sinceMonth // will be handled as inclusive below
 		} else {
+			// Whole year
 			sinceMonth = fmt.Sprintf("%s-01", posYear)
 			untilMonth = fmt.Sprintf("%s-12", posYear)
 		}
-	} else if isSince {
-		sinceMonth = resolvedSince
 	} else if sinceStr != "" {
-		// Legacy --since YYYYMMDD support
 		if d, ok := ParseSinceDate(sinceStr); ok {
 			sinceMonth = fmt.Sprintf("%d-%02d", d.Year(), d.Month())
 		}
@@ -176,7 +171,7 @@ func EventsSync(args []string, version string) error {
 		}
 
 		content := ical.WrapICS(monthEvents, "-//Commons Hub Brussels//Luma//EN")
-		os.WriteFile(icsPath, []byte(content), 0644)
+		writeMonthFile(dataDir, year, month, filepath.Join("calendars", "ics", "luma.ics"), []byte(content))
 	}
 	sort.Strings(affectedMonths)
 
@@ -400,9 +395,8 @@ func fetchLumaForMonth(dataDir, calendarID, year, month string, force bool) {
 		flat = append(flat, flatEvent{Event: e, Tags: entry.Tags})
 	}
 
-	os.MkdirAll(lumaDir, 0755)
 	data, _ := json.MarshalIndent(flat, "", "  ")
-	os.WriteFile(lumaPath, data, 0644)
+	writeMonthFile(dataDir, year, month, filepath.Join("calendars", "luma", calendarID+".json"), data)
 }
 
 func processMonth(dataDir, calendarID, year, month string) (*monthResult, error) {
@@ -707,7 +701,7 @@ func processMonth(dataDir, calendarID, year, month string) (*monthResult, error)
 		Events:      fullEvents,
 	}
 	data, _ := json.MarshalIndent(ef, "", "  ")
-	os.WriteFile(filepath.Join(monthPath, "events.json"), data, 0644)
+	writeMonthFile(dataDir, year, month, "events.json", data)
 
 	return &monthResult{
 		yearMonth:   fmt.Sprintf("%s-%s", year, month),
