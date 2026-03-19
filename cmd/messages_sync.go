@@ -87,7 +87,7 @@ func MessagesSync(args []string) error {
 	posYear, posMonth, posFound := ParseYearMonthArg(args)
 
 	// Check --since / --history
-	resolvedSince, isSince := ResolveSinceMonth(args, "channels")
+	resolvedSince, isSince := ResolveSinceMonth(args, "messages")
 
 	fmt.Printf("\n%s💬 Syncing Discord messages%s\n", Fmt.Bold, Fmt.Reset)
 	fmt.Printf("%sDATA_DIR: %s%s\n", Fmt.Dim, DataDir(), Fmt.Reset)
@@ -178,7 +178,7 @@ func MessagesSync(args []string) error {
 
 			// Save to data/YYYY/MM/channels/discord/{channelId}/messages.json
 			dataDir := DataDir()
-			relPath := filepath.Join("channels", "discord", channelID, "messages.json")
+			relPath := filepath.Join("messages", "discord", channelID, "messages.json")
 
 			cache := MessagesCacheFile{
 				Messages:  monthMsgs,
@@ -466,7 +466,7 @@ func findOldestCachedMonthForChannel(channelID string) string {
 			}
 			month := md.Name()
 
-			msgPath := filepath.Join(dataDir, year, month, "channels", "discord", channelID, "messages.json")
+			msgPath := filepath.Join(dataDir, year, month, "messages", "discord", channelID, "messages.json")
 			if _, err := os.Stat(msgPath); err == nil {
 				ym := year + "-" + month
 				if oldest == "" || ym < oldest {

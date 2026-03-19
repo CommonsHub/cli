@@ -189,7 +189,7 @@ func Stats(args []string) {
 		imgCount++
 
 		rel, _ := filepath.Rel(dataDir, p)
-		if strings.Contains(rel, filepath.Join("channels", "discord", "images")) {
+		if strings.Contains(rel, filepath.Join("messages", "discord", "images")) {
 			discordImgSize += info.Size()
 			discordImgCount++
 		} else if strings.Contains(rel, filepath.Join("events", "images")) {
@@ -258,11 +258,11 @@ func typeIcon(name string) string {
 	switch name {
 	case "events":
 		return "📅"
-	case "finance":
-		return "💰"
-	case "calendars":
+	case "bookings":
 		return "📆"
-	case "channels":
+	case "transactions":
+		return "💰"
+	case "messages":
 		return "💬"
 	case "latest":
 		return "📌"

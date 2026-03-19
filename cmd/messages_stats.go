@@ -53,7 +53,7 @@ func MessagesStats(args []string) {
 				continue
 			}
 			ym := yd.Name() + "-" + md.Name()
-			discordDir := filepath.Join(dataDir, yd.Name(), md.Name(), "channels", "discord")
+			discordDir := filepath.Join(dataDir, yd.Name(), md.Name(), "messages", "discord")
 			if _, err := os.Stat(discordDir); os.IsNotExist(err) {
 				continue
 			}

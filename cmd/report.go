@@ -309,7 +309,7 @@ func printDiscordSummary(dataDir, year, month string) {
 }
 
 func countDiscordMessages(dataDir, year, month string) (int, map[string]int) {
-	discordDir := filepath.Join(dataDir, year, month, "channels", "discord")
+	discordDir := filepath.Join(dataDir, year, month, "messages", "discord")
 	channelCounts := make(map[string]int)
 
 	if !fileExists(discordDir) {
@@ -402,7 +402,7 @@ func printTransactionsSummary(dataDir, year, month string) {
 
 	for _, acc := range settings.Finance.Accounts {
 		if acc.Provider == "etherscan" && acc.Token != nil {
-			filePath := filepath.Join(dataDir, year, month, "finance", acc.Chain,
+			filePath := filepath.Join(dataDir, year, month, "transactions", acc.Chain,
 				fmt.Sprintf("%s.%s.json", acc.Slug, acc.Token.Symbol))
 
 			data, err := os.ReadFile(filePath)
@@ -448,7 +448,7 @@ func printTransactionsSummary(dataDir, year, month string) {
 			if accountID == "" {
 				accountID = acc.Slug
 			}
-			filePath := filepath.Join(dataDir, year, month, "finance", "stripe",
+			filePath := filepath.Join(dataDir, year, month, "transactions", "stripe",
 				fmt.Sprintf("%s.json", accountID))
 
 			data, err := os.ReadFile(filePath)
@@ -523,7 +523,7 @@ func calculateMonthTransactions(dataDir, year, month string) (income, expenses f
 
 	for _, acc := range settings.Finance.Accounts {
 		if acc.Provider == "etherscan" && acc.Token != nil {
-			filePath := filepath.Join(dataDir, year, month, "finance", acc.Chain,
+			filePath := filepath.Join(dataDir, year, month, "transactions", acc.Chain,
 				fmt.Sprintf("%s.%s.json", acc.Slug, acc.Token.Symbol))
 
 			data, err := os.ReadFile(filePath)
@@ -552,7 +552,7 @@ func calculateMonthTransactions(dataDir, year, month string) (income, expenses f
 			if accountID == "" {
 				accountID = acc.Slug
 			}
-			filePath := filepath.Join(dataDir, year, month, "finance", "stripe",
+			filePath := filepath.Join(dataDir, year, month, "transactions", "stripe",
 				fmt.Sprintf("%s.json", accountID))
 
 			data, err := os.ReadFile(filePath)

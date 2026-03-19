@@ -31,7 +31,7 @@ func ImagesSync(args []string) error {
 	}
 
 	// Determine time range
-	startMonth, _ := ResolveSinceMonth(args, "channels")
+	startMonth, _ := ResolveSinceMonth(args, "messages")
 	posYear, posMonth, posFound := ParseYearMonthArg(args)
 
 	years := getAvailableYears(dataDir)
@@ -96,7 +96,7 @@ func ImagesSync(args []string) error {
 
 // syncDiscordImages reads images.json for a month and downloads Discord attachments.
 func syncDiscordImages(dataDir, year, month, token string, force bool) (downloaded, skipped int) {
-	imagesPath := filepath.Join(dataDir, year, month, "channels", "discord", "images.json")
+	imagesPath := filepath.Join(dataDir, year, month, "messages", "discord", "images.json")
 	data, err := os.ReadFile(imagesPath)
 	if err != nil {
 		return 0, 0
@@ -107,7 +107,7 @@ func syncDiscordImages(dataDir, year, month, token string, force bool) (download
 		return 0, 0
 	}
 
-	imagesDir := filepath.Join(dataDir, year, month, "channels", "discord", "images")
+	imagesDir := filepath.Join(dataDir, year, month, "messages", "discord", "images")
 	os.MkdirAll(imagesDir, 0755)
 
 	for _, img := range imf.Images {

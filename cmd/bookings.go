@@ -48,7 +48,7 @@ func loadAllBookings() ([]BookingEntry, error) {
 			if !md.IsDir() || len(md.Name()) != 2 {
 				continue
 			}
-			icsDir := filepath.Join(yearPath, md.Name(), "calendars", "ics")
+			icsDir := filepath.Join(yearPath, md.Name(), "bookings")
 			if _, err := os.Stat(icsDir); os.IsNotExist(err) {
 				continue
 			}
@@ -234,7 +234,7 @@ func BookingsSync(args []string) error {
 	var startMonth, endMonth string
 
 	// Check --since / --history first
-	sinceMonth, isSince := ResolveSinceMonth(args, "calendars")
+	sinceMonth, isSince := ResolveSinceMonth(args, "bookings")
 
 	if isSince {
 		startMonth = sinceMonth
@@ -310,18 +310,17 @@ func BookingsSync(args []string) error {
 			parts := strings.SplitN(ym, "-", 2)
 			year, month := parts[0], parts[1]
 
-			icsDir := filepath.Join(dataDir, year, month, "calendars", "ics")
-			icsPath := filepath.Join(icsDir, room.Slug+".ics")
+			relPath := filepath.Join("bookings", room.Slug+".ics")
+			filePath := filepath.Join(dataDir, year, month, relPath)
 
 			if !force {
-				if _, err := os.Stat(icsPath); err == nil {
+				if _, err := os.Stat(filePath); err == nil {
 					continue // already exists
 				}
 			}
 
-			os.MkdirAll(icsDir, 0755)
 			content := ical.WrapICS(monthEvents, fmt.Sprintf("-//Commons Hub Brussels//%s//EN", room.Name))
-			os.WriteFile(icsPath, []byte(content), 0644)
+			writeMonthFile(dataDir, year, month, relPath, []byte(content))
 		}
 		fmt.Printf("  %s✓%s %s: %d events\n", Fmt.Green, Fmt.Reset, room.Slug, len(events))
 	}

@@ -94,7 +94,7 @@ func TransactionsSync(args []string) error {
 	var startMonth, endMonth string
 
 	// Check --since / --history first
-	sinceMonth, isSince := ResolveSinceMonth(args, "finance")
+	sinceMonth, isSince := ResolveSinceMonth(args, "transactions")
 
 	if isSince {
 		startMonth = sinceMonth
@@ -111,10 +111,12 @@ func TransactionsSync(args []string) error {
 		startMonth = monthFilter
 		endMonth = monthFilter
 	} else {
-		// Default: current month + previous month
-		prev := now.AddDate(0, -1, 0)
-		startMonth = fmt.Sprintf("%d-%02d", prev.Year(), prev.Month())
+		// Default: current month back to the first month missing any source
 		endMonth = fmt.Sprintf("%d-%02d", now.Year(), now.Month())
+		startMonth = findFirstIncompleteMonth(settings, sourceFilter)
+		if startMonth == "" || startMonth > endMonth {
+			startMonth = endMonth
+		}
 	}
 
 	fmt.Printf("\n%s⛓️  Syncing transactions%s\n", Fmt.Bold, Fmt.Reset)
@@ -174,7 +176,7 @@ func TransactionsSync(args []string) error {
 			// Save to data/YYYY/MM/finance/{chain}/{slug}.{token}.json
 			dataDir := DataDir()
 			filename := fmt.Sprintf("%s.%s.json", acc.Slug, acc.Token.Symbol)
-			relPath := filepath.Join("finance", acc.Chain, filename)
+			relPath := filepath.Join("transactions", acc.Chain, filename)
 			filePath := filepath.Join(dataDir, year, month, relPath)
 
 			// Skip if exists and not force
@@ -260,7 +262,7 @@ func TransactionsSync(args []string) error {
 					year, month := parts[0], parts[1]
 
 					dataDir := DataDir()
-					relPath := filepath.Join("finance", "stripe", "transactions.json")
+					relPath := filepath.Join("transactions", "stripe", "transactions.json")
 					filePath := filepath.Join(dataDir, year, month, relPath)
 
 					// Skip if exists and not force (but always update current month)
@@ -352,7 +354,7 @@ func TransactionsSync(args []string) error {
 							if slug == "" {
 								slug = acc.Address[:8]
 							}
-							relPath := filepath.Join("finance", "monerium", "private", slug+".json")
+							relPath := filepath.Join("transactions", "monerium", "private", slug+".json")
 							filePath := filepath.Join(dataDir, year, month, relPath)
 
 							if !force && fileExists(filePath) {
@@ -454,6 +456,71 @@ func groupTransfersByMonth(transfers []TokenTransfer) map[string][]TokenTransfer
 	}
 
 	return byMonth
+}
+
+// findFirstIncompleteMonth walks backwards from current month to find the
+// first month where all configured transaction sources have data.
+// Returns the month AFTER the last complete one (i.e. the first incomplete month).
+func findFirstIncompleteMonth(settings *Settings, sourceFilter string) string {
+	dataDir := DataDir()
+	now := time.Now().In(BrusselsTZ())
+
+	// Determine which sources are expected
+	var expectedSources []string
+	for _, acc := range settings.Finance.Accounts {
+		provider := acc.Provider
+		if provider == "etherscan" {
+			provider = acc.Chain
+		}
+		if sourceFilter != "" && !strings.EqualFold(provider, sourceFilter) {
+			continue
+		}
+		// Deduplicate
+		found := false
+		for _, s := range expectedSources {
+			if s == provider {
+				found = true
+				break
+			}
+		}
+		if !found {
+			expectedSources = append(expectedSources, provider)
+		}
+	}
+
+	if len(expectedSources) == 0 {
+		return fmt.Sprintf("%d-%02d", now.Year(), now.Month())
+	}
+
+	// Walk backwards from current month, max 24 months
+	for i := 0; i < 24; i++ {
+		t := now.AddDate(0, -i, 0)
+		ym := fmt.Sprintf("%d-%02d", t.Year(), t.Month())
+		year := fmt.Sprintf("%d", t.Year())
+		month := fmt.Sprintf("%02d", t.Month())
+
+		allPresent := true
+		for _, source := range expectedSources {
+			// Check if any file exists in transactions/<source>/
+			sourceDir := filepath.Join(dataDir, year, month, "transactions", source)
+			if source == "monerium" {
+				sourceDir = filepath.Join(dataDir, year, month, "transactions", "monerium", "private")
+			}
+			entries, err := os.ReadDir(sourceDir)
+			if err != nil || len(entries) == 0 {
+				allPresent = false
+				break
+			}
+		}
+
+		if allPresent && i > 0 {
+			// This month is complete — start syncing from it (inclusive, to refresh)
+			return ym
+		}
+	}
+
+	// Nothing complete found, sync current month only
+	return fmt.Sprintf("%d-%02d", now.Year(), now.Month())
 }
 
 func fileExists(path string) bool {

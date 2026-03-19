@@ -165,7 +165,7 @@ func EventsSync(args []string, version string) error {
 		parts := strings.SplitN(ym, "-", 2)
 		year, month := parts[0], parts[1]
 
-		icsDir := filepath.Join(dataDir, year, month, "calendars", "ics")
+		icsDir := filepath.Join(dataDir, year, month, "events", "ics")
 		os.MkdirAll(icsDir, 0755)
 
 		icsPath := filepath.Join(icsDir, "luma.ics")
@@ -176,7 +176,7 @@ func EventsSync(args []string, version string) error {
 		}
 
 		content := ical.WrapICS(monthEvents, "-//Commons Hub Brussels//Luma//EN")
-		writeMonthFile(dataDir, year, month, filepath.Join("calendars", "ics", "luma.ics"), []byte(content))
+		writeMonthFile(dataDir, year, month, filepath.Join("events", "ics", "luma.ics"), []byte(content))
 	}
 	sort.Strings(affectedMonths)
 
@@ -357,7 +357,7 @@ func fetchURL(rawURL string) (string, error) {
 }
 
 func fetchLumaForMonth(dataDir, calendarID, year, month string, force bool) {
-	lumaDir := filepath.Join(dataDir, year, month, "calendars", "luma")
+	lumaDir := filepath.Join(dataDir, year, month, "events", "luma")
 	lumaPath := filepath.Join(lumaDir, calendarID+".json")
 
 	if !force {
@@ -401,7 +401,7 @@ func fetchLumaForMonth(dataDir, calendarID, year, month string, force bool) {
 	}
 
 	data, _ := json.MarshalIndent(flat, "", "  ")
-	writeMonthFile(dataDir, year, month, filepath.Join("calendars", "luma", calendarID+".json"), data)
+	writeMonthFile(dataDir, year, month, filepath.Join("events", "luma", calendarID+".json"), data)
 }
 
 func processMonth(dataDir, calendarID, year, month string) (*monthResult, error) {
@@ -428,7 +428,7 @@ func processMonth(dataDir, calendarID, year, month string) (*monthResult, error)
 	lumaEventsMap := map[string]*luma.Event{}
 	lumaEventsNameMap := map[string]*luma.Event{}
 	if calendarID != "" {
-		lumaPath := filepath.Join(dataDir, year, month, "calendars", "luma", calendarID+".json")
+		lumaPath := filepath.Join(dataDir, year, month, "events", "luma", calendarID+".json")
 		if data, err := os.ReadFile(lumaPath); err == nil {
 			var lumaEvents []luma.Event
 			if json.Unmarshal(data, &lumaEvents) == nil {
@@ -444,7 +444,7 @@ func processMonth(dataDir, calendarID, year, month string) (*monthResult, error)
 	}
 
 	// Load ICS events
-	icsPath := filepath.Join(dataDir, year, month, "calendars", "ics", "luma.ics")
+	icsPath := filepath.Join(dataDir, year, month, "events", "ics", "luma.ics")
 	icsData, err := os.ReadFile(icsPath)
 	if err != nil {
 		return nil, nil // No ICS data for this month
@@ -623,7 +623,7 @@ func processMonth(dataDir, calendarID, year, month string) (*monthResult, error)
 
 	// Add Luma API events not in ICS
 	if calendarID != "" {
-		lumaPath := filepath.Join(dataDir, year, month, "calendars", "luma", calendarID+".json")
+		lumaPath := filepath.Join(dataDir, year, month, "events", "luma", calendarID+".json")
 		if data, err := os.ReadFile(lumaPath); err == nil {
 			var lumaAPIEvents []luma.Event
 			if json.Unmarshal(data, &lumaAPIEvents) == nil {
