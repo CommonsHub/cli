@@ -24,7 +24,6 @@ var envKeys = []envKey{
 	{"ODOO_URL", "Odoo instance URL (member sync)", "e.g. https://mycompany.odoo.com"},
 	{"ODOO_LOGIN", "Odoo login email (member sync)", "The email you use to log into Odoo"},
 	{"ODOO_PASSWORD", "Odoo password or API key (member sync)", "Settings → API Keys (or your password)"},
-	{"EMAIL_HASH_SALT", "Salt for hashing member emails", "Use format: prod-<random> (e.g. prod-abc123)"},
 }
 
 // Setup runs the interactive key configuration wizard
