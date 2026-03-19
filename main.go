@@ -64,11 +64,8 @@ func main() {
 				fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
 				os.Exit(1)
 			}
-		} else if len(args) > 1 && args[1] == "stats" {
-			cmd.TransactionsStats(args[2:])
 		} else {
-			fmt.Fprintf(os.Stderr, "%sUsage: chb transactions [sync|stats]%s\n", cmd.Fmt.Yellow, cmd.Fmt.Reset)
-			os.Exit(1)
+			cmd.TransactionsStats(args[1:])
 		}
 	case "messages":
 		if len(args) > 1 && args[1] == "sync" {

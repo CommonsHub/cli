@@ -288,27 +288,6 @@ func PrintEventsStatsHelp() {
 	)
 }
 
-func PrintTransactionsStatsHelp() {
-	f := Fmt
-	fmt.Printf(`
-%schb transactions stats%s — Show transaction statistics
-
-%sUSAGE%s
-  %schb transactions stats%s [options]
-
-%sOPTIONS%s
-  %s--format json%s        Output as JSON
-  %s--help, -h%s           Show this help
-`,
-		f.Bold, f.Reset,
-		f.Bold, f.Reset,
-		f.Cyan, f.Reset,
-		f.Bold, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
-	)
-}
-
 func PrintBookingsStatsHelp() {
 	f := Fmt
 	fmt.Printf(`
