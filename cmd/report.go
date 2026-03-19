@@ -26,7 +26,7 @@ type MembersFile struct {
 }
 
 func Report(args []string) error {
-	if HasFlag(args, "--help", "-h") {
+	if HasFlag(args, "--help", "-h", "help") {
 		printReportHelp()
 		return nil
 	}

@@ -66,7 +66,14 @@ func ParseYearMonthArg(args []string) (year string, month string, found bool) {
 			continue
 		}
 		// Try to parse as year or year/month
-		parts := strings.SplitN(a, "/", 2)
+		// Supported formats: YYYY, YYYY/MM, YYYY-MM, YYYYMM
+		parts := strings.SplitN(strings.ReplaceAll(a, "-", "/"), "/", 2)
+
+		// Handle YYYYMM (no separator)
+		if len(parts) == 1 && len(parts[0]) == 6 {
+			parts = []string{parts[0][:4], parts[0][4:6]}
+		}
+
 		if len(parts[0]) != 4 {
 			continue
 		}

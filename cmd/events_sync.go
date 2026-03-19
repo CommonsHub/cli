@@ -67,7 +67,7 @@ type monthResult struct {
 }
 
 func EventsSync(args []string, version string) error {
-	if HasFlag(args, "--help", "-h") {
+	if HasFlag(args, "--help", "-h", "help") {
 		PrintEventsSyncHelp()
 		return nil
 	}

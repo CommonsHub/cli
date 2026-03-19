@@ -18,7 +18,7 @@ type BookingsStatsResult struct {
 }
 
 func BookingsStats(args []string) {
-	if HasFlag(args, "--help", "-h") {
+	if HasFlag(args, "--help", "-h", "help") {
 		PrintBookingsStatsHelp()
 		return
 	}

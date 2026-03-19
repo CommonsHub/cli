@@ -93,7 +93,7 @@ func loadAllBookings() ([]BookingEntry, error) {
 }
 
 func BookingsList(args []string) {
-	if HasFlag(args, "--help", "-h") {
+	if HasFlag(args, "--help", "-h", "help") {
 		PrintBookingsHelp()
 		return
 	}
@@ -218,7 +218,7 @@ func BookingsList(args []string) {
 }
 
 func BookingsSync(args []string) error {
-	if HasFlag(args, "--help", "-h") {
+	if HasFlag(args, "--help", "-h", "help") {
 		PrintBookingsSyncHelp()
 		return nil
 	}

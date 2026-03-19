@@ -3,7 +3,7 @@ package cmd
 import "fmt"
 
 func Rooms(args []string) {
-	if HasFlag(args, "--help", "-h") {
+	if HasFlag(args, "--help", "-h", "help") {
 		f := Fmt
 		fmt.Printf(`
 %schb rooms%s — List all rooms with pricing

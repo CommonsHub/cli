@@ -24,7 +24,7 @@ type messagesFile struct {
 }
 
 func MessagesStats(args []string) {
-	if HasFlag(args, "--help", "-h") {
+	if HasFlag(args, "--help", "-h", "help") {
 		PrintMessagesStatsHelp()
 		return
 	}

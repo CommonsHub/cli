@@ -85,7 +85,7 @@ func loadAllEvents() []EventEntry {
 }
 
 func EventsList(args []string) {
-	if HasFlag(args, "--help", "-h") {
+	if HasFlag(args, "--help", "-h", "help") {
 		PrintEventsHelp()
 		return
 	}

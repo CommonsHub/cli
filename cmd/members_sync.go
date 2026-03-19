@@ -143,7 +143,7 @@ type providerSnapshot struct {
 // ── Command ─────────────────────────────────────────────────────────────────
 
 func MembersSync(args []string) error {
-	if HasFlag(args, "--help", "-h") {
+	if HasFlag(args, "--help", "-h", "help") {
 		printMembersSyncHelp()
 		return nil
 	}

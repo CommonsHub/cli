@@ -72,7 +72,7 @@ type TransactionsCacheFile struct {
 }
 
 func TransactionsSync(args []string) error {
-	if HasFlag(args, "--help", "-h") {
+	if HasFlag(args, "--help", "-h", "help") {
 		printTransactionsSyncHelp()
 		return nil
 	}

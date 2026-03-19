@@ -17,7 +17,7 @@ type dirSize struct {
 
 // Stats shows data directory statistics
 func Stats(args []string) {
-	if HasFlag(args, "--help", "-h") {
+	if HasFlag(args, "--help", "-h", "help") {
 		PrintStatsHelp()
 		return
 	}

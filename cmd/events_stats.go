@@ -19,7 +19,7 @@ type EventsStatsResult struct {
 }
 
 func EventsStats(args []string) {
-	if HasFlag(args, "--help", "-h") {
+	if HasFlag(args, "--help", "-h", "help") {
 		PrintEventsStatsHelp()
 		return
 	}

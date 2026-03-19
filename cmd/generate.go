@@ -400,7 +400,7 @@ func getAllChannelIDs() []string {
 // ── Generate command ────────────────────────────────────────────────────────
 
 func Generate(args []string) error {
-	if HasFlag(args, "--help", "-h") {
+	if HasFlag(args, "--help", "-h", "help") {
 		printGenerateHelp()
 		return nil
 	}

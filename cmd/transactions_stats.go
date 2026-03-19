@@ -24,7 +24,7 @@ type transactionsFile struct {
 }
 
 func TransactionsStats(args []string) {
-	if HasFlag(args, "--help", "-h") {
+	if HasFlag(args, "--help", "-h", "help") {
 		PrintTransactionsStatsHelp()
 		return
 	}
