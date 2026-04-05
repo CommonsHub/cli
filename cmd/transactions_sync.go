@@ -83,6 +83,7 @@ func TransactionsSync(args []string) error {
 	}
 
 	force := HasFlag(args, "--force")
+	noNostr := HasFlag(args, "--no-nostr")
 	monthFilter := GetOption(args, "--month")
 	sourceFilter := strings.ToLower(GetOption(args, "--source"))
 
@@ -242,6 +243,53 @@ func TransactionsSync(args []string) error {
 
 		if saved > 0 {
 			fmt.Printf("    %s✓ Saved %d months%s\n", Fmt.Green, saved, Fmt.Reset)
+		}
+
+		// Fetch Nostr metadata for all transfers
+		if !noNostr && acc.ChainID != 0 && len(transfers) > 0 {
+			fmt.Printf("    %sFetching Nostr metadata...%s", Fmt.Dim, Fmt.Reset)
+			txHashes := make([]string, 0, len(transfers))
+			addressSet := map[string]struct{}{}
+			for _, tx := range transfers {
+				txHashes = append(txHashes, tx.Hash)
+				addressSet[strings.ToLower(tx.From)] = struct{}{}
+				addressSet[strings.ToLower(tx.To)] = struct{}{}
+			}
+			addresses := make([]string, 0, len(addressSet))
+			for a := range addressSet {
+				addresses = append(addresses, a)
+			}
+			txMeta, addrMeta, nostrErr := FetchNostrMetadata(acc.ChainID, txHashes, addresses)
+			if nostrErr != nil {
+				fmt.Printf(" %s✗ %v%s\n", Fmt.Red, nostrErr, Fmt.Reset)
+			} else {
+				fmt.Printf(" %s✓ %d tx, %d address annotations%s\n", Fmt.Green, len(txMeta), len(addrMeta), Fmt.Reset)
+				// Collect affected months to write per-month nostr-metadata.json
+				type monthKey struct{ year, month string }
+				byMonth := map[monthKey][]TokenTransfer{}
+				for ym, monthTxs := range groupTransfersByMonth(transfers) {
+					if ym < startMonth || ym > endMonth {
+						continue
+					}
+					parts := strings.Split(ym, "-")
+					if len(parts) != 2 {
+						continue
+					}
+					byMonth[monthKey{parts[0], parts[1]}] = monthTxs
+				}
+				dataDir := DataDir()
+				for mk := range byMonth {
+					nostrCache := NostrMetadataCache{
+						FetchedAt:    time.Now().UTC().Format(time.RFC3339),
+						ChainID:      acc.ChainID,
+						Transactions: txMeta,
+						Addresses:    addrMeta,
+					}
+					nostrData, _ := json.MarshalIndent(nostrCache, "", "  ")
+					nostrRelPath := filepath.Join("finance", acc.Chain, "nostr-metadata.json")
+					writeMonthFile(dataDir, mk.year, mk.month, nostrRelPath, nostrData)
+				}
+			}
 		}
 
 		// Rate limit between accounts
@@ -824,13 +872,15 @@ func printTransactionsSyncHelp() {
 %sOPTIONS%s
   %s<year>%s                  Sync all months of a year (e.g. 2025)
   %s<year/month>%s            Sync a specific month (e.g. 2025/03)
-  %s--source%s <name>         Sync only: gnosis, stripe, monerium
+  %s--source%s <name>         Sync only: gnosis, celo, stripe, monerium
   %s--month%s <YYYY-MM>       Alias for year/month filter
   %s--force%s                 Re-fetch even if cached
+  %s--no-nostr%s              Skip Nostr metadata fetch
   %s--help, -h%s              Show this help
 
 %sSOURCES%s
-  %sgnosis%s      ERC20 token transfers via Etherscan V2 API
+  %sgnosis%s      ERC20 token transfers via Etherscan V2 API (Gnosis Chain)
+  %scelo%s        ERC20 token transfers via Etherscan V2 API (Celo)
   %sstripe%s      Balance transactions from Stripe
   %smonerium%s    SEPA orders from Monerium (stored in finance/monerium/private/)
 
@@ -841,34 +891,45 @@ func printTransactionsSyncHelp() {
   %sMONERIUM_CLIENT_SECRET%s    Monerium OAuth client secret
   %sMONERIUM_ENV%s              "production" (default) or "sandbox"
 
+%sNOSTR%s
+  For blockchain sources (gnosis, celo), Nostr metadata is automatically fetched
+  from txinfo relays (NIP-73). Address names and transaction descriptions from
+  Nostr annotations are used when generating reports. Use %s--no-nostr%s to skip.
+
 %sEXAMPLES%s
   %schb transactions sync%s                       Sync all sources, last 2 months
   %schb transactions sync --source monerium%s     Monerium only
   %schb transactions sync 2025 --source stripe%s  Stripe for all of 2025
+  %schb transactions sync --no-nostr%s            Skip Nostr metadata fetching
 `,
-		f.Bold, f.Reset,
-		f.Bold, f.Reset,
-		f.Cyan, f.Reset,
-		f.Bold, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
-		f.Bold, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Bold, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
-		f.Bold, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
+		f.Bold, f.Reset, // 1: title
+		f.Bold, f.Reset, // 2: USAGE
+		f.Cyan, f.Reset, // 3: chb transactions sync
+		f.Bold, f.Reset, // 4: OPTIONS
+		f.Yellow, f.Reset, // 5: <year>
+		f.Yellow, f.Reset, // 6: <year/month>
+		f.Yellow, f.Reset, // 7: --source
+		f.Yellow, f.Reset, // 8: --month
+		f.Yellow, f.Reset, // 9: --force
+		f.Yellow, f.Reset, // 10: --no-nostr
+		f.Yellow, f.Reset, // 11: --help
+		f.Bold, f.Reset, // 12: SOURCES
+		f.Cyan, f.Reset, // 13: gnosis
+		f.Cyan, f.Reset, // 14: celo
+		f.Cyan, f.Reset, // 15: stripe
+		f.Cyan, f.Reset, // 16: monerium
+		f.Bold, f.Reset, // 17: ENVIRONMENT
+		f.Yellow, f.Reset, // 18: ETHERSCAN_API_KEY
+		f.Yellow, f.Reset, // 19: STRIPE_SECRET_KEY
+		f.Yellow, f.Reset, // 20: MONERIUM_CLIENT_ID
+		f.Yellow, f.Reset, // 21: MONERIUM_CLIENT_SECRET
+		f.Yellow, f.Reset, // 22: MONERIUM_ENV
+		f.Bold, f.Reset, // 23: NOSTR
+		f.Yellow, f.Reset, // 24: --no-nostr in nostr section
+		f.Bold, f.Reset, // 25: EXAMPLES
+		f.Cyan, f.Reset, // 26: sync all
+		f.Cyan, f.Reset, // 27: --source monerium
+		f.Cyan, f.Reset, // 28: 2025 --source stripe
+		f.Cyan, f.Reset, // 29: --no-nostr example
 	)
 }
