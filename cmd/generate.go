@@ -1486,6 +1486,13 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 			return
 		}
 
+		// Load Nostr metadata if available
+		var nostrMeta NostrMetadataCache
+		nostrPath := filepath.Join(chainDir, "nostr-metadata.json")
+		if data, err := os.ReadFile(nostrPath); err == nil {
+			json.Unmarshal(data, &nostrMeta)
+		}
+
 		for _, e := range entries {
 			if e.IsDir() {
 				continue
@@ -1542,7 +1549,7 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 				fmt.Sscanf(tx.TimeStamp, "%d", &ts)
 
 				chainStr := chain
-				transactions = append(transactions, TransactionEntry{
+				entry := TransactionEntry{
 					ID:               fmt.Sprintf("%s:%s", chain, tx.Hash[:Min(len(tx.Hash), 16)]),
 					TxHash:           tx.Hash,
 					Provider:         "etherscan",
@@ -1559,7 +1566,31 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 					Type:             txType,
 					Counterparty:     counterparty,
 					Timestamp:        ts,
-				})
+				}
+
+				// Enrich with Nostr metadata
+				if nostrMeta.Transactions != nil {
+					if txMeta, ok := nostrMeta.Transactions[strings.ToLower(tx.Hash)]; ok {
+						if entry.Metadata == nil {
+							entry.Metadata = map[string]interface{}{}
+						}
+						if txMeta.Description != "" {
+							entry.Metadata["description"] = txMeta.Description
+						}
+						for k, v := range txMeta.Tags {
+							entry.Metadata[k] = v
+						}
+					}
+				}
+				if nostrMeta.Addresses != nil {
+					if addrMeta, ok := nostrMeta.Addresses[strings.ToLower(counterparty)]; ok {
+						if addrMeta.Name != "" {
+							entry.Counterparty = addrMeta.Name
+						}
+					}
+				}
+
+				transactions = append(transactions, entry)
 			}
 		}
 	}
