@@ -135,12 +135,10 @@ func Stats(args []string) {
 				continue
 			}
 
+			// Process all currencies, EUR or otherwise
 			currency := tx.Currency
 			if currency == "" {
 				currency = "EUR"
-			}
-			if !isEURCurrency(currency) {
-				continue // only EUR in the main summary
 			}
 
 			amount := tx.NormalizedAmount
@@ -156,15 +154,18 @@ func Stats(args []string) {
 				source = "unknown"
 			}
 
-			ss, ok := sourceTotals[source]
+			// Key by source + currency to keep EUR/CHT separate
+			sourceKey := source + ":" + currency
+			ss, ok := sourceTotals[sourceKey]
 			if !ok {
 				ss = &txSummary{}
-				sourceTotals[source] = ss
+				sourceTotals[sourceKey] = ss
 			}
 
 			absAmount := math.Abs(amount)
 			ms.Count++
 			ss.Count++
+
 			if tx.Type == "CREDIT" || amount > 0 {
 				ms.In += absAmount
 				ss.In += absAmount
@@ -180,33 +181,27 @@ func Stats(args []string) {
 	}
 
 	if grandTx.Count > 0 {
-		net := grandTx.In - grandTx.Out
+		// Display EUR and tokens separately
 		fmt.Printf("\n%s💰 Transactions%s (%d)\n", Fmt.Bold, Fmt.Reset, grandTx.Count)
-		fmt.Printf("  %s↑ In:%s  %s\n", Fmt.Green, Fmt.Reset, fmtEUR(grandTx.In))
-		fmt.Printf("  %s↓ Out:%s %s\n", Fmt.Red, Fmt.Reset, fmtEUR(grandTx.Out))
-		fmt.Printf("  %sNet:%s  %s\n", Fmt.Bold, Fmt.Reset, fmtEURSigned(net))
+		
+		// 1. EUR section
+		fmt.Printf("  %sEUR Totals:%s\n", Fmt.Bold, Fmt.Reset)
+		for s, totals := range sourceTotals {
+			if strings.HasSuffix(s, ":EUR") {
+				fmt.Printf("    %-12s %4d tx  %s↑%s%s %s↓%s%s\n", 
+					strings.TrimSuffix(s, ":EUR"), totals.Count, Fmt.Green, Fmt.Reset, fmtEUR(totals.In), Fmt.Red, Fmt.Reset, fmtEUR(totals.Out))
+			}
+		}
 
-		// Per-source breakdown
-		type namedSource struct {
-			name string
-			s    *txSummary
-		}
-		var sources []namedSource
-		for name, s := range sourceTotals {
-			sources = append(sources, namedSource{name, s})
-		}
-		sort.Slice(sources, func(i, j int) bool {
-			return (sources[i].s.In + sources[i].s.Out) > (sources[j].s.In + sources[j].s.Out)
-		})
-		for _, s := range sources {
-			parts := []string{}
-			if s.s.In > 0 {
-				parts = append(parts, fmt.Sprintf("%s↑%s%s", Fmt.Green, Fmt.Reset, fmtEUR(s.s.In)))
+		// 2. Token section
+		fmt.Printf("\n  %sTokens:%s\n", Fmt.Bold, Fmt.Reset)
+		for s, totals := range sourceTotals {
+			if !strings.HasSuffix(s, ":EUR") {
+				parts := strings.Split(s, ":")
+				name, sym := parts[0], parts[1]
+				fmt.Printf("    %-12s %4d tx  %s↑%s%s %s↓%s%s\n", 
+					name, totals.Count, Fmt.Green, Fmt.Reset, fmtToken(totals.In, sym), Fmt.Red, Fmt.Reset, fmtToken(totals.Out, sym))
 			}
-			if s.s.Out > 0 {
-				parts = append(parts, fmt.Sprintf("%s↓%s%s", Fmt.Red, Fmt.Reset, fmtEUR(s.s.Out)))
-			}
-			fmt.Printf("    %-10s %4d tx  %s\n", s.name, s.s.Count, strings.Join(parts, "  "))
 		}
 
 		// Per-month breakdown (only if multiple months)
