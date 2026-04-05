@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"os/exec"
 	"runtime"
 	"strings"
 	"time"
@@ -50,6 +51,11 @@ func Update(yes bool) error {
 	}
 	defer resp.Body.Close()
 
+	// No releases yet — fall back to go install
+	if resp.StatusCode == 404 {
+		fmt.Printf("%sNo GitHub releases found, falling back to go install...%s\n", f.Dim, f.Reset)
+		return updateViaGoInstall(yes)
+	}
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("GitHub API returned %d", resp.StatusCode)
 	}
@@ -73,10 +79,11 @@ func Update(yes bool) error {
 	tarball := fmt.Sprintf("chb_%s_%s.tar.gz", goos, goarch)
 	downloadURL := fmt.Sprintf("https://github.com/CommonsHub/chb/releases/download/%s/%s", latest.TagName, tarball)
 
-	// HEAD request to get size
-	var sizeMB float64
+	// HEAD request to check if the tarball exists
 	headResp, headErr := client.Head(downloadURL)
-	if headErr == nil && headResp.StatusCode == 200 && headResp.ContentLength > 0 {
+	hasBinary := headErr == nil && headResp.StatusCode == 200
+	var sizeMB float64
+	if hasBinary && headResp.ContentLength > 0 {
 		sizeMB = float64(headResp.ContentLength) / (1024 * 1024)
 	}
 	if headResp != nil {
@@ -92,6 +99,13 @@ func Update(yes bool) error {
 	if latest.Name != "" {
 		fmt.Printf("  Name:    %s\n", latest.Name)
 	}
+
+	// No binary for this platform — fall back to go install
+	if !hasBinary {
+		fmt.Printf("\n%sNo binary for %s/%s in release, falling back to go install...%s\n", f.Dim, goos, goarch, f.Reset)
+		return updateViaGoInstall(yes)
+	}
+
 	fmt.Printf("  File:    %s\n", tarball)
 	if sizeMB > 0 {
 		fmt.Printf("  Size:    %.1f MB\n", sizeMB)
@@ -117,7 +131,7 @@ func Update(yes bool) error {
 	defer resp2.Body.Close()
 
 	if resp2.StatusCode != 200 {
-		return fmt.Errorf("download failed: HTTP %d (no binary for %s/%s?)", resp2.StatusCode, goos, goarch)
+		return fmt.Errorf("download failed: HTTP %d", resp2.StatusCode)
 	}
 
 	// Extract the binary from the tarball
@@ -155,14 +169,52 @@ func Update(yes bool) error {
 	}
 
 	fmt.Printf("\n%s✓ Updated to %s%s\n", f.Green, latest.TagName, f.Reset)
+	refreshSettings()
+	return nil
+}
 
-	// Refresh settings from GitHub
+// updateViaGoInstall falls back to go install when no release binary is available.
+func updateViaGoInstall(yes bool) error {
+	f := Fmt
+
+	// Check if go is available
+	if _, err := exec.LookPath("go"); err != nil {
+		return fmt.Errorf("no binary available and 'go' not found — install Go or wait for a release with binaries")
+	}
+
+	if !yes {
+		fmt.Printf("\n%sUpdate via go install? [Y/n]%s ", f.Yellow, f.Reset)
+		reader := bufio.NewReader(os.Stdin)
+		input, _ := reader.ReadString('\n')
+		input = strings.TrimSpace(strings.ToLower(input))
+		if input != "" && input != "y" && input != "yes" {
+			fmt.Println("Update cancelled.")
+			return nil
+		}
+	}
+
+	fmt.Printf("\n%sRunning go install...%s\n", f.Dim, f.Reset)
+
+	goCmd := exec.Command("go", "install", "github.com/CommonsHub/chb@latest")
+	goCmd.Env = append(os.Environ(), "GOPROXY=direct")
+	goCmd.Stdout = os.Stdout
+	goCmd.Stderr = os.Stderr
+
+	if err := goCmd.Run(); err != nil {
+		return fmt.Errorf("go install failed: %w", err)
+	}
+
+	fmt.Printf("\n%s✓ Updated successfully%s\n", f.Green, f.Reset)
+	refreshSettings()
+	return nil
+}
+
+func refreshSettings() {
+	f := Fmt
 	fmt.Printf("\n%sRefreshing settings...%s\n", f.Dim, f.Reset)
 	if err := DownloadSettings(chbDir()); err != nil {
 		fmt.Printf("%sCould not refresh settings:%s %v\n", f.Yellow, f.Reset, err)
 	}
-
-	return nil
 }
 
 // extractTarBinary reads a tar stream and returns the contents of the named file.
@@ -187,7 +239,6 @@ func extractTarBinary(r io.Reader, name string) ([]byte, error) {
 func resolveSymlinks(path string) (string, error) {
 	resolved, err := os.Readlink(path)
 	if err != nil {
-		// Not a symlink
 		return path, nil
 	}
 	if !strings.HasPrefix(resolved, "/") {
