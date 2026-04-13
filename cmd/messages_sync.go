@@ -132,19 +132,14 @@ func MessagesSync(args []string) (int, error) {
 		// Group by month
 		byMonth := groupMessagesByMonth(messages)
 
-		// Determine which months to save
-		// For quick sync (no --history): skip the oldest month (likely incomplete)
+		// Determine which months to save.
+		// Even quick syncs should persist every month represented in the fetched page,
+		// so latest/ and the canonical YYYY/MM cache stay aligned.
 		var monthsToSave []string
 		for ym := range byMonth {
 			monthsToSave = append(monthsToSave, ym)
 		}
 		sort.Strings(monthsToSave)
-
-		if !isSince && len(monthsToSave) > 1 {
-			oldestMonth := monthsToSave[0]
-			monthsToSave = monthsToSave[1:]
-			fmt.Printf("    %sSkipping %s (likely incomplete)%s\n", Fmt.Dim, oldestMonth, Fmt.Reset)
-		}
 
 		saved := 0
 		for _, ym := range monthsToSave {

@@ -8,7 +8,7 @@ import (
 	"github.com/CommonsHub/chb/cmd"
 )
 
-const VERSION = "2.1.6"
+const VERSION = "2.2.0"
 
 func main() {
 	cmd.LoadEnvFromConfig()
@@ -173,6 +173,11 @@ func main() {
 		cmd.AccountsCommand(args[1:])
 	case "stats":
 		cmd.Stats(args[1:])
+	case "doctor":
+		if err := cmd.Doctor(args[1:]); err != nil {
+			fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
+			os.Exit(1)
+		}
 	case "sync":
 		if err := cmd.SyncAll(args[1:], VERSION); err != nil {
 			fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)

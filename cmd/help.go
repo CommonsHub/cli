@@ -28,6 +28,7 @@ func PrintHelp(version string) {
   %smembers sync%s        Fetch membership data from Stripe/Odoo
   %sreport%s <period>     Generate monthly/yearly report
   %sstats%s               Show data directory size and breakdown
+  %sdoctor%s              Audit DATA_DIR integrity and suggest fixes
 
 %sOPTIONS%s
   %s--help, -h%s          Show help for a command
@@ -76,6 +77,7 @@ func PrintHelp(version string) {
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
 		f.Bold, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
@@ -90,6 +92,37 @@ func PrintHelp(version string) {
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
+	)
+}
+
+func PrintDoctorHelp() {
+	f := Fmt
+	fmt.Printf(`
+%schb doctor%s — Audit the local data directory
+
+%sUSAGE%s
+  %schb doctor%s
+
+%sCHECKS%s
+  • Room Discord channel directories exist in latest/messages/discord/
+  • Generated files exist when raw source data is present
+  • images.json entries use canonical year/month image paths
+  • Referenced local image files exist under DATA_DIR
+  • images.json does not contain deprecated proxyUrl fields or \u escapes
+
+%sEXIT STATUS%s
+  Returns non-zero when issues are found.
+
+%sEXAMPLES%s
+  %schb doctor%s
+`,
+		f.Bold, f.Reset,
+		f.Bold, f.Reset,
+		f.Cyan, f.Reset,
+		f.Bold, f.Reset,
+		f.Bold, f.Reset,
+		f.Bold, f.Reset,
+		f.Cyan, f.Reset,
 	)
 }
 

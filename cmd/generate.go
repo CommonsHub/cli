@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -36,7 +35,6 @@ type ActivityGridMonth struct {
 // ImageEntry represents an image in images.json
 type ImageEntry struct {
 	URL            string          `json:"url"`
-	ProxyURL       string          `json:"proxyUrl"`
 	ID             string          `json:"id"`
 	Author         ImageAuthor     `json:"author"`
 	Reactions      json.RawMessage `json:"reactions,omitempty"`
@@ -91,9 +89,9 @@ type ContributorEntry struct {
 }
 
 type MonthlyContributorsFile struct {
-	Year      string             `json:"year"`
-	Month     string             `json:"month"`
-	Summary   ContributorSummary `json:"summary"`
+	Year         string             `json:"year"`
+	Month        string             `json:"month"`
+	Summary      ContributorSummary `json:"summary"`
 	Contributors []ContributorEntry `json:"contributors"`
 	GeneratedAt  string             `json:"generatedAt"`
 }
@@ -130,14 +128,14 @@ type TopContributorsFile struct {
 
 // UserProfile is written to data/generated/profiles/{username}.json
 type UserProfile struct {
-	ID                string           `json:"id"`
-	Username          string           `json:"username"`
-	DisplayName       string           `json:"displayName"`
-	Avatar            *string          `json:"avatar"`
-	ContributionCount int              `json:"contributionCount"`
-	JoinedAt          *string          `json:"joinedAt"`
-	Introductions     []ProfileMessage `json:"introductions"`
-	Contributions     []ProfileMessage `json:"contributions"`
+	ID                string                  `json:"id"`
+	Username          string                  `json:"username"`
+	DisplayName       string                  `json:"displayName"`
+	Avatar            *string                 `json:"avatar"`
+	ContributionCount int                     `json:"contributionCount"`
+	JoinedAt          *string                 `json:"joinedAt"`
+	Introductions     []ProfileMessage        `json:"introductions"`
+	Contributions     []ProfileMessage        `json:"contributions"`
 	ImagesByMonth     map[string][]ImageEntry `json:"imagesByMonth"`
 }
 
@@ -163,8 +161,8 @@ type YearlyUsersEntry struct {
 }
 
 type YearlyUsersFile struct {
-	Year        string             `json:"year"`
-	Summary     YearlyUsersSummary `json:"summary"`
+	Year         string             `json:"year"`
+	Summary      YearlyUsersSummary `json:"summary"`
 	Contributors []YearlyUsersEntry `json:"contributors"`
 	GeneratedAt  string             `json:"generatedAt"`
 }
@@ -277,8 +275,8 @@ func LoadTransactionsWithPII(dataDir, year, month string) *TransactionsFile {
 
 // CounterpartyEntry for counterparties.json
 type CounterpartyEntry struct {
-	ID       string                  `json:"id"`
-	Metadata CounterpartyMetadata    `json:"metadata"`
+	ID       string               `json:"id"`
+	Metadata CounterpartyMetadata `json:"metadata"`
 }
 
 type CounterpartyMetadata struct {
@@ -287,9 +285,9 @@ type CounterpartyMetadata struct {
 }
 
 type CounterpartiesFile struct {
-	Month           string              `json:"month"`
-	GeneratedAt     string              `json:"generatedAt"`
-	Counterparties  []CounterpartyEntry `json:"counterparties"`
+	Month          string              `json:"month"`
+	GeneratedAt    string              `json:"generatedAt"`
+	Counterparties []CounterpartyEntry `json:"counterparties"`
 }
 
 // ── Message reading helpers ─────────────────────────────────────────────────
@@ -635,19 +633,17 @@ func generateMonthImagesGo(dataDir, year, month string) int {
 				continue
 			}
 
-			proxyURL := fmt.Sprintf("/api/discord-image-proxy?channelId=%s&messageId=%s&attachmentId=%s&timestamp=%s",
-				"", m.ID, att.ID, strings.ReplaceAll(m.Timestamp[:10], "-", ""))
-
 			totalReactions := 0
 			for _, r := range m.Reactions {
 				totalReactions += r.Count
 			}
 
 			reactionsJSON, _ := json.Marshal(convertReactions(m.Reactions))
+			ext := extFromURL(att.URL, ".jpg")
+			filePath := relativeDiscordImagePathFromTimestamp(m.Timestamp, att.ID, ext)
 
 			images = append(images, ImageEntry{
-				URL:            proxyURL,
-				ProxyURL:       proxyURL,
+				URL:            att.URL,
 				ID:             att.ID,
 				Author:         ImageAuthor{ID: m.AuthorID, Username: m.AuthorUser, DisplayName: m.AuthorName, Avatar: m.AuthorAvat},
 				Reactions:      reactionsJSON,
@@ -656,6 +652,7 @@ func generateMonthImagesGo(dataDir, year, month string) int {
 				Timestamp:      m.Timestamp,
 				ChannelID:      "", // filled below from directory scan
 				MessageID:      m.ID,
+				FilePath:       filePath,
 			})
 		}
 	}
@@ -695,10 +692,7 @@ func generateMonthImagesGo(dataDir, year, month string) int {
 				for i := range images {
 					if images[i].ID == att.ID {
 						images[i].ChannelID = channelID
-						proxyURL := fmt.Sprintf("/api/discord-image-proxy?channelId=%s&messageId=%s&attachmentId=%s&timestamp=%s",
-							channelID, m.ID, att.ID, strings.ReplaceAll(m.Timestamp[:10], "-", ""))
-						images[i].URL = proxyURL
-						images[i].ProxyURL = proxyURL
+						images[i].URL = att.URL
 					}
 				}
 			}
@@ -726,12 +720,11 @@ func generateMonthImagesGo(dataDir, year, month string) int {
 	images = unique
 
 	out := ImagesFile{Year: year, Month: month, Count: len(images), Images: images}
-	imgData, _ := json.MarshalIndent(out, "", "  ")
+	imgData, _ := marshalIndentedNoHTMLEscape(out)
 	writeMonthFile(dataDir, year, month, filepath.Join("generated", "images.json"), imgData)
 
 	return len(images)
 }
-
 
 // ── Activity grid ───────────────────────────────────────────────────────────
 
@@ -807,8 +800,8 @@ func generateMonthContributorsGo(dataDir, year, month string, settings *Settings
 
 	type userInfo struct {
 		id, username, displayName, avatar string
-		messages, mentions               int
-		description                      string
+		messages, mentions                int
+		description                       string
 	}
 
 	users := map[string]*userInfo{}
@@ -910,14 +903,12 @@ func generateMonthContributorsGo(dataDir, year, month string, settings *Settings
 
 	zeroAddr := "0x0000000000000000000000000000000000000000"
 
-	// Build wallet address → Discord user ID mapping from nostr-metadata
-	addrToDiscord := buildAddressToDiscordMap(dataDir, year, month)
-
-	// Also build Discord ID → wallet address (reverse mapping)
-	discordToAddr := map[string]string{}
-	for addr, discordID := range addrToDiscord {
-		discordToAddr[discordID] = addr
+	// Resolve Discord user IDs → wallet addresses via CardManager contract
+	var discordIDs []string
+	for _, u := range users {
+		discordIDs = append(discordIDs, u.id)
 	}
+	discordToAddr := resolveDiscordToWalletMap(discordIDs, settings)
 
 	// Build per-address token totals
 	type addrTokens struct {
@@ -2304,6 +2295,36 @@ func writeJSONFile(path string, v interface{}) error {
 	return os.WriteFile(path, data, 0644)
 }
 
+func marshalIndentedNoHTMLEscape(v interface{}) ([]byte, error) {
+	var buf strings.Builder
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(v); err != nil {
+		return nil, err
+	}
+	return []byte(strings.TrimSuffix(buf.String(), "\n")), nil
+}
+
+func relativeDiscordImagePathFromTimestamp(timestamp, attachmentID, ext string) string {
+	t, err := time.Parse(time.RFC3339Nano, timestamp)
+	if err != nil {
+		t, err = time.Parse("2006-01-02T15:04:05+00:00", timestamp)
+	}
+	if err != nil {
+		return filepath.ToSlash(filepath.Join("messages", "discord", "images", attachmentID+ext))
+	}
+	t = t.In(BrusselsTZ())
+	return filepath.ToSlash(filepath.Join(
+		fmt.Sprintf("%d", t.Year()),
+		fmt.Sprintf("%02d", t.Month()),
+		"messages",
+		"discord",
+		"images",
+		attachmentID+ext,
+	))
+}
+
 func nilIfEmpty(s string) *string {
 	if s == "" {
 		return nil
@@ -2450,79 +2471,6 @@ func loadCachedProviderSnapshots(dataDir, year, month string) []providerSnapshot
 	}
 
 	return snapshots
-}
-
-// ── Address mapping ────────────────────────────────────────────────────────
-
-var discordAvatarRe = regexp.MustCompile(`avatars/(\d+)/`)
-
-// buildAddressToDiscordMap builds a wallet address → Discord user ID mapping
-// from nostr-metadata files (which contain Discord avatar URLs).
-func buildAddressToDiscordMap(dataDir, year, month string) map[string]string {
-	result := map[string]string{}
-
-	// Search for nostr-metadata.json in all chain directories
-	financeDir := filepath.Join(dataDir, year, month, "finance")
-	chains, _ := os.ReadDir(financeDir)
-	for _, chain := range chains {
-		if !chain.IsDir() {
-			continue
-		}
-		metaPath := filepath.Join(financeDir, chain.Name(), "nostr-metadata.json")
-		data, err := os.ReadFile(metaPath)
-		if err != nil {
-			continue
-		}
-		var meta struct {
-			Addresses map[string]struct {
-				Address string `json:"address"`
-				Picture string `json:"picture"`
-			} `json:"addresses"`
-		}
-		if json.Unmarshal(data, &meta) != nil {
-			continue
-		}
-		for addr, info := range meta.Addresses {
-			if m := discordAvatarRe.FindStringSubmatch(info.Picture); len(m) == 2 {
-				result[strings.ToLower(addr)] = m[1]
-			}
-		}
-	}
-
-	// Also check latest/ if year/month is "latest"
-	if year != "latest" {
-		latestFinance := filepath.Join(dataDir, "latest", "finance")
-		chains, _ := os.ReadDir(latestFinance)
-		for _, chain := range chains {
-			if !chain.IsDir() {
-				continue
-			}
-			metaPath := filepath.Join(latestFinance, chain.Name(), "nostr-metadata.json")
-			data, err := os.ReadFile(metaPath)
-			if err != nil {
-				continue
-			}
-			var meta struct {
-				Addresses map[string]struct {
-					Address string `json:"address"`
-					Picture string `json:"picture"`
-				} `json:"addresses"`
-			}
-			if json.Unmarshal(data, &meta) != nil {
-				continue
-			}
-			for addr, info := range meta.Addresses {
-				if _, exists := result[strings.ToLower(addr)]; exists {
-					continue
-				}
-				if m := discordAvatarRe.FindStringSubmatch(info.Picture); len(m) == 2 {
-					result[strings.ToLower(addr)] = m[1]
-				}
-			}
-		}
-	}
-
-	return result
 }
 
 // ── Discord member count ───────────────────────────────────────────────────

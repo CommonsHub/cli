@@ -11,6 +11,12 @@ import (
 	"time"
 )
 
+type imageSyncScope struct {
+	Year  string
+	Month string
+	Label string
+}
+
 // ImagesSync downloads images from Discord messages and Luma event covers
 // to the local data directory.
 func ImagesSync(args []string) (int, error) {
@@ -31,7 +37,7 @@ func ImagesSync(args []string) (int, error) {
 	}
 
 	// Determine time range
-	startMonth, _ := ResolveSinceMonth(args, "messages")
+	startMonth, isHistory := ResolveSinceMonth(args, "messages")
 	posYear, posMonth, posFound := ParseYearMonthArg(args)
 
 	years := getAvailableYears(dataDir)
@@ -45,38 +51,17 @@ func ImagesSync(args []string) (int, error) {
 	skippedDiscord := 0
 	skippedLuma := 0
 
-	for _, year := range years {
-		months := getAvailableMonths(dataDir, year)
-		for _, month := range months {
-			ym := fmt.Sprintf("%s-%s", year, month)
-
-			// Filter by positional year/month
-			if posFound {
-				if posMonth != "" && (year != posYear || month != posMonth) {
-					continue
-				}
-				if posMonth == "" && year != posYear {
-					continue
-				}
-			}
-
-			// Filter by --since / --history
-			if startMonth != "" && ym < startMonth {
-				continue
-			}
-
-			// Discord images
-			if discordToken != "" {
-				d, s := syncDiscordImages(dataDir, year, month, discordToken, force)
-				totalDiscord += d
-				skippedDiscord += s
-			}
-
-			// Luma event cover images
-			l, s := syncLumaImages(dataDir, year, month, force)
-			totalLuma += l
-			skippedLuma += s
+	scopes := collectImageSyncScopes(dataDir, years, posYear, posMonth, posFound, startMonth, isHistory)
+	for _, scope := range scopes {
+		if discordToken != "" {
+			d, s := syncDiscordImages(dataDir, scope.Year, scope.Month, scope.Label, discordToken, force)
+			totalDiscord += d
+			skippedDiscord += s
 		}
+
+		l, s := syncLumaImages(dataDir, scope.Year, scope.Month, force)
+		totalLuma += l
+		skippedLuma += s
 	}
 
 	fmt.Printf("\n%s✅ Images sync complete%s\n", Fmt.Green, Fmt.Reset)
@@ -95,7 +80,7 @@ func ImagesSync(args []string) (int, error) {
 }
 
 // syncDiscordImages reads images.json for a month and downloads Discord attachments.
-func syncDiscordImages(dataDir, year, month, token string, force bool) (downloaded, skipped int) {
+func syncDiscordImages(dataDir, year, month, label, token string, force bool) (downloaded, skipped int) {
 	imagesPath := filepath.Join(dataDir, year, month, "generated", "images.json")
 	data, err := os.ReadFile(imagesPath)
 	if err != nil {
@@ -107,13 +92,14 @@ func syncDiscordImages(dataDir, year, month, token string, force bool) (download
 		return 0, 0
 	}
 
-	imagesDir := filepath.Join(dataDir, year, month, "messages", "discord", "images")
-	os.MkdirAll(imagesDir, 0755)
-
 	for _, img := range imf.Images {
 		if img.ID == "" || img.ChannelID == "" || img.MessageID == "" {
 			continue
 		}
+
+		outPath := resolveDiscordImagePath(dataDir, year, month, img)
+		imagesDir := filepath.Dir(outPath)
+		os.MkdirAll(imagesDir, 0755)
 
 		// Check if already downloaded (any extension)
 		if !force && fileExistsWithPrefix(imagesDir, img.ID) {
@@ -127,7 +113,7 @@ func syncDiscordImages(dataDir, year, month, token string, force bool) (download
 			continue
 		}
 
-		outPath := filepath.Join(imagesDir, img.ID+ext)
+		outPath = filepath.Join(imagesDir, img.ID+ext)
 		if err := downloadFile(attachmentURL, outPath); err != nil {
 			fmt.Printf("  %s⚠ Failed to download %s: %v%s\n", Fmt.Yellow, img.ID, err, Fmt.Reset)
 			continue
@@ -138,7 +124,7 @@ func syncDiscordImages(dataDir, year, month, token string, force bool) (download
 	}
 
 	if downloaded > 0 {
-		fmt.Printf("  ✓ %s-%s discord: %d downloaded\n", year, month, downloaded)
+		fmt.Printf("  ✓ %s discord: %d downloaded\n", label, downloaded)
 	}
 
 	return downloaded, skipped
@@ -301,6 +287,57 @@ func fileExistsWithPrefix(dir, prefix string) bool {
 	return false
 }
 
+func collectImageSyncScopes(dataDir string, years []string, posYear, posMonth string, posFound bool, startMonth string, isHistory bool) []imageSyncScope {
+	var scopes []imageSyncScope
+	seen := map[string]bool{}
+
+	addScope := func(year, month, label string) {
+		key := year + "/" + month
+		if seen[key] {
+			return
+		}
+		seen[key] = true
+		scopes = append(scopes, imageSyncScope{Year: year, Month: month, Label: label})
+	}
+
+	if posFound || startMonth != "" {
+		for _, year := range years {
+			for _, month := range getAvailableMonths(dataDir, year) {
+				ym := fmt.Sprintf("%s-%s", year, month)
+				if posFound {
+					if posMonth != "" && (year != posYear || month != posMonth) {
+						continue
+					}
+					if posMonth == "" && year != posYear {
+						continue
+					}
+				}
+				if startMonth != "" && ym < startMonth {
+					continue
+				}
+				addScope(year, month, year+"-"+month)
+			}
+		}
+		if isHistory {
+			addScope("latest", "", "latest")
+		}
+		return scopes
+	}
+
+	now := time.Now().In(BrusselsTZ())
+	addScope(fmt.Sprintf("%d", now.Year()), fmt.Sprintf("%02d", now.Month()), now.Format("2006-01"))
+	addScope("latest", "", "latest")
+	return scopes
+}
+
+func resolveDiscordImagePath(dataDir, year, month string, img ImageEntry) string {
+	relPath := img.FilePath
+	if relPath == "" {
+		relPath = filepath.ToSlash(filepath.Join(year, month, "messages", "discord", "images", img.ID))
+	}
+	return filepath.Join(dataDir, filepath.FromSlash(relPath))
+}
+
 func printImagesSyncHelp() {
 	f := Fmt
 	fmt.Printf(`
@@ -310,6 +347,9 @@ func printImagesSyncHelp() {
   %schb images sync%s [year[/month]] [options]
 
 %sDESCRIPTION%s
+  By default, syncs latest generated image references plus the current month.
+  With %s--history%s, also processes all historical months.
+
   Downloads images from two sources:
 
   %sDiscord attachments%s
@@ -335,7 +375,7 @@ func printImagesSyncHelp() {
   %sDISCORD_BOT_TOKEN%s    Required for Discord image downloads
 
 %sEXAMPLES%s
-  %schb images sync%s                   Download images for current month
+  %schb images sync%s                   Reconcile latest + current month images
   %schb images sync --history%s         Download all historical images
   %schb images sync 2025/03%s           Download images for March 2025
   %schb images sync --force%s           Re-download all images
@@ -344,6 +384,7 @@ func printImagesSyncHelp() {
 		f.Bold, f.Reset,
 		f.Cyan, f.Reset,
 		f.Bold, f.Reset,
+		f.Yellow, f.Reset,
 		f.Bold, f.Reset,
 		f.Bold, f.Reset,
 		f.Bold, f.Reset,

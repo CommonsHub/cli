@@ -103,11 +103,11 @@ type Settings struct {
 		Google string `json:"google"`
 		Luma   string `json:"luma"`
 	} `json:"calendars"`
-	Discord    DiscordSettings    `json:"discord"`
-	Finance            FinanceSettings            `json:"finance"`
-	Membership         MembershipSettings         `json:"membership"`
-	ContributionToken  *ContributionTokenSettings `json:"contributionToken"`
-	Accounting         *AccountingSettings        `json:"accounting,omitempty"`
+	Discord           DiscordSettings            `json:"discord"`
+	Finance           FinanceSettings            `json:"finance"`
+	Membership        MembershipSettings         `json:"membership"`
+	ContributionToken *ContributionTokenSettings `json:"contributionToken"`
+	Accounting        *AccountingSettings        `json:"accounting,omitempty"`
 }
 
 // MembershipSettings holds membership provider configuration
@@ -141,7 +141,7 @@ type DiscordSettings struct {
 
 // FinanceSettings holds finance configuration
 type FinanceSettings struct {
-	Accounts    []FinanceAccount          `json:"accounts"`
+	Accounts    []FinanceAccount           `json:"accounts"`
 	Collectives map[string]json.RawMessage `json:"collectives"`
 }
 
@@ -174,6 +174,7 @@ type RoomInfo struct {
 	TokensPerHour    float64  `json:"tokensPerHour"`
 	Features         []string `json:"features"`
 	IdealFor         []string `json:"idealFor"`
+	DiscordChannelID string   `json:"discordChannelId"`
 	GoogleCalendarID *string  `json:"googleCalendarId"`
 	MembershipReq    bool     `json:"membershipRequired,omitempty"`
 }
@@ -271,6 +272,21 @@ func GetDiscordChannelIDs(s *Settings) map[string]string {
 				result[name+"/"+subName] = id
 			}
 		}
+	}
+
+	rooms, err := LoadRooms()
+	if err != nil {
+		return result
+	}
+	for _, room := range rooms {
+		if room.DiscordChannelID == "" {
+			continue
+		}
+		key := "room/" + room.Slug
+		if key == "room/" {
+			key = "room/" + room.ID
+		}
+		result[key] = room.DiscordChannelID
 	}
 
 	return result
