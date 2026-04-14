@@ -107,6 +107,14 @@ type ContributorSummary struct {
 	TotalDiscordMembers   int     `json:"totalDiscordMembers,omitempty"`
 }
 
+type contributorsRunCache struct {
+	dataDir                   string
+	discordMemberCount        int
+	discordMemberCountFetched bool
+	wallets                   *walletResolutionCache
+	walletsDirty              bool
+}
+
 // TopContributor is the format in the global contributors.json
 type TopContributor struct {
 	ID                string  `json:"id"`
@@ -476,6 +484,13 @@ func Generate(args []string) error {
 	}
 
 	dataDir := DataDir()
+	now := time.Now().In(BrusselsTZ())
+	posYear, posMonth, posFound := ParseYearMonthArg(args)
+	startMonth, isHistory := ResolveSinceMonth(args, "")
+	if !isHistory && !posFound {
+		startMonth = DefaultRecentStartMonth(now)
+	}
+
 	fmt.Printf("\n%s🔧 Generating derived data files...%s\n", Fmt.Bold, Fmt.Reset)
 	fmt.Printf("%sDATA_DIR: %s%s\n\n", Fmt.Dim, dataDir, Fmt.Reset)
 
@@ -487,6 +502,14 @@ func Generate(args []string) error {
 
 	fmt.Printf("📋 Found %d year(s): %s\n\n", len(years), strings.Join(years, ", "))
 
+	scopes := collectGenerateScopes(dataDir, years, posYear, posMonth, posFound, startMonth)
+	scopeYears := uniqueGenerateScopeYears(scopes)
+	if len(scopes) > 0 {
+		first := scopes[0].Year + "-" + scopes[0].Month
+		last := scopes[len(scopes)-1].Year + "-" + scopes[len(scopes)-1].Month
+		fmt.Printf("%sGeneration window: %s → %s%s\n\n", Fmt.Dim, first, last, Fmt.Reset)
+	}
+
 	// Write generated/ README
 	writeGeneratedReadme(dataDir)
 
@@ -495,14 +518,11 @@ func Generate(args []string) error {
 	// 1. Generate images.json per month
 	fmt.Printf("📸 Generating images...\n")
 	totalImages := 0
-	for _, year := range years {
-		months := getAvailableMonths(dataDir, year)
-		for _, month := range months {
-			n := generateMonthImagesGo(dataDir, year, month)
-			if n > 0 {
-				fmt.Printf("  ✓ %s-%s: %d image(s)\n", year, month, n)
-				totalImages += n
-			}
+	for _, scope := range scopes {
+		n := generateMonthImagesGo(dataDir, scope.Year, scope.Month)
+		if n > 0 {
+			fmt.Printf("  ✓ %s-%s: %d image(s)\n", scope.Year, scope.Month, n)
+			totalImages += n
 		}
 	}
 
@@ -520,29 +540,28 @@ func Generate(args []string) error {
 	// 2. Generate activity grid
 	fmt.Printf("📊 Generating activity grids...\n")
 	gridData := generateActivityGridGo(dataDir, years)
-	for _, year := range years {
+	for _, year := range scopeYears {
 		generateYearActivityGridGo(dataDir, year, gridData)
 	}
 	fmt.Println()
 
 	// 3. Generate monthly contributors
 	fmt.Printf("👥 Generating monthly contributors...\n")
-	for _, year := range years {
-		months := getAvailableMonths(dataDir, year)
-		for _, month := range months {
-			n := generateMonthContributorsGo(dataDir, year, month, settings)
-			if n > 0 {
-				fmt.Printf("  ✓ %s-%s: %d contributor(s)\n", year, month, n)
-			}
+	contributorsCache := newContributorsRunCache(dataDir)
+	for _, scope := range scopes {
+		n := generateMonthContributorsGo(dataDir, scope.Year, scope.Month, settings, contributorsCache)
+		if n > 0 {
+			fmt.Printf("  ✓ %s-%s: %d contributor(s)\n", scope.Year, scope.Month, n)
 		}
 	}
 	// Also generate for latest/
 	if _, err := os.Stat(latestDir); err == nil {
-		n := generateMonthContributorsGo(dataDir, "latest", "", settings)
+		n := generateMonthContributorsGo(dataDir, "latest", "", settings, contributorsCache)
 		if n > 0 {
 			fmt.Printf("  ✓ latest: %d contributor(s)\n", n)
 		}
 	}
+	contributorsCache.save()
 	fmt.Println()
 
 	// 4. Generate top contributors (global contributors.json)
@@ -557,20 +576,17 @@ func Generate(args []string) error {
 
 	// 6. Generate yearly users
 	fmt.Printf("📅 Generating yearly users...\n")
-	for _, year := range years {
+	for _, year := range scopeYears {
 		generateYearlyUsersGo(dataDir, year, settings)
 	}
 	fmt.Println()
 
 	// 7. Generate aggregated transactions
 	fmt.Printf("💰 Generating transactions...\n")
-	for _, year := range years {
-		months := getAvailableMonths(dataDir, year)
-		for _, month := range months {
-			n := generateTransactionsGo(dataDir, year, month, settings)
-			if n > 0 {
-				fmt.Printf("  ✓ %s-%s: %d transaction(s)\n", year, month, n)
-			}
+	for _, scope := range scopes {
+		n := generateTransactionsGo(dataDir, scope.Year, scope.Month, settings)
+		if n > 0 {
+			fmt.Printf("  ✓ %s-%s: %d transaction(s)\n", scope.Year, scope.Month, n)
 		}
 	}
 	// Also generate for latest/
@@ -584,7 +600,7 @@ func Generate(args []string) error {
 
 	// 8. Generate members from cached provider snapshots
 	fmt.Printf("👥 Generating members...\n")
-	generateMembersGo(dataDir, years)
+	generateMembersGo(dataDir, scopes)
 	fmt.Println()
 
 	// 9. Generate latest events
@@ -594,11 +610,8 @@ func Generate(args []string) error {
 
 	// 10. Generate counterparties
 	fmt.Printf("🏢 Generating counterparties...\n")
-	for _, year := range years {
-		months := getAvailableMonths(dataDir, year)
-		for _, month := range months {
-			generateCounterpartiesGo(dataDir, year, month)
-		}
+	for _, scope := range scopes {
+		generateCounterpartiesGo(dataDir, scope.Year, scope.Month)
 	}
 	// Also generate for latest/
 	if _, err := os.Stat(latestDir); err == nil {
@@ -608,6 +621,46 @@ func Generate(args []string) error {
 
 	fmt.Printf("\n%s✅ All data generation complete!%s\n\n", Fmt.Green, Fmt.Reset)
 	return nil
+}
+
+type generateScope struct {
+	Year  string
+	Month string
+}
+
+func collectGenerateScopes(dataDir string, years []string, posYear, posMonth string, posFound bool, startMonth string) []generateScope {
+	var scopes []generateScope
+	for _, year := range years {
+		for _, month := range getAvailableMonths(dataDir, year) {
+			ym := year + "-" + month
+			if posFound {
+				if posMonth != "" && ym != posYear+"-"+posMonth {
+					continue
+				}
+				if posMonth == "" && !strings.HasPrefix(ym, posYear+"-") {
+					continue
+				}
+			}
+			if startMonth != "" && ym < startMonth {
+				continue
+			}
+			scopes = append(scopes, generateScope{Year: year, Month: month})
+		}
+	}
+	return scopes
+}
+
+func uniqueGenerateScopeYears(scopes []generateScope) []string {
+	seen := map[string]bool{}
+	var years []string
+	for _, scope := range scopes {
+		if seen[scope.Year] {
+			continue
+		}
+		seen[scope.Year] = true
+		years = append(years, scope.Year)
+	}
+	return years
 }
 
 // ── Image generation ────────────────────────────────────────────────────────
@@ -792,10 +845,122 @@ func generateYearActivityGridGo(dataDir, year string, grid ActivityGridData) {
 
 // ── Monthly contributors ────────────────────────────────────────────────────
 
-func generateMonthContributorsGo(dataDir, year, month string, settings *Settings) int {
+func newContributorsRunCache(dataDir string) *contributorsRunCache {
+	return &contributorsRunCache{
+		dataDir: dataDir,
+		wallets: loadWalletResolutionCache(dataDir),
+	}
+}
+
+func (c *contributorsRunCache) getDiscordMemberCount(settings *Settings) int {
+	if c == nil {
+		return fetchDiscordMemberCount(settings)
+	}
+	if !c.discordMemberCountFetched {
+		c.discordMemberCount = fetchDiscordMemberCount(settings)
+		c.discordMemberCountFetched = true
+	}
+	return c.discordMemberCount
+}
+
+func (c *contributorsRunCache) save() {
+	if c == nil || !c.walletsDirty {
+		return
+	}
+	if err := saveWalletResolutionCache(c.dataDir, c.wallets); err == nil {
+		c.walletsDirty = false
+	}
+}
+
+func contributorsOutputPath(dataDir, year, month string) string {
+	return filepath.Join(dataDir, year, month, "generated", "contributors.json")
+}
+
+func contributorInputPaths(dataDir, year, month string) []string {
+	var inputs []string
+
+	settingsPath := filepath.Join(settingsDir(), "settings.json")
+	if _, err := os.Stat(settingsPath); err == nil {
+		inputs = append(inputs, settingsPath)
+	}
+
+	imagesPath := filepath.Join(dataDir, year, month, "generated", "images.json")
+	if _, err := os.Stat(imagesPath); err == nil {
+		inputs = append(inputs, imagesPath)
+	}
+
+	discordDir := filepath.Join(dataDir, year, month, "messages", "discord")
+	if entries, err := os.ReadDir(discordDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				inputs = append(inputs, filepath.Join(discordDir, e.Name(), "messages.json"))
+			}
+		}
+	}
+
+	financeDir := filepath.Join(dataDir, year, month, "finance", "celo")
+	if entries, err := os.ReadDir(financeDir); err == nil {
+		for _, e := range entries {
+			if e.IsDir() {
+				continue
+			}
+			if e.Name() == "CHT.json" || strings.HasSuffix(e.Name(), ".CHT.json") {
+				inputs = append(inputs, filepath.Join(financeDir, e.Name()))
+			}
+		}
+	}
+
+	return inputs
+}
+
+func isGeneratedFileUpToDate(outputPath string, inputPaths []string) bool {
+	if len(inputPaths) == 0 {
+		return false
+	}
+
+	outInfo, err := os.Stat(outputPath)
+	if err != nil {
+		return false
+	}
+
+	outMod := outInfo.ModTime()
+	for _, inputPath := range inputPaths {
+		inInfo, err := os.Stat(inputPath)
+		if err != nil {
+			continue
+		}
+		if inInfo.ModTime().After(outMod) {
+			return false
+		}
+	}
+
+	return true
+}
+
+func readMonthlyContributorCount(path string) int {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return 0
+	}
+	var f MonthlyContributorsFile
+	if json.Unmarshal(data, &f) != nil {
+		return 0
+	}
+	if len(f.Contributors) > 0 {
+		return len(f.Contributors)
+	}
+	return f.Summary.TotalContributors
+}
+
+func generateMonthContributorsGo(dataDir, year, month string, settings *Settings, runCache *contributorsRunCache) int {
 	discordDir := filepath.Join(dataDir, year, month, "messages", "discord")
 	if _, err := os.Stat(discordDir); os.IsNotExist(err) {
 		return 0
+	}
+
+	outputPath := contributorsOutputPath(dataDir, year, month)
+	if isGeneratedFileUpToDate(outputPath, contributorInputPaths(dataDir, year, month)) {
+		return readMonthlyContributorCount(outputPath)
 	}
 
 	type userInfo struct {
@@ -886,19 +1051,8 @@ func generateMonthContributorsGo(dataDir, year, month string, settings *Settings
 	}
 
 	decimals := 6 // CHT default
-	if settings != nil {
-		// Try reading from settings contributionToken
-		data, _ := os.ReadFile(filepath.Join(settingsDir(), "settings.json"))
-		if data != nil {
-			var s struct {
-				ContributionToken struct {
-					Decimals int `json:"decimals"`
-				} `json:"contributionToken"`
-			}
-			if json.Unmarshal(data, &s) == nil && s.ContributionToken.Decimals > 0 {
-				decimals = s.ContributionToken.Decimals
-			}
-		}
+	if settings != nil && settings.ContributionToken != nil && settings.ContributionToken.Decimals > 0 {
+		decimals = settings.ContributionToken.Decimals
 	}
 
 	zeroAddr := "0x0000000000000000000000000000000000000000"
@@ -908,7 +1062,14 @@ func generateMonthContributorsGo(dataDir, year, month string, settings *Settings
 	for _, u := range users {
 		discordIDs = append(discordIDs, u.id)
 	}
-	discordToAddr := resolveDiscordToWalletMap(discordIDs, settings)
+	var walletCache *walletResolutionCache
+	if runCache != nil {
+		walletCache = runCache.wallets
+	}
+	discordToAddr, walletsDirty := resolveDiscordToWalletMap(discordIDs, settings, walletCache)
+	if walletsDirty && runCache != nil {
+		runCache.walletsDirty = true
+	}
 
 	// Build per-address token totals
 	type addrTokens struct {
@@ -987,6 +1148,9 @@ func generateMonthContributorsGo(dataDir, year, month string, settings *Settings
 
 	// Get Discord member count
 	discordMembers := fetchDiscordMemberCount(settings)
+	if runCache != nil {
+		discordMembers = runCache.getDiscordMemberCount(settings)
+	}
 
 	summary := ContributorSummary{
 		TotalContributors:   len(contributors),
@@ -2356,7 +2520,7 @@ func printGenerateHelp() {
 %schb generate%s — Generate derived data files from cached data
 
 %sUSAGE%s
-  %schb generate%s [options]
+  %schb generate%s [year[/month]] [options]
 
 Processes cached Discord messages, financial transactions, and events
 to produce derived data files needed by the website:
@@ -2369,15 +2533,24 @@ to produce derived data files needed by the website:
   • Yearly aggregates
 
 %sOPTIONS%s
+  %s<year>%s               Generate for a specific year
+  %s<year/month>%s         Generate for a specific month
+  %s--since%s <YYYY/MM>    Generate from a specific month onward
+  %s--history%s            Regenerate all months
   %s--help, -h%s           Show this help
 
 %sNOTE%s
-  Run after 'chb sync' to regenerate all derived data.
+  By default, only the current month and previous month are regenerated.
+  Run after 'chb sync' to refresh derived data for the recent window.
 `,
 		f.Bold, f.Reset,
 		f.Bold, f.Reset,
 		f.Cyan, f.Reset,
 		f.Bold, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Bold, f.Reset,
 	)
@@ -2387,46 +2560,44 @@ to produce derived data files needed by the website:
 
 // generateMembersGo builds members.json for each month and latest/ from cached
 // provider snapshots (written by `chb members sync`).
-func generateMembersGo(dataDir string, years []string) {
+func generateMembersGo(dataDir string, scopes []generateScope) {
 	totalMonths := 0
 	var latestMembers []Member
 	var latestSummary MembersSummary
 	var latestYM string
 
-	for _, year := range years {
-		months := getAvailableMonths(dataDir, year)
-		for _, month := range months {
-			snapshots := loadCachedProviderSnapshots(dataDir, year, month)
-			if len(snapshots) == 0 {
-				continue
-			}
-
-			members := mergeProviderSnapshots(snapshots)
-			summary := calculateMembersSummary(members)
-
-			out := MembersOutputFile{
-				Year:        year,
-				Month:       month,
-				ProductID:   "mixed",
-				GeneratedAt: time.Now().UTC().Format(time.RFC3339),
-				Summary:     summary,
-				Members:     members,
-			}
-
-			data, _ := json.MarshalIndent(out, "", "  ")
-			writeMonthFile(dataDir, year, month, filepath.Join("generated", "members.json"), data)
-			totalMonths++
-
-			ym := year + "-" + month
-			if ym > latestYM {
-				latestYM = ym
-				latestMembers = members
-				latestSummary = summary
-			}
-
-			fmt.Printf("  ✓ %s-%s: %d members (active: %d, MRR: €%.2f)\n",
-				year, month, len(members), summary.ActiveMembers, summary.MRR.Value)
+	for _, scope := range scopes {
+		year, month := scope.Year, scope.Month
+		snapshots := loadCachedProviderSnapshots(dataDir, year, month)
+		if len(snapshots) == 0 {
+			continue
 		}
+
+		members := mergeProviderSnapshots(snapshots)
+		summary := calculateMembersSummary(members)
+
+		out := MembersOutputFile{
+			Year:        year,
+			Month:       month,
+			ProductID:   "mixed",
+			GeneratedAt: time.Now().UTC().Format(time.RFC3339),
+			Summary:     summary,
+			Members:     members,
+		}
+
+		data, _ := json.MarshalIndent(out, "", "  ")
+		writeMonthFile(dataDir, year, month, filepath.Join("generated", "members.json"), data)
+		totalMonths++
+
+		ym := year + "-" + month
+		if ym > latestYM {
+			latestYM = ym
+			latestMembers = members
+			latestSummary = summary
+		}
+
+		fmt.Printf("  ✓ %s-%s: %d members (active: %d, MRR: €%.2f)\n",
+			year, month, len(members), summary.ActiveMembers, summary.MRR.Value)
 	}
 
 	// Write latest

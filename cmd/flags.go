@@ -133,7 +133,7 @@ func ParseSinceMonth(s string) (year string, month string, ok bool) {
 }
 
 // ResolveSinceMonth determines the start month for syncing.
-// Priority: --since flag > --history (scan cache) > default (current month)
+// Priority: --since flag > --history (scan cache) > caller-defined default window.
 // sourceSubdir is the subdirectory to look for within each month (e.g. "calendars", "finance", "messages")
 func ResolveSinceMonth(args []string, sourceSubdir string) (startMonth string, isHistory bool) {
 	// Check --since flag
@@ -164,6 +164,15 @@ func ResolveSinceMonth(args []string, sourceSubdir string) (startMonth string, i
 	}
 
 	return "", false
+}
+
+// DefaultRecentStartMonth returns the first month in the default "recent"
+// window: current month plus the previous month.
+func DefaultRecentStartMonth(now time.Time) string {
+	tz := BrusselsTZ()
+	current := now.In(tz)
+	start := time.Date(current.Year(), current.Month(), 1, 0, 0, 0, 0, tz).AddDate(0, -1, 0)
+	return start.Format("2006-01")
 }
 
 // findOldestCachedMonth finds the oldest month in ~/.chb/data/ that has

@@ -84,14 +84,17 @@ func DownloadSettings(dir string) error {
 
 // ContributionTokenSettings holds the contribution token config from settings.json
 type ContributionTokenSettings struct {
-	Chain       string `json:"chain"`
-	ChainID     int    `json:"chainId"`
-	RpcUrl      string `json:"rpcUrl,omitempty"`
-	ExplorerUrl string `json:"explorerUrl,omitempty"`
-	Address     string `json:"address"`
-	Name        string `json:"name"`
-	Symbol      string `json:"symbol"`
-	Decimals    int    `json:"decimals"`
+	Chain                 string `json:"chain"`
+	ChainID               int    `json:"chainId"`
+	RpcUrl                string `json:"rpcUrl,omitempty"`
+	ExplorerUrl           string `json:"explorerUrl,omitempty"`
+	Address               string `json:"address"`
+	Name                  string `json:"name"`
+	Symbol                string `json:"symbol"`
+	Decimals              int    `json:"decimals"`
+	WalletManager         string `json:"walletManager,omitempty"`
+	CardManagerAddress    string `json:"cardManagerAddress,omitempty"`
+	CardManagerInstanceID string `json:"cardManagerInstanceId,omitempty"`
 }
 
 // Settings represents settings.json
