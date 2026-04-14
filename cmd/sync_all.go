@@ -23,7 +23,7 @@ func SyncAll(args []string, version string) error {
 		fmt.Printf("\n%s🔄 Syncing everything...%s\n", Fmt.Bold, Fmt.Reset)
 	}
 
-	var newBookings, newEvents, newTx, newMessages, newImages int
+	var newBookings, newEvents, newTx, newInvoices, newBills, newAttachments, newMessages, newImages int
 
 	fmt.Printf("\n%s━━━ Calendars ━━━%s\n", Fmt.Bold, Fmt.Reset)
 	b, e, err := CalendarsSync(args)
@@ -53,6 +53,27 @@ func SyncAll(args []string, version string) error {
 		if _, err := OdooAnalyticSync(args); err != nil {
 			fmt.Printf("%s⚠ Odoo: %v%s\n", Fmt.Yellow, err, Fmt.Reset)
 		}
+
+		fmt.Printf("\n%s━━━ Invoices ━━━%s\n", Fmt.Bold, Fmt.Reset)
+		n, err = InvoicesSync(args)
+		if err != nil {
+			fmt.Printf("%s⚠ Invoices: %v%s\n", Fmt.Yellow, err, Fmt.Reset)
+		}
+		newInvoices = n
+
+		fmt.Printf("\n%s━━━ Bills ━━━%s\n", Fmt.Bold, Fmt.Reset)
+		n, err = BillsSync(args)
+		if err != nil {
+			fmt.Printf("%s⚠ Bills: %v%s\n", Fmt.Yellow, err, Fmt.Reset)
+		}
+		newBills = n
+
+		fmt.Printf("\n%s━━━ Attachments ━━━%s\n", Fmt.Bold, Fmt.Reset)
+		n, err = AttachmentsSync(args)
+		if err != nil {
+			fmt.Printf("%s⚠ Attachments: %v%s\n", Fmt.Yellow, err, Fmt.Reset)
+		}
+		newAttachments = n
 	}
 
 	// Members sync (optional, only if Stripe or Odoo configured)
@@ -76,7 +97,7 @@ func SyncAll(args []string, version string) error {
 	newImages = n
 
 	// Print summary
-	hasAny := newBookings > 0 || newTx > 0 || newMessages > 0 || newImages > 0
+	hasAny := newBookings > 0 || newTx > 0 || newInvoices > 0 || newBills > 0 || newAttachments > 0 || newMessages > 0 || newImages > 0
 	elapsed := time.Since(startedAt).Round(100 * time.Millisecond)
 	if hasAny {
 		fmt.Printf("\n%s✓ Sync complete in %s%s\n", Fmt.Green, elapsed, Fmt.Reset)
@@ -89,6 +110,15 @@ func SyncAll(args []string, version string) error {
 		}
 		if newTx > 0 {
 			fmt.Printf("  💰 %d new transactions\n", newTx)
+		}
+		if newInvoices > 0 {
+			fmt.Printf("  🧾 %d invoices\n", newInvoices)
+		}
+		if newBills > 0 {
+			fmt.Printf("  🧾 %d bills\n", newBills)
+		}
+		if newAttachments > 0 {
+			fmt.Printf("  📎 %d attachments\n", newAttachments)
 		}
 		if newMessages > 0 {
 			fmt.Printf("  💬 %d new messages\n", newMessages)

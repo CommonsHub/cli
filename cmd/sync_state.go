@@ -23,6 +23,9 @@ type SyncRunState struct {
 type SyncState struct {
 	Calendars    *SyncSourceState `json:"calendars,omitempty"`
 	Transactions *SyncSourceState `json:"transactions,omitempty"`
+	Invoices     *SyncSourceState `json:"invoices,omitempty"`
+	Bills        *SyncSourceState `json:"bills,omitempty"`
+	Attachments  *SyncSourceState `json:"attachments,omitempty"`
 	Messages     *SyncSourceState `json:"messages,omitempty"`
 	Images       *SyncSourceState `json:"images,omitempty"`
 	Runs         *SyncRunState    `json:"runs,omitempty"`
@@ -75,6 +78,12 @@ func UpdateSyncSource(source string, full bool) {
 		ss = get(&state.Calendars)
 	case "transactions":
 		ss = get(&state.Transactions)
+	case "invoices":
+		ss = get(&state.Invoices)
+	case "bills":
+		ss = get(&state.Bills)
+	case "attachments":
+		ss = get(&state.Attachments)
 	case "messages":
 		ss = get(&state.Messages)
 	case "images":
@@ -115,6 +124,12 @@ func LastSyncMonth(source string) string {
 		ss = state.Calendars
 	case "transactions":
 		ss = state.Transactions
+	case "invoices":
+		ss = state.Invoices
+	case "bills":
+		ss = state.Bills
+	case "attachments":
+		ss = state.Attachments
 	case "messages":
 		ss = state.Messages
 	case "images":
@@ -140,6 +155,12 @@ func LastSyncTime(source string) time.Time {
 		ss = state.Calendars
 	case "transactions":
 		ss = state.Transactions
+	case "invoices":
+		ss = state.Invoices
+	case "bills":
+		ss = state.Bills
+	case "attachments":
+		ss = state.Attachments
 	case "messages":
 		ss = state.Messages
 	case "images":

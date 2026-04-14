@@ -112,6 +112,26 @@ func main() {
 		default:
 			cmd.TransactionsBrowser(txArgs)
 		}
+	case "invoices":
+		if len(args) > 1 && (args[1] == "sync" || args[1] == "help" || args[1] == "--help" || args[1] == "-h") {
+			if _, err := cmd.InvoicesSync(args[1:]); err != nil {
+				fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
+				os.Exit(1)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "%sUsage: chb invoices sync [options]%s\n", cmd.Fmt.Yellow, cmd.Fmt.Reset)
+			os.Exit(1)
+		}
+	case "bills":
+		if len(args) > 1 && (args[1] == "sync" || args[1] == "help" || args[1] == "--help" || args[1] == "-h") {
+			if _, err := cmd.BillsSync(args[1:]); err != nil {
+				fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
+				os.Exit(1)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "%sUsage: chb bills sync [options]%s\n", cmd.Fmt.Yellow, cmd.Fmt.Reset)
+			os.Exit(1)
+		}
 	case "messages":
 		if len(args) > 1 && args[1] == "sync" {
 			if _, err := cmd.MessagesSync(args[2:]); err != nil {
@@ -132,6 +152,16 @@ func main() {
 			}
 		} else {
 			fmt.Fprintf(os.Stderr, "%sUsage: chb images sync [options]%s\n", cmd.Fmt.Yellow, cmd.Fmt.Reset)
+			os.Exit(1)
+		}
+	case "attachments":
+		if len(args) > 1 && (args[1] == "sync" || args[1] == "help" || args[1] == "--help" || args[1] == "-h") {
+			if _, err := cmd.AttachmentsSync(args[1:]); err != nil {
+				fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
+				os.Exit(1)
+			}
+		} else {
+			fmt.Fprintf(os.Stderr, "%sUsage: chb attachments sync [options]%s\n", cmd.Fmt.Yellow, cmd.Fmt.Reset)
 			os.Exit(1)
 		}
 	case "generate":

@@ -20,10 +20,13 @@ func PrintHelp(version string) {
   %sbookings stats%s      Show booking statistics
   %stransactions sync%s   Fetch blockchain transactions
   %stransactions stats%s  Show transaction statistics
+  %sinvoices sync%s       Fetch outgoing invoices from Odoo
+  %sbills sync%s          Fetch vendor bills from Odoo
+  %sattachments sync%s    Download invoice and bill attachments from Odoo
   %smessages sync%s       Fetch Discord messages
   %smessages stats%s      Show message statistics
   %simages sync%s         Download images from Discord and Luma
-  %ssync%s                Sync everything (events, transactions, bookings, messages, generate, images)
+  %ssync%s                Sync everything (events, transactions, invoices, bills, attachments, bookings, messages, generate, images)
   %sgenerate%s            Generate derived data files (contributors, images, etc.)
   %smembers sync%s        Fetch membership data from Stripe/Odoo
   %sreport%s <period>     Generate monthly/yearly report
@@ -46,6 +49,9 @@ func PrintHelp(version string) {
   $ chb sync 2025/11 --force             # resync everything for Nov 2025
   $ chb sync 2025 --force                # resync everything for all of 2025
   $ chb transactions sync 2025/03        # sync transactions for Mar 2025
+  $ chb invoices sync                    # sync outgoing invoices from Odoo
+  $ chb bills sync                       # sync vendor bills from Odoo
+  $ chb attachments sync                 # sync invoice/bill attachments from Odoo
   $ chb messages sync 2025              # sync messages for all of 2025
   $ chb bookings sync 2025/06            # sync bookings for Jun 2025
   $ chb report 2025/11                   # monthly report
@@ -61,6 +67,9 @@ func PrintHelp(version string) {
 		f.Bold, f.Reset,
 		f.Cyan, f.Reset,
 		f.Bold, f.Reset,
+		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
@@ -131,13 +140,16 @@ func PrintSyncAllHelp() {
 	fmt.Printf(`
 %schb sync%s — Sync all data sources
 
-%sSources:%s events (room calendars), transactions (Gnosis/Stripe), bookings (Google Calendar),
-messages (Discord), members (Stripe/Odoo)
+%sSources:%s events (room calendars), transactions (Gnosis/Stripe), invoices/bills/attachments (Odoo),
+bookings (Google Calendar), messages (Discord), members (Stripe/Odoo)
 
 %sUSAGE%s
   %schb sync%s [year[/month]] [options]
   %schb events sync%s [year[/month]] [options]
   %schb transactions sync%s [year[/month]] [options]
+  %schb invoices sync%s [year[/month]] [options]
+  %schb bills sync%s [year[/month]] [options]
+  %schb attachments sync%s [year[/month]] [options]
   %schb bookings sync%s [year[/month]] [options]
   %schb messages sync%s [year[/month]] [options]
   %schb members sync%s [options]
@@ -163,10 +175,16 @@ messages (Discord), members (Stripe/Odoo)
   %schb events sync%s                 Sync events only (latest)
   %schb events sync --history%s       Sync event history
   %schb transactions sync --since 202401%s  Sync transactions from Jan 2024
+  %schb invoices sync%s               Sync outgoing invoices (latest)
+  %schb bills sync%s                  Sync vendor bills (latest)
+  %schb attachments sync%s            Sync Odoo attachments (latest)
 `,
 		f.Bold, f.Reset,
 		f.Bold, f.Reset,
 		f.Bold, f.Reset,
+		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
@@ -184,6 +202,9 @@ messages (Discord), members (Stripe/Odoo)
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Bold, f.Reset,
+		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
