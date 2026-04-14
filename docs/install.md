@@ -10,6 +10,14 @@ curl -fsSL https://raw.githubusercontent.com/CommonsHub/chb/main/install.sh | ba
 
 This installs the latest release for your Linux architecture.
 
+## Update an existing install
+
+```bash
+chb update
+```
+
+`chb update` downloads the latest published binary from GitHub Releases. You do not need Go installed to update.
+
 ## Linux
 
 Pick the asset that matches your CPU:
@@ -20,7 +28,7 @@ Pick the asset that matches your CPU:
 Example for Linux `amd64`:
 
 ```bash
-VERSION=v2.3.2
+VERSION=v2.3.3
 ARCH=amd64
 curl -L -o /tmp/chb.tar.gz "https://github.com/CommonsHub/chb/releases/download/${VERSION}/chb_${VERSION#v}_linux_${ARCH}.tar.gz"
 tar -xzf /tmp/chb.tar.gz -C /tmp
@@ -31,13 +39,13 @@ chb --version
 Or with the installer script pinned to a specific release:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/CommonsHub/chb/main/install.sh | VERSION=v2.3.2 bash
+curl -fsSL https://raw.githubusercontent.com/CommonsHub/chb/main/install.sh | VERSION=v2.3.3 bash
 ```
 
 Example for Linux `arm64`:
 
 ```bash
-VERSION=v2.3.2
+VERSION=v2.3.3
 ARCH=arm64
 curl -L -o /tmp/chb.tar.gz "https://github.com/CommonsHub/chb/releases/download/${VERSION}/chb_${VERSION#v}_linux_${ARCH}.tar.gz"
 tar -xzf /tmp/chb.tar.gz -C /tmp
@@ -50,7 +58,7 @@ chb --version
 Each release also publishes `checksums.txt`.
 
 ```bash
-VERSION=v2.3.2
+VERSION=v2.3.3
 curl -L -O "https://github.com/CommonsHub/chb/releases/download/${VERSION}/checksums.txt"
 sha256sum -c checksums.txt --ignore-missing
 ```

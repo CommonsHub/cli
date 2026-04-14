@@ -14,10 +14,18 @@ Fastest install on Linux:
 curl -fsSL https://raw.githubusercontent.com/CommonsHub/chb/main/install.sh | bash
 ```
 
+Update an existing install:
+
+```bash
+chb update
+```
+
+`chb update` downloads the latest published binary from GitHub Releases. It does not require Go.
+
 Quick example for Linux `amd64`:
 
 ```bash
-VERSION=v2.3.2
+VERSION=v2.3.3
 curl -L -o /tmp/chb.tar.gz "https://github.com/CommonsHub/chb/releases/download/${VERSION}/chb_${VERSION#v}_linux_amd64.tar.gz"
 tar -xzf /tmp/chb.tar.gz -C /tmp
 install /tmp/chb_${VERSION#v}_linux_amd64 /usr/local/bin/chb

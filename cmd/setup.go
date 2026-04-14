@@ -38,7 +38,7 @@ func Setup() error {
 
 		for i, k := range envKeys {
 			status := fmt.Sprintf("%s☐%s", Fmt.Dim, Fmt.Reset)
-			if val, ok := existing[k.Name]; ok && val != "" {
+			if val, _, ok := resolveEnvValue(existing, k.Name); ok && val != "" {
 				status = fmt.Sprintf("%s✓%s", Fmt.Green, Fmt.Reset)
 			}
 			fmt.Printf("  %d. %s  %-22s %s%s%s\n", i+1, status, k.Name, Fmt.Dim, k.Desc, Fmt.Reset)
@@ -87,9 +87,9 @@ func Setup() error {
 		}
 
 		// Show current value masked if set
-		if val, ok := existing[k.Name]; ok && val != "" {
+		if val, source, ok := resolveEnvValue(existing, k.Name); ok && val != "" {
 			masked := maskValue(val)
-			fmt.Printf("  Current: %s%s%s\n", Fmt.Dim, masked, Fmt.Reset)
+			fmt.Printf("  Current: %s%s (%s)%s\n", Fmt.Dim, masked, source, Fmt.Reset)
 		}
 
 		fmt.Println()
@@ -164,6 +164,16 @@ func saveConfigEnv(path string, env map[string]string) error {
 	lines = append(lines, "")
 
 	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0600)
+}
+
+func resolveEnvValue(config map[string]string, key string) (value, source string, ok bool) {
+	if val := os.Getenv(key); val != "" {
+		return val, "env", true
+	}
+	if val, ok := config[key]; ok && val != "" {
+		return val, "config.env", true
+	}
+	return "", "", false
 }
 
 // LoadEnvFromConfig loads ~/.chb/config.env into os environment (if not already set)

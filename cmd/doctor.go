@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -88,6 +89,7 @@ func runDoctorChecks(dataDir string) doctorReport {
 		checkGeneratedFiles(scope, &report)
 		report.ImagesChecked += checkImagesFile(dataDir, scope, &report)
 	}
+	checkLatestHomepageEvents(dataDir, &report)
 
 	return report
 }
@@ -337,6 +339,102 @@ func checkImagesFile(dataDir string, scope doctorScope, report *doctorReport) in
 	}
 
 	return checked
+}
+
+func checkLatestHomepageEvents(dataDir string, report *doctorReport) {
+	latestEventsPath := filepath.Join(dataDir, "latest", "generated", "events.json")
+	raw, err := os.ReadFile(latestEventsPath)
+	if err != nil {
+		if hasAnyMonthlyGeneratedEvents(dataDir) {
+			report.Findings = append(report.Findings, doctorFinding{
+				Severity: "error",
+				Scope:    "latest",
+				Message:  "latest/generated/events.json is missing",
+				Fix:      "Run: chb generate",
+			})
+		}
+		return
+	}
+
+	var latest LatestEventsFile
+	if err := json.Unmarshal(raw, &latest); err != nil {
+		report.Findings = append(report.Findings, doctorFinding{
+			Severity: "error",
+			Scope:    "latest",
+			Message:  "latest/generated/events.json is not valid JSON",
+			Fix:      "Run: chb generate",
+		})
+		return
+	}
+
+	for i, ev := range latest.Events {
+		label := doctorHomepageEventLabel(i, ev)
+
+		if strings.TrimSpace(ev.Name) == "" {
+			report.Findings = append(report.Findings, doctorFinding{
+				Severity: "error",
+				Scope:    "latest",
+				Message:  fmt.Sprintf("homepage event %s is missing title", label),
+				Fix:      "Run: chb events sync --history && chb generate",
+			})
+		}
+		if strings.TrimSpace(ev.CoverImage) == "" {
+			report.Findings = append(report.Findings, doctorFinding{
+				Severity: "error",
+				Scope:    "latest",
+				Message:  fmt.Sprintf("homepage event %s is missing coverImage", label),
+				Fix:      "Run: chb events sync --history",
+			})
+		}
+		if strings.TrimSpace(ev.CoverImageLocal) == "" {
+			report.Findings = append(report.Findings, doctorFinding{
+				Severity: "error",
+				Scope:    "latest",
+				Message:  fmt.Sprintf("homepage event %s is missing coverImageLocal", label),
+				Fix:      "Run: chb images sync --history && chb generate",
+			})
+		} else {
+			fullPath := filepath.Join(dataDir, filepath.FromSlash(ev.CoverImageLocal))
+			if _, err := os.Stat(fullPath); err != nil {
+				report.Findings = append(report.Findings, doctorFinding{
+					Severity: "error",
+					Scope:    "latest",
+					Message:  fmt.Sprintf("homepage event %s references missing local cover image %q", label, ev.CoverImageLocal),
+					Fix:      "Run: chb images sync --history && chb generate",
+				})
+			}
+		}
+		if looksLikeThinEventDescription(ev.Description) {
+			report.Findings = append(report.Findings, doctorFinding{
+				Severity: "error",
+				Scope:    "latest",
+				Message:  fmt.Sprintf("homepage event %s has a thin description", label),
+				Fix:      "Run: chb events sync --history",
+			})
+		}
+	}
+}
+
+func hasAnyMonthlyGeneratedEvents(dataDir string) bool {
+	for _, year := range getAvailableYears(dataDir) {
+		for _, month := range getAvailableMonths(dataDir, year) {
+			eventsPath := filepath.Join(dataDir, year, month, "generated", "events.json")
+			if st, err := os.Stat(eventsPath); err == nil && !st.IsDir() && st.Size() > 0 {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func doctorHomepageEventLabel(index int, ev LatestEvent) string {
+	if id := strings.TrimSpace(ev.ID); id != "" {
+		return id
+	}
+	if name := strings.TrimSpace(ev.Name); name != "" {
+		return strconv.Itoa(index+1) + " (" + name + ")"
+	}
+	return strconv.Itoa(index + 1)
 }
 
 func imageMonthPrefixFromTimestamp(timestamp string) string {

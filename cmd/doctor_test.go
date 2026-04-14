@@ -60,6 +60,48 @@ func TestRunDoctorChecksHealthyData(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(monthDir, "generated", "images.json"), []byte(imagesJSON), 0644); err != nil {
 		t.Fatal(err)
 	}
+	monthEventsJSON := `{
+	  "events": [
+	    {
+	      "id": "event-1",
+	      "name": "Healthy Event",
+	      "description": "A complete homepage-ready event description with enough detail to show on the card.",
+	      "startAt": "2099-04-13T12:00:00Z",
+	      "url": "https://lu.ma/healthy-event",
+	      "coverImage": "https://images.luma.com/cover.jpg",
+	      "coverImageLocal": "2026/04/events/images/event-1.jpg"
+	    }
+	  ]
+	}`
+	if err := os.WriteFile(filepath.Join(monthDir, "generated", "events.json"), []byte(monthEventsJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dataDir, "latest", "generated"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	latestEventsJSON := `{
+	  "count": 1,
+	  "events": [
+	    {
+	      "id": "event-1",
+	      "name": "Healthy Event",
+	      "description": "A complete homepage-ready event description with enough detail to show on the card.",
+	      "startAt": "2099-04-13T12:00:00Z",
+	      "url": "https://lu.ma/healthy-event",
+	      "coverImage": "https://images.luma.com/cover.jpg",
+	      "coverImageLocal": "2026/04/events/images/event-1.jpg"
+	    }
+	  ]
+	}`
+	if err := os.MkdirAll(filepath.Join(dataDir, "2026", "04", "events", "images"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "2026", "04", "events", "images", "event-1.jpg"), []byte("jpg"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dataDir, "latest", "generated", "events.json"), []byte(latestEventsJSON), 0644); err != nil {
+		t.Fatal(err)
+	}
 
 	report := runDoctorChecks(dataDir)
 	if len(report.Findings) != 0 {
@@ -177,6 +219,94 @@ func TestRunDoctorChecksIgnoresRoomICSOnlyMonth(t *testing.T) {
 	report := runDoctorChecks(dataDir)
 	if containsDoctorMessage(report.Findings, "generated/events.json is missing") {
 		t.Fatalf("expected no events.json finding for room ICS only month, got %+v", report.Findings)
+	}
+}
+
+func TestRunDoctorChecksFindsBrokenHomepageLatestEvents(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dataDir := filepath.Join(home, ".chb", "data")
+
+	if err := os.MkdirAll(filepath.Join(home, ".chb"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".chb", "settings.json"), []byte(`{"discord":{"guildId":"g","roles":{},"channels":{}}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".chb", "rooms.json"), []byte(`{"rooms":[]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	monthDir := filepath.Join(dataDir, "2026", "04", "generated")
+	if err := os.MkdirAll(monthDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(monthDir, "events.json"), []byte(`{"events":[{"id":"monthly-1"}]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	latestDir := filepath.Join(dataDir, "latest", "generated")
+	if err := os.MkdirAll(latestDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	badLatest := `{
+	  "count": 1,
+	  "events": [
+	    {
+	      "id": "event-1",
+	      "name": "",
+	      "description": "Get up-to-date information at: https://lu.ma/event-1",
+	      "startAt": "2099-04-13T12:00:00Z",
+	      "url": "https://lu.ma/event-1",
+	      "coverImage": "",
+	      "coverImageLocal": "2026/04/events/images/missing.jpg"
+	    }
+	  ]
+	}`
+	if err := os.WriteFile(filepath.Join(latestDir, "events.json"), []byte(badLatest), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	report := runDoctorChecks(dataDir)
+	wantSubs := []string{
+		"missing title",
+		"missing coverImage",
+		"missing local cover image",
+		"has a thin description",
+	}
+	for _, sub := range wantSubs {
+		if !containsDoctorMessage(report.Findings, sub) {
+			t.Fatalf("expected finding containing %q, got %+v", sub, report.Findings)
+		}
+	}
+}
+
+func TestRunDoctorChecksFindsMissingLatestEventsFileWhenMonthlyEventsExist(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dataDir := filepath.Join(home, ".chb", "data")
+
+	if err := os.MkdirAll(filepath.Join(home, ".chb"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".chb", "settings.json"), []byte(`{"discord":{"guildId":"g","roles":{},"channels":{}}}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".chb", "rooms.json"), []byte(`{"rooms":[]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	monthDir := filepath.Join(dataDir, "2026", "04", "generated")
+	if err := os.MkdirAll(monthDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(monthDir, "events.json"), []byte(`{"events":[{"id":"monthly-1","name":"Test"}]}`), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	report := runDoctorChecks(dataDir)
+	if !containsDoctorMessage(report.Findings, "latest/generated/events.json is missing") {
+		t.Fatalf("expected missing latest events finding, got %+v", report.Findings)
 	}
 }
 

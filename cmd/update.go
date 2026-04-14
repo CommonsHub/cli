@@ -9,7 +9,6 @@ import (
 	"io"
 	"net/http"
 	"os"
-	"os/exec"
 	"runtime"
 	"strings"
 	"time"
@@ -51,10 +50,8 @@ func Update(yes bool) error {
 	}
 	defer resp.Body.Close()
 
-	// No releases yet — fall back to go install
 	if resp.StatusCode == 404 {
-		fmt.Printf("%sNo GitHub releases found, falling back to go install...%s\n", f.Dim, f.Reset)
-		return updateViaGoInstall(yes)
+		return fmt.Errorf("no GitHub releases found; chb update only installs published release binaries")
 	}
 	if resp.StatusCode != 200 {
 		return fmt.Errorf("GitHub API returned %d", resp.StatusCode)
@@ -100,10 +97,8 @@ func Update(yes bool) error {
 		fmt.Printf("  Name:    %s\n", latest.Name)
 	}
 
-	// No binary for this platform — fall back to go install
 	if !hasBinary {
-		fmt.Printf("\n%sNo binary for %s/%s in release, falling back to go install...%s\n", f.Dim, goos, goarch, f.Reset)
-		return updateViaGoInstall(yes)
+		return fmt.Errorf("no GitHub release binary available for %s/%s", goos, goarch)
 	}
 
 	fmt.Printf("  File:    %s\n", tarball)
@@ -169,42 +164,6 @@ func Update(yes bool) error {
 	}
 
 	fmt.Printf("\n%s✓ Updated to %s%s\n", f.Green, latest.TagName, f.Reset)
-	refreshSettings()
-	return nil
-}
-
-// updateViaGoInstall falls back to go install when no release binary is available.
-func updateViaGoInstall(yes bool) error {
-	f := Fmt
-
-	// Check if go is available
-	if _, err := exec.LookPath("go"); err != nil {
-		return fmt.Errorf("no binary available and 'go' not found — install Go or wait for a release with binaries")
-	}
-
-	if !yes {
-		fmt.Printf("\n%sUpdate via go install? [Y/n]%s ", f.Yellow, f.Reset)
-		reader := bufio.NewReader(os.Stdin)
-		input, _ := reader.ReadString('\n')
-		input = strings.TrimSpace(strings.ToLower(input))
-		if input != "" && input != "y" && input != "yes" {
-			fmt.Println("Update cancelled.")
-			return nil
-		}
-	}
-
-	fmt.Printf("\n%sRunning go install...%s\n", f.Dim, f.Reset)
-
-	goCmd := exec.Command("go", "install", "github.com/CommonsHub/chb@latest")
-	goCmd.Env = append(os.Environ(), "GOPROXY=direct")
-	goCmd.Stdout = os.Stdout
-	goCmd.Stderr = os.Stderr
-
-	if err := goCmd.Run(); err != nil {
-		return fmt.Errorf("go install failed: %w", err)
-	}
-
-	fmt.Printf("\n%s✓ Updated successfully%s\n", f.Green, f.Reset)
 	refreshSettings()
 	return nil
 }

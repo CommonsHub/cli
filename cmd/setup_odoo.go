@@ -38,8 +38,8 @@ func SetupOdoo() error {
 		{"ODOO_PASSWORD", "Odoo password or API key", "Settings > API Keys (recommended)"},
 	}
 	for _, k := range odooKeys {
-		if val, ok := existing[k.Name]; ok && val != "" {
-			fmt.Printf("  %s✓%s %s: %s%s%s\n", Fmt.Green, Fmt.Reset, k.Name, Fmt.Dim, maskValue(val), Fmt.Reset)
+		if val, source, ok := resolveEnvValue(existing, k.Name); ok && val != "" {
+			fmt.Printf("  %s✓%s %s: %s%s (%s)%s\n", Fmt.Green, Fmt.Reset, k.Name, Fmt.Dim, maskValue(val), source, Fmt.Reset)
 		} else {
 			fmt.Printf("  %s☐%s %s — %s\n", Fmt.Dim, Fmt.Reset, k.Name, k.Help)
 			var value string
