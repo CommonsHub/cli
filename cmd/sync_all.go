@@ -67,13 +67,6 @@ func SyncAll(args []string) error {
 			fmt.Printf("%s⚠ Bills: %v%s\n", Fmt.Yellow, err, Fmt.Reset)
 		}
 		newBills = n
-
-		fmt.Printf("\n%s━━━ Attachments ━━━%s\n", Fmt.Bold, Fmt.Reset)
-		n, err = AttachmentsSync(args)
-		if err != nil {
-			fmt.Printf("%s⚠ Attachments: %v%s\n", Fmt.Yellow, err, Fmt.Reset)
-		}
-		newAttachments = n
 	}
 
 	// Members sync (optional, only if Stripe or Odoo configured)
@@ -84,9 +77,13 @@ func SyncAll(args []string) error {
 		}
 	}
 
-	fmt.Printf("\n%s━━━ Generate ━━━%s\n", Fmt.Bold, Fmt.Reset)
-	if err := Generate(args); err != nil {
-		fmt.Printf("%s⚠ Generate: %v%s\n", Fmt.Yellow, err, Fmt.Reset)
+	if os.Getenv("ODOO_URL") != "" {
+		fmt.Printf("\n%s━━━ Attachments ━━━%s\n", Fmt.Bold, Fmt.Reset)
+		n, err = AttachmentsSync(args)
+		if err != nil {
+			fmt.Printf("%s⚠ Attachments: %v%s\n", Fmt.Yellow, err, Fmt.Reset)
+		}
+		newAttachments = n
 	}
 
 	fmt.Printf("\n%s━━━ Images ━━━%s\n", Fmt.Bold, Fmt.Reset)
@@ -95,6 +92,11 @@ func SyncAll(args []string) error {
 		fmt.Printf("%s⚠ Images: %v%s\n", Fmt.Yellow, err, Fmt.Reset)
 	}
 	newImages = n
+
+	fmt.Printf("\n%s━━━ Generate ━━━%s\n", Fmt.Bold, Fmt.Reset)
+	if err := Generate(args); err != nil {
+		fmt.Printf("%s⚠ Generate: %v%s\n", Fmt.Yellow, err, Fmt.Reset)
+	}
 
 	// Print summary
 	hasAny := newBookings > 0 || newTx > 0 || newInvoices > 0 || newBills > 0 || newAttachments > 0 || newMessages > 0 || newImages > 0
