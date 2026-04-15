@@ -16,10 +16,17 @@ import (
 
 // ghRelease holds the fields we need from the GitHub releases API.
 type ghRelease struct {
-	TagName     string `json:"tag_name"`
-	Name        string `json:"name"`
-	PublishedAt string `json:"published_at"`
-	Body        string `json:"body"`
+	TagName     string    `json:"tag_name"`
+	Name        string    `json:"name"`
+	PublishedAt string    `json:"published_at"`
+	Body        string    `json:"body"`
+	Assets      []ghAsset `json:"assets"`
+}
+
+type ghAsset struct {
+	Name               string `json:"name"`
+	BrowserDownloadURL string `json:"browser_download_url"`
+	Size               int64  `json:"size"`
 }
 
 // Update checks for the latest GitHub release and replaces the binary.
@@ -73,18 +80,10 @@ func Update(yes bool) error {
 	// Determine OS and arch
 	goos := runtime.GOOS
 	goarch := runtime.GOARCH
-	tarball := fmt.Sprintf("chb_%s_%s.tar.gz", goos, goarch)
-	downloadURL := fmt.Sprintf("https://github.com/CommonsHub/chb/releases/download/%s/%s", latest.TagName, tarball)
-
-	// HEAD request to check if the tarball exists
-	headResp, headErr := client.Head(downloadURL)
-	hasBinary := headErr == nil && headResp.StatusCode == 200
+	asset, hasBinary := selectReleaseAsset(latest, goos, goarch)
 	var sizeMB float64
-	if hasBinary && headResp.ContentLength > 0 {
-		sizeMB = float64(headResp.ContentLength) / (1024 * 1024)
-	}
-	if headResp != nil {
-		headResp.Body.Close()
+	if hasBinary && asset.Size > 0 {
+		sizeMB = float64(asset.Size) / (1024 * 1024)
 	}
 
 	// Show latest version
@@ -98,10 +97,10 @@ func Update(yes bool) error {
 	}
 
 	if !hasBinary {
-		return fmt.Errorf("no GitHub release binary available for %s/%s", goos, goarch)
+		return fmt.Errorf("no GitHub release binary available for %s/%s in %s; published assets: %s", goos, goarch, latest.TagName, strings.Join(releaseAssetNames(latest.Assets), ", "))
 	}
 
-	fmt.Printf("  File:    %s\n", tarball)
+	fmt.Printf("  File:    %s\n", asset.Name)
 	if sizeMB > 0 {
 		fmt.Printf("  Size:    %.1f MB\n", sizeMB)
 	}
@@ -119,7 +118,7 @@ func Update(yes bool) error {
 
 	fmt.Printf("\n%sDownloading...%s\n", f.Dim, f.Reset)
 
-	resp2, err := client.Get(downloadURL)
+	resp2, err := client.Get(asset.BrowserDownloadURL)
 	if err != nil {
 		return fmt.Errorf("download failed: %w", err)
 	}
@@ -136,7 +135,7 @@ func Update(yes bool) error {
 	}
 	defer gr.Close()
 
-	newBinary, err := extractTarBinary(gr, "chb")
+	newBinary, err := extractTarBinary(gr, releaseAssetBinaryName(asset.Name))
 	if err != nil {
 		return fmt.Errorf("failed to extract binary: %w", err)
 	}
@@ -187,11 +186,53 @@ func extractTarBinary(r io.Reader, name string) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		if hdr.Name == name || strings.HasSuffix(hdr.Name, "/"+name) {
+		if hdr.Name == name || strings.HasSuffix(hdr.Name, "/"+name) || hdr.Name == "chb" || strings.HasSuffix(hdr.Name, "/chb") {
 			return io.ReadAll(tr)
 		}
 	}
 	return nil, fmt.Errorf("binary %q not found in archive", name)
+}
+
+func selectReleaseAsset(release ghRelease, goos, goarch string) (ghAsset, bool) {
+	version := normalizeVersion(release.TagName)
+	wantNames := []string{
+		fmt.Sprintf("chb_%s_%s_%s.tar.gz", version, goos, goarch),
+		fmt.Sprintf("chb_%s_%s.tar.gz", goos, goarch),
+	}
+
+	for _, want := range wantNames {
+		for _, asset := range release.Assets {
+			if asset.Name == want && asset.BrowserDownloadURL != "" {
+				return asset, true
+			}
+		}
+	}
+
+	suffix := fmt.Sprintf("_%s_%s.tar.gz", goos, goarch)
+	for _, asset := range release.Assets {
+		if strings.HasPrefix(asset.Name, "chb_") && strings.HasSuffix(asset.Name, suffix) && asset.BrowserDownloadURL != "" {
+			return asset, true
+		}
+	}
+
+	return ghAsset{}, false
+}
+
+func releaseAssetBinaryName(assetName string) string {
+	return strings.TrimSuffix(assetName, ".tar.gz")
+}
+
+func releaseAssetNames(assets []ghAsset) []string {
+	names := make([]string, 0, len(assets))
+	for _, asset := range assets {
+		if asset.Name != "" {
+			names = append(names, asset.Name)
+		}
+	}
+	if len(names) == 0 {
+		return []string{"(none)"}
+	}
+	return names
 }
 
 // resolveSymlinks resolves a path through symlinks to the real file.
