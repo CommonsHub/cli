@@ -91,7 +91,7 @@ main() {
   need_cmd tar
   need_cmd install
 
-  local os arch version version_no_v asset_name base_url tmpdir archive checksums bin_dir extracted
+  local os arch version version_no_v asset_name base_url archive checksums bin_dir extracted
 
   os="$(detect_os)"
   arch="$(detect_arch)"
@@ -110,7 +110,7 @@ main() {
   base_url="https://github.com/${REPO}/releases/download/${version}"
 
   tmpdir="$(mktemp -d)"
-  trap 'rm -rf "$tmpdir"' EXIT
+  trap 'rm -rf "${tmpdir:-}"' EXIT
 
   archive="${tmpdir}/${asset_name}.tar.gz"
   checksums="${tmpdir}/checksums.txt"

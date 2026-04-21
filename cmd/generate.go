@@ -89,8 +89,11 @@ type ContributorEntry struct {
 }
 
 type MonthlyContributorsFile struct {
-	Year         string             `json:"year"`
-	Month        string             `json:"month"`
+	Year         string             `json:"year,omitempty"`
+	Month        string             `json:"month,omitempty"`
+	Period       string             `json:"period,omitempty"`
+	Since        string             `json:"since,omitempty"`
+	Until        string             `json:"until,omitempty"`
 	Summary      ContributorSummary `json:"summary"`
 	Contributors []ContributorEntry `json:"contributors"`
 	GeneratedAt  string             `json:"generatedAt"`
@@ -1219,11 +1222,17 @@ func generateMonthContributorsGo(dataDir, year, month string, settings *Settings
 	summary.TotalTokensOut = math.Round(summary.TotalTokensOut*100) / 100
 
 	out := MonthlyContributorsFile{
-		Year:         year,
-		Month:        month,
 		Summary:      summary,
 		Contributors: contributors,
 		GeneratedAt:  time.Now().UTC().Format(time.RFC3339),
+	}
+	if !cutoff.IsZero() {
+		out.Period = fmt.Sprintf("%ddays", LatestContributorsWindowDays)
+		out.Since = cutoff.Format("2006-01-02")
+		out.Until = time.Now().UTC().Format("2006-01-02")
+	} else {
+		out.Year = year
+		out.Month = month
 	}
 
 	contribData, _ := json.MarshalIndent(out, "", "  ")
