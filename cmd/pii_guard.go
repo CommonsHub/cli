@@ -1,0 +1,165 @@
+package cmd
+
+import (
+	"encoding/json"
+	"fmt"
+	"regexp"
+	"strings"
+)
+
+// emailPattern roughly matches email addresses. Used to detect PII leaks in
+// files written outside a /private/ subdirectory.
+var emailPattern = regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
+
+// pathHasPrivateSegment reports whether the given slash- or os-separated path
+// contains a "private" path segment.
+func pathHasPrivateSegment(path string) bool {
+	for _, part := range strings.FieldsFunc(path, func(r rune) bool {
+		return r == '/' || r == '\\'
+	}) {
+		if part == "private" {
+			return true
+		}
+	}
+	return false
+}
+
+// nameFieldKeys are the JSON fields that must never contain an "@".
+var nameFieldKeys = map[string]struct{}{
+	"firstname": {},
+	"lastname":  {},
+	"name":      {},
+}
+
+// PIILeak describes a single PII leak detected in a JSON payload.
+type PIILeak struct {
+	Field string // JSON path of the offending value
+	Kind  string // "name-has-at" | "email"
+	Value string // redacted sample (email local-part masked)
+}
+
+func (l PIILeak) String() string {
+	switch l.Kind {
+	case "name-has-at":
+		return fmt.Sprintf("%s contains '@': %s", l.Field, l.Value)
+	default:
+		return fmt.Sprintf("email in %s: %s", l.Field, l.Value)
+	}
+}
+
+// validatePublicJSON scans a JSON payload for PII that must not appear outside
+// a /private/ directory. It returns:
+//   - a list of hard violations (must block the write): "@" in name fields
+//   - a list of soft violations (should warn): email-looking strings elsewhere
+//
+// The payload is only inspected when it is valid JSON; non-JSON bytes are
+// returned as (nil, nil).
+func validatePublicJSON(data []byte) (hard, soft []PIILeak) {
+	var v interface{}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return nil, nil
+	}
+	scanPII(v, "", &hard, &soft)
+	return hard, soft
+}
+
+func scanPII(v interface{}, path string, hard, soft *[]PIILeak) {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, sub := range t {
+			childPath := k
+			if path != "" {
+				childPath = path + "." + k
+			}
+			scanPII(sub, childPath, hard, soft)
+		}
+	case []interface{}:
+		for i, sub := range t {
+			childPath := fmt.Sprintf("%s[%d]", path, i)
+			scanPII(sub, childPath, hard, soft)
+		}
+	case string:
+		leaf := path
+		if idx := strings.LastIndexAny(leaf, ".["); idx >= 0 {
+			leaf = strings.TrimPrefix(leaf[idx:], ".")
+			leaf = strings.TrimSuffix(leaf, "]")
+			if i := strings.LastIndex(leaf, "["); i >= 0 {
+				leaf = leaf[:i]
+			}
+		}
+		leafLower := strings.ToLower(leaf)
+		if _, isName := nameFieldKeys[leafLower]; isName {
+			if strings.ContainsRune(t, '@') {
+				*hard = append(*hard, PIILeak{Field: path, Kind: "name-has-at", Value: redactEmail(t)})
+				return
+			}
+		}
+		if emailPattern.MatchString(t) {
+			*soft = append(*soft, PIILeak{Field: path, Kind: "email", Value: redactEmail(t)})
+		}
+	}
+}
+
+// redactEmail masks the local part of any email-looking substring so leaks can
+// be diagnosed without reproducing the PII in logs.
+func redactEmail(s string) string {
+	return emailPattern.ReplaceAllStringFunc(s, func(match string) string {
+		at := strings.IndexByte(match, '@')
+		if at <= 0 {
+			return "***"
+		}
+		local := match[:at]
+		if len(local) <= 2 {
+			return "***" + match[at:]
+		}
+		return local[:1] + "***" + match[at:]
+	})
+}
+
+// scrubNameFields rewrites firstName/lastName/name values that contain "@" so
+// the written file never leaks emails in those fields. Returns the rewritten
+// JSON bytes and the list of fields that were scrubbed.
+func scrubNameFields(data []byte) ([]byte, []PIILeak) {
+	var v interface{}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return data, nil
+	}
+	var scrubbed []PIILeak
+	rewritten := scrubNameValue(v, "", &scrubbed)
+	if len(scrubbed) == 0 {
+		return data, nil
+	}
+	out, err := json.MarshalIndent(rewritten, "", "  ")
+	if err != nil {
+		return data, scrubbed
+	}
+	return out, scrubbed
+}
+
+func scrubNameValue(v interface{}, key string, scrubbed *[]PIILeak) interface{} {
+	switch t := v.(type) {
+	case map[string]interface{}:
+		for k, sub := range t {
+			t[k] = scrubNameValue(sub, k, scrubbed)
+		}
+		return t
+	case []interface{}:
+		for i, sub := range t {
+			t[i] = scrubNameValue(sub, key, scrubbed)
+		}
+		return t
+	case string:
+		if _, isName := nameFieldKeys[strings.ToLower(key)]; isName {
+			if strings.ContainsRune(t, '@') {
+				*scrubbed = append(*scrubbed, PIILeak{Field: key, Kind: "name-has-at", Value: redactEmail(t)})
+				cleaned := sanitizePersonName(t)
+				if cleaned == "" && strings.ToLower(key) == "firstname" {
+					return "Member"
+				}
+				return cleaned
+			}
+		}
+		return t
+	}
+	return v
+}

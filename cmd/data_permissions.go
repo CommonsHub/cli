@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -51,6 +52,8 @@ func mkdirAllManagedData(path string) error {
 }
 
 func writeDataFile(path string, data []byte) error {
+	data = enforcePIIPolicy(path, data)
+
 	baseDir, ok := dataBaseForPath(path)
 	if !ok {
 		if err := os.MkdirAll(filepath.Dir(path), dataPublicDirMode); err != nil {
@@ -65,6 +68,27 @@ func writeDataFile(path string, data []byte) error {
 		return err
 	}
 	return applyDataPathPolicy(baseDir, path, false)
+}
+
+// enforcePIIPolicy scrubs name fields and warns about emails for JSON files
+// written outside a /private/ subdirectory. Non-JSON files and files inside a
+// /private/ path are returned as-is.
+func enforcePIIPolicy(path string, data []byte) []byte {
+	if !strings.HasSuffix(path, ".json") {
+		return data
+	}
+	if pathHasPrivateSegment(path) {
+		return data
+	}
+	cleaned, scrubbed := scrubNameFields(data)
+	for _, leak := range scrubbed {
+		fmt.Fprintf(os.Stderr, "⚠ PII guard: scrubbed %s in %s (%s)\n", leak.Kind, path, leak.String())
+	}
+	_, soft := validatePublicJSON(cleaned)
+	for _, leak := range soft {
+		fmt.Fprintf(os.Stderr, "⚠ PII guard: possible email in %s — %s\n", path, leak.String())
+	}
+	return cleaned
 }
 
 func dataBaseForPath(path string) (string, bool) {

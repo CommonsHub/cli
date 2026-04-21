@@ -526,14 +526,36 @@ func hashEmail(email, salt string) string {
 }
 
 func splitName(name *string) (string, string) {
-	if name == nil || *name == "" {
+	sanitized := ""
+	if name != nil {
+		sanitized = sanitizePersonName(*name)
+	}
+	if sanitized == "" {
 		return "Member", ""
 	}
-	parts := strings.Fields(*name)
+	parts := strings.Fields(sanitized)
 	if len(parts) == 1 {
 		return parts[0], ""
 	}
 	return parts[0], strings.Join(parts[1:], " ")
+}
+
+// sanitizePersonName drops whitespace-separated tokens that contain "@"
+// (typically emails that end up in Stripe/Odoo "name" fields). Used to keep
+// email addresses out of firstName/lastName/name in public outputs.
+func sanitizePersonName(s string) string {
+	if s == "" {
+		return ""
+	}
+	parts := strings.Fields(s)
+	kept := parts[:0]
+	for _, p := range parts {
+		if strings.ContainsRune(p, '@') {
+			continue
+		}
+		kept = append(kept, p)
+	}
+	return strings.Join(kept, " ")
 }
 
 // ── Merge ───────────────────────────────────────────────────────────────────
