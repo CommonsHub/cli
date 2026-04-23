@@ -856,6 +856,8 @@ func PrintOdooHelp() {
 	fmt.Printf("    %sSet balance_end_real = running balance on invalid statements%s\n\n", f.Dim, f.Reset)
 	fmt.Printf("  %s%schb odoo journals <id> --reset%s\n", f.Bold, f.Cyan, f.Reset)
 	fmt.Printf("    %sEmpty a journal (delete all statements and lines)%s\n\n", f.Dim, f.Reset)
+	fmt.Printf("  %s%schb odoo backup%s\n", f.Bold, f.Cyan, f.Reset)
+	fmt.Printf("    %sDownload a full database backup (zip of SQL dump + filestore)%s\n\n", f.Dim, f.Reset)
 }
 
 func printOdooSyncHelp() {

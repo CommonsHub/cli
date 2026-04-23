@@ -247,6 +247,11 @@ func main() {
 				fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
 				os.Exit(1)
 			}
+		case "backup":
+			if err := cmd.OdooBackup(args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
+				os.Exit(1)
+			}
 		default:
 			cmd.PrintOdooHelp()
 		}
