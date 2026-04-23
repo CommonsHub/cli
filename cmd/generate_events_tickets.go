@@ -77,7 +77,9 @@ func enrichEventsWithTicketSales(dataDir string) {
 		if err != nil {
 			return
 		}
-		if err := os.WriteFile(path, out, 0644); err != nil {
+		// Route through writeDataFile so enforcePIIPolicy scrubs name fields
+		// and warns on email-regex matches — events.json is a public path.
+		if err := writeDataFile(path, out); err != nil {
 			fmt.Printf("  %s⚠ enrich events: %s: %v%s\n", Fmt.Yellow, path, err, Fmt.Reset)
 			return
 		}
