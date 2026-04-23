@@ -49,9 +49,9 @@ func SyncAll(args []string) error {
 
 	// Odoo analytic sync (optional, only if configured)
 	if os.Getenv("ODOO_URL") != "" {
-		fmt.Printf("\n%s━━━ Odoo ━━━%s\n", Fmt.Bold, Fmt.Reset)
+		fmt.Printf("\n%s━━━ Odoo categories ━━━%s\n", Fmt.Bold, Fmt.Reset)
 		if _, err := OdooAnalyticSync(args); err != nil {
-			fmt.Printf("%s⚠ Odoo: %v%s\n", Fmt.Yellow, err, Fmt.Reset)
+			fmt.Printf("%s⚠ Odoo categories: %v%s\n", Fmt.Yellow, err, Fmt.Reset)
 		}
 
 		fmt.Printf("\n%s━━━ Invoices ━━━%s\n", Fmt.Bold, Fmt.Reset)
@@ -67,6 +67,11 @@ func SyncAll(args []string) error {
 			fmt.Printf("%s⚠ Bills: %v%s\n", Fmt.Yellow, err, Fmt.Reset)
 		}
 		newBills = n
+
+		fmt.Printf("\n%s━━━ Odoo journals (push) ━━━%s\n", Fmt.Bold, Fmt.Reset)
+		if err := odooJournalsSyncAll(args); err != nil {
+			fmt.Printf("%s⚠ Journals: %v%s\n", Fmt.Yellow, err, Fmt.Reset)
+		}
 	}
 
 	// Members sync (optional, only if Stripe or Odoo configured)

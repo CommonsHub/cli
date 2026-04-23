@@ -171,8 +171,26 @@ func main() {
 			os.Exit(1)
 		}
 	case "generate":
-		if err := cmd.Generate(args[1:]); err != nil {
-			fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
+		sub := ""
+		rest := args[1:]
+		if len(rest) > 0 {
+			sub = rest[0]
+		}
+		var genErr error
+		switch sub {
+		case "transactions", "tx":
+			genErr = cmd.GenerateTransactions(rest[1:])
+		case "events":
+			genErr = cmd.GenerateEvents(rest[1:])
+		case "messages":
+			genErr = cmd.GenerateMessages(rest[1:])
+		case "members":
+			genErr = cmd.GenerateMembers(rest[1:])
+		default:
+			genErr = cmd.Generate(rest)
+		}
+		if genErr != nil {
+			fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, genErr)
 			os.Exit(1)
 		}
 	case "members":
@@ -191,7 +209,36 @@ func main() {
 		}
 		switch subcmd {
 		case "sync":
-			if _, err := cmd.OdooAnalyticSync(args[2:]); err != nil {
+			// Meta-command: run invoices + bills + journals sync in order.
+			if err := cmd.OdooSyncAll(args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
+				os.Exit(1)
+			}
+		case "categories":
+			// Back-compat: what `chb odoo sync` used to be.
+			catArgs := args[2:]
+			if len(catArgs) > 0 && catArgs[0] == "sync" {
+				catArgs = catArgs[1:]
+			}
+			if _, err := cmd.OdooAnalyticSync(catArgs); err != nil {
+				fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
+				os.Exit(1)
+			}
+		case "invoices":
+			invArgs := args[2:]
+			if len(invArgs) > 0 && invArgs[0] == "sync" {
+				invArgs = invArgs[1:]
+			}
+			if _, err := cmd.InvoicesSync(invArgs); err != nil {
+				fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
+				os.Exit(1)
+			}
+		case "bills":
+			billArgs := args[2:]
+			if len(billArgs) > 0 && billArgs[0] == "sync" {
+				billArgs = billArgs[1:]
+			}
+			if _, err := cmd.BillsSync(billArgs); err != nil {
 				fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
 				os.Exit(1)
 			}

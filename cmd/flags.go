@@ -20,6 +20,19 @@ func HasFlag(args []string, flags ...string) bool {
 	return false
 }
 
+// filterFlag returns args with every occurrence of the given flag removed.
+// Only strips boolean flags — does not consume a following value.
+func filterFlag(args []string, flag string) []string {
+	out := make([]string, 0, len(args))
+	for _, a := range args {
+		if a == flag {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
 func GetOption(args []string, flags ...string) string {
 	for _, flag := range flags {
 		for i, a := range args {

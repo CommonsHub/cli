@@ -124,7 +124,7 @@ func TestStripe2024Balance(t *testing.T) {
 	// Sync with --until 2024
 	untilDate := time.Date(2025, 1, 1, 0, 0, 0, 0, BrusselsTZ())
 	t.Log("Syncing payouts + orphan charges...")
-	err = syncStripeToOdoo(acc, creds, uid, 0, false, false, "", untilDate)
+	_, err = syncStripeToOdoo(acc, creds, uid, 0, false, false, "", untilDate)
 	if err != nil {
 		t.Fatalf("Sync failed: %v", err)
 	}

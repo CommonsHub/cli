@@ -40,7 +40,11 @@ func BillsSync(args []string) (int, error) {
 
 	creds, err := ResolveOdooCredentials()
 	if err != nil {
-		fmt.Printf("%s⚠ %v, skipping bills sync%s\n", Fmt.Yellow, err, Fmt.Reset)
+		if quietOdooContext() {
+			odooSyncLine("bills", fmt.Sprintf("skipped (%v)", err))
+		} else {
+			fmt.Printf("%s⚠ %v, skipping bills sync%s\n", Fmt.Yellow, err, Fmt.Reset)
+		}
 		return 0, nil
 	}
 
@@ -69,9 +73,9 @@ func BillsSync(args []string) (int, error) {
 		endMonth = fmt.Sprintf("%d-%02d", now.Year(), now.Month())
 	}
 
-	fmt.Printf("\n%s🧾 Syncing Odoo vendor bills%s\n", Fmt.Bold, Fmt.Reset)
-	fmt.Printf("%sURL: %s  DB: %s%s\n", Fmt.Dim, creds.URL, creds.DB, Fmt.Reset)
-	fmt.Printf("%sMonth range: %s → %s%s\n\n", Fmt.Dim, startMonth, endMonth, Fmt.Reset)
+	odooLog("\n%s🧾 Syncing Odoo vendor bills%s\n", Fmt.Bold, Fmt.Reset)
+	odooLog("%sURL: %s  DB: %s%s\n", Fmt.Dim, creds.URL, creds.DB, Fmt.Reset)
+	odooLog("%sMonth range: %s → %s%s\n\n", Fmt.Dim, startMonth, endMonth, Fmt.Reset)
 
 	uid, err := odooAuth(creds.URL, creds.DB, creds.Login, creds.Password)
 	if err != nil || uid == 0 {
@@ -85,7 +89,7 @@ func BillsSync(args []string) (int, error) {
 
 	incremental := !force && !isSince && !posFound && !lastSyncTime.IsZero()
 	if incremental {
-		fmt.Printf("  %sIncremental since %s%s\n", Fmt.Dim, lastSyncTime.In(BrusselsTZ()).Format(time.RFC3339), Fmt.Reset)
+		odooLog("  %sIncremental since %s%s\n", Fmt.Dim, lastSyncTime.In(BrusselsTZ()).Format(time.RFC3339), Fmt.Reset)
 	}
 
 	cachedByMonth := map[string]map[int]OdooOutgoingInvoice{}
@@ -99,13 +103,17 @@ func BillsSync(args []string) (int, error) {
 	}
 
 	if incremental && len(rawBills) == 0 {
-		fmt.Printf("  %s✓ Up to date%s\n\n", Fmt.Green, Fmt.Reset)
+		if quietOdooContext() {
+			odooSyncLine("bills", "already in sync")
+		} else {
+			fmt.Printf("  %s✓ Up to date%s\n\n", Fmt.Green, Fmt.Reset)
+		}
 		UpdateSyncSource("bills", isFullSync)
 		UpdateSyncActivity(isFullSync)
 		return 0, nil
 	}
 
-	fmt.Printf("  %sFetched %d bill(s)%s\n", Fmt.Dim, len(rawBills), Fmt.Reset)
+	odooLog("  %sFetched %d bill(s)%s\n", Fmt.Dim, len(rawBills), Fmt.Reset)
 
 	enriched, err := enrichOutgoingInvoices(creds, uid, rawBills, true)
 	if err != nil {
@@ -181,7 +189,7 @@ func BillsSync(args []string) (int, error) {
 		}
 
 		if !force && isBillMonthCacheUnchanged(DataDir(), year, month, publicOut, privateOut) {
-			fmt.Printf("  ⏭ %s: %d bill(s) unchanged\n", ym, len(bills))
+			odooLog("  ⏭ %s: %d bill(s) unchanged\n", ym, len(bills))
 			continue
 		}
 
@@ -196,11 +204,19 @@ func BillsSync(args []string) (int, error) {
 			continue
 		}
 
-		fmt.Printf("  ✓ %s: %d bill(s)\n", ym, len(bills))
+		odooLog("  ✓ %s: %d bill(s)\n", ym, len(bills))
 		savedBills += len(bills)
 	}
 
-	fmt.Printf("\n%s✓ Done!%s %d bill(s) synced\n\n", Fmt.Green, Fmt.Reset, savedBills)
+	if quietOdooContext() {
+		status := fmt.Sprintf("%d new bill(s) downloaded", savedBills)
+		if startMonth != endMonth {
+			status = fmt.Sprintf("%s (%s..%s)", status, startMonth, endMonth)
+		}
+		odooSyncLine("bills", status)
+	} else {
+		fmt.Printf("\n%s✓ Done!%s %d bill(s) synced\n\n", Fmt.Green, Fmt.Reset, savedBills)
+	}
 	UpdateSyncSource("bills", isFullSync)
 	UpdateSyncActivity(isFullSync)
 	return savedBills, nil

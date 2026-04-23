@@ -91,6 +91,7 @@ func runDoctorChecks(dataDir string) doctorReport {
 	}
 	checkLatestHomepageEvents(dataDir, &report)
 	checkOdooJournalBalances(&report)
+	checkAccountBalanceAgainstLive(&report)
 
 	return report
 }
@@ -146,6 +147,108 @@ func checkOdooJournalBalances(report *doctorReport) {
 				Scope:    scope,
 				Message:  msg,
 				Fix:      fix,
+			})
+		}
+	}
+}
+
+// checkAccountBalanceAgainstLive compares, per linked account:
+//   - the on-chain / Stripe live tx count vs the local cache count vs the
+//     Odoo journal line count
+//   - the live balance vs the Odoo journal line sum
+//
+// Emits doctor findings (as warnings) on any mismatch. Skipped silently when
+// Odoo credentials aren't configured.
+func checkAccountBalanceAgainstLive(report *doctorReport) {
+	creds, err := ResolveOdooCredentials()
+	if err != nil {
+		return
+	}
+	uid, err := odooAuth(creds.URL, creds.DB, creds.Login, creds.Password)
+	if err != nil || uid == 0 {
+		return
+	}
+
+	etherscanKey := os.Getenv("ETHERSCAN_API_KEY")
+	if etherscanKey == "" {
+		etherscanKey = os.Getenv("GNOSISSCAN_API_KEY")
+	}
+
+	for _, acc := range LoadAccountConfigs() {
+		if acc.OdooJournalID == 0 {
+			continue
+		}
+		scope := fmt.Sprintf("accounts/%s", acc.Slug)
+		fix := fmt.Sprintf("Run: chb accounts %s sync  (then: chb odoo journals %d fix)", acc.Slug, acc.OdooJournalID)
+
+		// Transaction-count comparison.
+		localCount := len(loadAccountTransactions(&acc))
+		odooCount := odooJournalLineCount(creds, uid, acc.OdooJournalID)
+		if acc.Provider == "etherscan" && acc.Address != "" && acc.Token != nil && etherscanKey != "" {
+			fa := FinanceAccount{
+				Provider:  acc.Provider,
+				Chain:     acc.Chain,
+				ChainID:   acc.ChainID,
+				Address:   acc.Address,
+				AccountID: acc.AccountID,
+				Slug:      acc.Slug,
+				Token:     acc.Token,
+			}
+			transfers, err := fetchTokenTransfers(fa, etherscanKey)
+			if err == nil {
+				onchainCount := len(transfers)
+				if onchainCount != localCount || localCount != odooCount {
+					report.Findings = append(report.Findings, doctorFinding{
+						Severity: "warning",
+						Scope:    scope,
+						Message: fmt.Sprintf("tx counts disagree: on-chain %d, local %d, Odoo %d",
+							onchainCount, localCount, odooCount),
+						Fix: fix,
+					})
+				}
+			}
+		} else if localCount != odooCount {
+			report.Findings = append(report.Findings, doctorFinding{
+				Severity: "warning",
+				Scope:    scope,
+				Message:  fmt.Sprintf("tx counts disagree: local %d, Odoo %d", localCount, odooCount),
+				Fix:      fix,
+			})
+		}
+
+		// Live vs Odoo balance comparison.
+		live, _, liveErr := refreshAccountBalance(&acc)
+		if liveErr != nil {
+			report.Findings = append(report.Findings, doctorFinding{
+				Severity: "warning",
+				Scope:    scope,
+				Message:  fmt.Sprintf("could not fetch live balance: %v", liveErr),
+				Fix:      "Check API keys (ETHERSCAN_API_KEY / STRIPE_SECRET_KEY) and connectivity",
+			})
+			continue
+		}
+		odooBalance, err := odooJournalLineSum(creds, uid, acc.OdooJournalID)
+		if err != nil {
+			continue
+		}
+		diff := odooBalance - live
+		if diff > 0.01 || diff < -0.01 {
+			currency := acc.Currency
+			if currency == "" && acc.Token != nil {
+				currency = acc.Token.Symbol
+			}
+			if currency == "" {
+				currency = "EUR"
+			}
+			report.Findings = append(report.Findings, doctorFinding{
+				Severity: "error",
+				Scope:    scope,
+				Message: fmt.Sprintf("balance mismatch: Odoo %s ≠ live %s (off by %s)",
+					formatBalance(odooBalance, currency),
+					formatBalance(live, currency),
+					formatBalance(diff, currency)),
+				Fix: fmt.Sprintf("Run: chb odoo journals %d fix  |  chb accounts %s sync --force",
+					acc.OdooJournalID, acc.Slug),
 			})
 		}
 	}

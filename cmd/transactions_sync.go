@@ -32,6 +32,13 @@ type StripeTransaction struct {
 	CustomerName  string `json:"customerName,omitempty"`
 	CustomerEmail string `json:"customerEmail,omitempty"`
 	ChargeID      string `json:"chargeId,omitempty"`
+
+	// Populated for BTs whose source is a payout (type="payout")
+	PayoutID                  string `json:"payoutId,omitempty"`
+	PayoutAutomatic           bool   `json:"payoutAutomatic,omitempty"`
+	PayoutStatementDescriptor string `json:"payoutStatementDescriptor,omitempty"`
+	PayoutBankLast4           string `json:"payoutBankLast4,omitempty"`
+	PayoutArrivalDate         int64  `json:"payoutArrivalDate,omitempty"`
 }
 
 // StripeListResponse is the response from /v1/balance_transactions
@@ -104,6 +111,7 @@ func TransactionsSync(args []string) (int, error) {
 	noNostr := HasFlag(args, "--no-nostr")
 	monthFilter := GetOption(args, "--month")
 	sourceFilter := strings.ToLower(GetOption(args, "--source"))
+	slugFilter := strings.ToLower(GetOption(args, "--slug"))
 
 	// --limit N: only fetch the N most recent transactions (applies to Stripe)
 	limitStr := GetOption(args, "--limit")
@@ -159,6 +167,9 @@ func TransactionsSync(args []string) (int, error) {
 		etherscanAccounts := make([]FinanceAccount, 0)
 		for _, acc := range settings.Finance.Accounts {
 			if acc.Provider == "etherscan" && acc.Token != nil {
+				if slugFilter != "" && !strings.EqualFold(acc.Slug, slugFilter) {
+					continue
+				}
 				etherscanAccounts = append(etherscanAccounts, acc)
 			}
 		}
@@ -362,6 +373,9 @@ func TransactionsSync(args []string) (int, error) {
 		stripeAccounts := make([]FinanceAccount, 0)
 		for _, acc := range settings.Finance.Accounts {
 			if acc.Provider == "stripe" {
+				if slugFilter != "" && !strings.EqualFold(acc.Slug, slugFilter) {
+					continue
+				}
 				stripeAccounts = append(stripeAccounts, acc)
 			}
 		}
@@ -658,6 +672,9 @@ func TransactionsSync(args []string) (int, error) {
 	if sourceFilter == "" || sourceFilter == "monerium" || sourceFilter == "gnosis" {
 		moneriumAccounts := make([]FinanceAccount, 0)
 		for _, acc := range settings.Finance.Accounts {
+			if slugFilter != "" && !strings.EqualFold(acc.Slug, slugFilter) {
+				continue
+			}
 			if acc.Provider == "monerium" {
 				moneriumAccounts = append(moneriumAccounts, acc)
 			}
@@ -1120,6 +1137,35 @@ func enrichStripeTransaction(tx *StripeTransaction) {
 		}
 		for k, v := range source.Metadata {
 			tx.Metadata[k] = v
+		}
+	}
+
+	if source.Object == "payout" {
+		var po struct {
+			ID                  string `json:"id"`
+			Automatic           bool   `json:"automatic"`
+			StatementDescriptor string `json:"statement_descriptor"`
+			Description         string `json:"description"`
+			ArrivalDate         int64  `json:"arrival_date"`
+			Destination         *struct {
+				Last4 string `json:"last4"`
+			} `json:"destination"`
+		}
+		if json.Unmarshal(tx.Source, &po) == nil {
+			tx.PayoutID = po.ID
+			tx.PayoutAutomatic = po.Automatic
+			tx.PayoutStatementDescriptor = po.StatementDescriptor
+			tx.PayoutArrivalDate = po.ArrivalDate
+			if po.Destination != nil {
+				tx.PayoutBankLast4 = po.Destination.Last4
+			}
+			if tx.Description == "" {
+				if po.StatementDescriptor != "" {
+					tx.Description = po.StatementDescriptor
+				} else if po.Description != "" {
+					tx.Description = po.Description
+				}
+			}
 		}
 	}
 }

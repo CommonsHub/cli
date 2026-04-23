@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -38,6 +39,24 @@ func ResolveOdooCredentials() (*OdooCredentials, error) {
 	return creds, nil
 }
 
+// odooLog writes to stdout unless an aggregate caller (chb odoo sync) has set
+// quietOdooContext. Used for verbose info that should collapse into a single
+// summary line when running as part of the aggregate sync.
+func odooLog(format string, args ...interface{}) {
+	if quietOdooContext() {
+		return
+	}
+	fmt.Printf(format, args...)
+}
+
+// odooSyncLine prints the single-line summary for a sync step when running
+// under the aggregate `chb odoo sync` command. Format:
+//
+//	syncing <label>: <status>
+func odooSyncLine(label, status string) {
+	fmt.Printf("  %s%s%s: %s\n", Fmt.Bold, label, Fmt.Reset, status)
+}
+
 // OdooAnalyticEnrichment is saved per month.
 type OdooAnalyticEnrichment struct {
 	FetchedAt string                `json:"fetchedAt"`
@@ -67,14 +86,18 @@ func OdooAnalyticSync(args []string) (int, error) {
 	odooPassword := os.Getenv("ODOO_PASSWORD")
 
 	if odooURL == "" || odooLogin == "" || odooPassword == "" {
-		fmt.Printf("%s⚠ ODOO_URL/ODOO_LOGIN/ODOO_PASSWORD not set, skipping Odoo sync%s\n", Fmt.Yellow, Fmt.Reset)
+		if quietOdooContext() {
+			odooSyncLine("categories", "ODOO env not set — skipped")
+		} else {
+			fmt.Printf("%s⚠ ODOO_URL/ODOO_LOGIN/ODOO_PASSWORD not set, skipping Odoo sync%s\n", Fmt.Yellow, Fmt.Reset)
+		}
 		return 0, nil
 	}
 
 	db := odooDBFromURL(odooURL)
 
-	fmt.Printf("\n%s🏢 Syncing Odoo analytics%s\n", Fmt.Bold, Fmt.Reset)
-	fmt.Printf("%sURL: %s  DB: %s%s\n", Fmt.Dim, odooURL, db, Fmt.Reset)
+	odooLog("\n%s🏢 Syncing Odoo analytics%s\n", Fmt.Bold, Fmt.Reset)
+	odooLog("%sURL: %s  DB: %s%s\n", Fmt.Dim, odooURL, db, Fmt.Reset)
 
 	uid, err := odooAuth(odooURL, db, odooLogin, odooPassword)
 	if err != nil || uid == 0 {
@@ -113,7 +136,7 @@ func OdooAnalyticSync(args []string) (int, error) {
 			categoryMapping[a.ID] = strings.ToLower(strings.ReplaceAll(a.Code, " ", "-"))
 		}
 	}
-	fmt.Printf("  %sFetched %d analytic accounts%s\n", Fmt.Dim, len(analyticAccounts), Fmt.Reset)
+	odooLog("  %sFetched %d analytic accounts%s\n", Fmt.Dim, len(analyticAccounts), Fmt.Reset)
 
 	// Fetch analytic lines — these are the actual categorized postings
 	// Each line links an amount to an analytic account, with a reference
@@ -131,7 +154,7 @@ func OdooAnalyticSync(args []string) (int, error) {
 			"order":  "date desc",
 		})
 	if err != nil {
-		fmt.Printf("  %s⚠ Could not fetch analytic lines: %v%s\n", Fmt.Yellow, err, Fmt.Reset)
+		odooLog("  %s⚠ Could not fetch analytic lines: %v%s\n", Fmt.Yellow, err, Fmt.Reset)
 	}
 
 	type analyticLine struct {
@@ -150,7 +173,7 @@ func OdooAnalyticSync(args []string) (int, error) {
 	if linesResult != nil {
 		json.Unmarshal(linesResult, &lines)
 	}
-	fmt.Printf("  %sFetched %d analytic lines%s\n", Fmt.Dim, len(lines), Fmt.Reset)
+	odooLog("  %sFetched %d analytic lines%s\n", Fmt.Dim, len(lines), Fmt.Reset)
 
 	// Fetch payment transactions to match Stripe references
 	paymentResult, err := odooExec(odooURL, db, uid, odooPassword,
@@ -173,7 +196,7 @@ func OdooAnalyticSync(args []string) (int, error) {
 	if paymentResult != nil {
 		json.Unmarshal(paymentResult, &paymentTxs)
 	}
-	fmt.Printf("  %sFetched %d payment transactions with Stripe references%s\n", Fmt.Dim, len(paymentTxs), Fmt.Reset)
+	odooLog("  %sFetched %d payment transactions with Stripe references%s\n", Fmt.Dim, len(paymentTxs), Fmt.Reset)
 
 	// Fetch bank statement lines (for blockchain tx matching via ref)
 	bslResult, err := odooExec(odooURL, db, uid, odooPassword,
@@ -196,7 +219,7 @@ func OdooAnalyticSync(args []string) (int, error) {
 	if bslResult != nil {
 		json.Unmarshal(bslResult, &bslLines)
 	}
-	fmt.Printf("  %sFetched %d bank statement lines%s\n", Fmt.Dim, len(bslLines), Fmt.Reset)
+	odooLog("  %sFetched %d bank statement lines%s\n", Fmt.Dim, len(bslLines), Fmt.Reset)
 
 	// Build move_line_id → analytic category mapping from analytic lines
 	moveLineCategoryMap := map[int]OdooAnalyticMapping{} // move_line_id -> mapping
@@ -293,9 +316,14 @@ func OdooAnalyticSync(args []string) (int, error) {
 		saved++
 	}
 
-	fmt.Printf("\n  %s✓ %d mappings, saved %d months%s\n", Fmt.Green, totalMapped, saved, Fmt.Reset)
-	fmt.Printf("  %s%d analytic accounts, %d analytic lines, %d payment refs, %d bank refs%s\n\n",
-		Fmt.Dim, len(analyticAccounts), len(lines), len(paymentTxs), len(bslLines), Fmt.Reset)
+	if quietOdooContext() {
+		odooSyncLine("categories", fmt.Sprintf("%d mappings (%d accounts, %d lines, %d payment refs, %d bank refs)",
+			totalMapped, len(analyticAccounts), len(lines), len(paymentTxs), len(bslLines)))
+	} else {
+		fmt.Printf("\n  %s✓ %d mappings, saved %d months%s\n", Fmt.Green, totalMapped, saved, Fmt.Reset)
+		fmt.Printf("  %s%d analytic accounts, %d analytic lines, %d payment refs, %d bank refs%s\n\n",
+			Fmt.Dim, len(analyticAccounts), len(lines), len(paymentTxs), len(bslLines), Fmt.Reset)
+	}
 
 	return totalMapped, nil
 }
@@ -332,6 +360,11 @@ func OdooJournals(args []string) error {
 		return fmt.Errorf("Odoo authentication failed: %v", err)
 	}
 
+	// `chb odoo journals sync` → push local → Odoo for every linked journal
+	if len(args) >= 1 && args[0] == "sync" {
+		return odooJournalsSyncAll(args[1:])
+	}
+
 	// Check for `chb odoo journals <id> [sync|--reset]`
 	if len(args) >= 1 && !strings.HasPrefix(args[0], "-") {
 		var journalID int
@@ -340,7 +373,14 @@ func OdooJournals(args []string) error {
 			return fmt.Errorf("invalid journal ID: %s", args[0])
 		}
 		if len(args) >= 2 && args[1] == "sync" {
-			return odooJournalSync(journalID, args[2:])
+			syncArgs := args[2:]
+			if HasFlag(syncArgs, "--reset") {
+				if err := odooJournalReset(creds, uid, journalID); err != nil {
+					return err
+				}
+				syncArgs = filterFlag(syncArgs, "--reset")
+			}
+			return odooJournalSync(journalID, syncArgs)
 		}
 		if len(args) >= 2 && args[1] == "check" {
 			return odooJournalCheck(creds, uid, journalID)
@@ -493,9 +533,16 @@ func odooJournalCheck(creds *OdooCredentials, uid int, journalID int) error {
 	return nil
 }
 
-// odooJournalFix sets balance_end_real to the running balance for each
-// statement with a balance_mismatch issue. chain_gap issues are reported but
-// not auto-fixed (they usually indicate a missing/extra line).
+// odooJournalFix walks every statement on the journal in chronological
+// order and repairs the running-balance and chain invariants in one pass:
+//
+//   - Each statement's balance_end_real is rewritten to balance_start + Σ(lines).
+//   - Each statement's balance_start (except the first) is rewritten to the
+//     previous statement's balance_end_real so statements chain correctly.
+//
+// This is safe for the new chronological sync model because line amounts
+// are authoritative — the starting and ending balances are derived from
+// them, not asserted independently.
 func odooJournalFix(creds *OdooCredentials, uid int, journalID int, assumeYes, dryRun bool) error {
 	issues, err := CheckOdooJournalStatements(creds, uid, journalID)
 	if err != nil {
@@ -507,34 +554,9 @@ func odooJournalFix(creds *OdooCredentials, uid int, journalID int, assumeYes, d
 	}
 	PrintStatementIssues(issues)
 
-	var fixable []StatementBalanceIssue
-	var chainGaps []StatementBalanceIssue
-	for _, i := range issues {
-		if i.Kind == "balance_mismatch" {
-			fixable = append(fixable, i)
-		} else {
-			chainGaps = append(chainGaps, i)
-		}
-	}
-
-	if len(chainGaps) > 0 {
-		fmt.Printf("  %s⚠ %d chain gap(s) — often clear automatically after the balance fixes below.%s\n", Fmt.Yellow, len(chainGaps), Fmt.Reset)
-		fmt.Printf("  %s  If any remain after fixing, a line is missing — re-run the account sync.%s\n\n", Fmt.Dim, Fmt.Reset)
-	}
-
-	if len(fixable) == 0 {
-		return nil
-	}
-
-	if dryRun {
-		fmt.Printf("  %s(dry-run) would update balance_end_real on %d statement(s)%s\n\n",
-			Fmt.Dim, len(fixable), Fmt.Reset)
-		return nil
-	}
-
-	if !assumeYes {
-		fmt.Printf("  %sApply %d fix(es)? This sets balance_end_real = running balance.%s [y/N] ",
-			Fmt.Bold, len(fixable), Fmt.Reset)
+	if !assumeYes && !dryRun {
+		fmt.Printf("  %sRepair journal? This rewrites balance_start and balance_end_real on affected statements.%s [y/N] ",
+			Fmt.Bold, Fmt.Reset)
 		var resp string
 		fmt.Scanln(&resp)
 		if resp != "y" && resp != "Y" && resp != "yes" {
@@ -543,18 +565,168 @@ func odooJournalFix(creds *OdooCredentials, uid int, journalID int, assumeYes, d
 		}
 	}
 
-	okCount, errCount := 0, 0
-	for _, i := range fixable {
-		if err := FixOdooStatementBalance(creds, uid, i.StatementID, i.RunningBalance); err != nil {
-			fmt.Printf("  %s✗ #%d %s: %v%s\n", Fmt.Red, i.StatementID, i.StatementName, err, Fmt.Reset)
-			errCount++
+	stmts, err := fetchJournalStatementsOrdered(creds, uid, journalID)
+	if err != nil {
+		return err
+	}
+
+	var prevEnd float64
+	hasPrev := false
+	edits := 0
+	errs := 0
+	for _, s := range stmts {
+		// The open (trailing) statement mirrors live Stripe state. Leave
+		// both its balance_start and balance_end_real alone — they are
+		// managed by the sync, not the repair tool.
+		if s.Reference == "open" {
+			fmt.Printf("  %s↷ Skipping open statement #%d %s (live-synced, not repaired)%s\n",
+				Fmt.Dim, s.ID, s.Name, Fmt.Reset)
 			continue
 		}
-		fmt.Printf("  %s✓%s #%d %s → balance_end_real = %s\n",
-			Fmt.Green, Fmt.Reset, i.StatementID, i.StatementName, fmtEUR(i.RunningBalance))
-		okCount++
+		sum, err := statementLineSum(creds, uid, s.ID)
+		if err != nil {
+			fmt.Printf("  %s✗ #%d %s: line sum: %v%s\n", Fmt.Red, s.ID, s.Name, err, Fmt.Reset)
+			errs++
+			continue
+		}
+		bs := s.BalanceStart
+		if hasPrev && math.Abs(bs-prevEnd) > 0.005 {
+			if dryRun {
+				fmt.Printf("  %s(dry-run)%s #%d %s  balance_start %s → %s\n",
+					Fmt.Dim, Fmt.Reset, s.ID, s.Name, fmtEURSigned(bs), fmtEURSigned(prevEnd))
+			} else if err := setStatementBalanceStart(creds, uid, s.ID, prevEnd); err != nil {
+				fmt.Printf("  %s✗ #%d %s: balance_start: %v%s\n", Fmt.Red, s.ID, s.Name, err, Fmt.Reset)
+				errs++
+				continue
+			} else {
+				fmt.Printf("  %s✓%s #%d %s  balance_start %s → %s\n",
+					Fmt.Green, Fmt.Reset, s.ID, s.Name, fmtEURSigned(bs), fmtEURSigned(prevEnd))
+			}
+			bs = prevEnd
+			edits++
+		}
+		running := bs + sum
+		if math.Abs(running-s.BalanceEndReal) > 0.005 {
+			if dryRun {
+				fmt.Printf("  %s(dry-run)%s #%d %s  balance_end_real %s → %s\n",
+					Fmt.Dim, Fmt.Reset, s.ID, s.Name, fmtEURSigned(s.BalanceEndReal), fmtEURSigned(running))
+			} else if err := setStatementBalanceEndReal(creds, uid, s.ID, running); err != nil {
+				fmt.Printf("  %s✗ #%d %s: balance_end_real: %v%s\n", Fmt.Red, s.ID, s.Name, err, Fmt.Reset)
+				errs++
+				continue
+			} else {
+				fmt.Printf("  %s✓%s #%d %s  balance_end_real %s → %s\n",
+					Fmt.Green, Fmt.Reset, s.ID, s.Name, fmtEURSigned(s.BalanceEndReal), fmtEURSigned(running))
+			}
+			edits++
+		}
+		prevEnd = running
+		hasPrev = true
 	}
-	fmt.Printf("\n  %s✓ Fixed %d, errors %d%s\n\n", Fmt.Green, okCount, errCount, Fmt.Reset)
+
+	if dryRun {
+		fmt.Printf("\n  %s(dry-run) would apply %d edit(s)%s\n\n", Fmt.Dim, edits, Fmt.Reset)
+		return nil
+	}
+	fmt.Printf("\n  %s✓ Applied %d edit(s), %d error(s)%s\n", Fmt.Green, edits, errs, Fmt.Reset)
+
+	// Verify
+	after, err := CheckOdooJournalStatements(creds, uid, journalID)
+	if err == nil {
+		if len(after) == 0 {
+			fmt.Printf("  %s✓ Journal is valid%s\n\n", Fmt.Green, Fmt.Reset)
+		} else {
+			fmt.Printf("\n  %s⚠ %d issue(s) remain:%s\n", Fmt.Yellow, len(after), Fmt.Reset)
+			PrintStatementIssues(after)
+		}
+	}
+	return nil
+}
+
+// fetchJournalStatementsOrdered returns all statements for the journal
+// ordered chronologically (date asc, id asc as tiebreaker).
+func fetchJournalStatementsOrdered(creds *OdooCredentials, uid int, journalID int) ([]journalStatement, error) {
+	result, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
+		"account.bank.statement", "search_read",
+		[]interface{}{[]interface{}{
+			[]interface{}{"journal_id", "=", journalID},
+		}},
+		map[string]interface{}{
+			"fields": []string{"id", "name", "date", "balance_start", "balance_end_real", "reference"},
+			"order":  "date asc, id asc",
+		})
+	if err != nil {
+		return nil, fmt.Errorf("fetch statements: %v", err)
+	}
+	var raw []struct {
+		ID             int     `json:"id"`
+		Name           odooStr `json:"name"`
+		Date           odooStr `json:"date"`
+		Reference      odooStr `json:"reference"`
+		BalanceStart   float64 `json:"balance_start"`
+		BalanceEndReal float64 `json:"balance_end_real"`
+	}
+	if err := json.Unmarshal(result, &raw); err != nil {
+		return nil, fmt.Errorf("parse statements: %v", err)
+	}
+	out := make([]journalStatement, 0, len(raw))
+	for _, r := range raw {
+		out = append(out, journalStatement{
+			ID:             r.ID,
+			Name:           string(r.Name),
+			Date:           string(r.Date),
+			Reference:      string(r.Reference),
+			BalanceStart:   r.BalanceStart,
+			BalanceEndReal: r.BalanceEndReal,
+		})
+	}
+	return out, nil
+}
+
+type journalStatement struct {
+	ID             int
+	Name           string
+	Date           string
+	Reference      string
+	BalanceStart   float64
+	BalanceEndReal float64
+}
+
+// setStatementBalanceStart overwrites the balance_start of an existing statement.
+func setStatementBalanceStart(creds *OdooCredentials, uid int, stmtID int, value float64) error {
+	_, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
+		"account.bank.statement", "write",
+		[]interface{}{[]interface{}{stmtID}, map[string]interface{}{
+			"balance_start": value,
+		}}, nil)
+	return err
+}
+
+// OdooSyncAll is the meta-command behind `chb odoo sync`. It runs, in order:
+//   - chb odoo categories sync  (fetch analytic categories from Odoo)
+//   - chb odoo invoices sync    (fetch outgoing invoices from Odoo)
+//   - chb odoo bills sync       (fetch vendor bills from Odoo)
+//   - chb odoo journals sync    (push local transactions into every linked journal)
+//
+// Per-step failures are reported but do not abort the overall run.
+func OdooSyncAll(args []string) error {
+	if creds, err := ResolveOdooCredentials(); err == nil {
+		fmt.Printf("\n%s🔄 Odoo sync%s  %s%s (db: %s)%s\n\n",
+			Fmt.Bold, Fmt.Reset, Fmt.Dim, creds.URL, creds.DB, Fmt.Reset)
+	}
+	setQuietOdooContext(true)
+	defer setQuietOdooContext(false)
+
+	step := func(label string, fn func() error) {
+		if err := fn(); err != nil {
+			odooSyncLine(label, fmt.Sprintf("%s✗ %v%s", Fmt.Red, err, Fmt.Reset))
+		}
+	}
+	step("categories", func() error { _, err := OdooAnalyticSync(args); return err })
+	step("invoices", func() error { _, err := InvoicesSync(args); return err })
+	step("bills", func() error { _, err := BillsSync(args); return err })
+	step("journals", func() error { return odooJournalsSyncAll(args) })
+	fmt.Println()
 	return nil
 }
 
@@ -562,10 +734,85 @@ func odooJournalFix(creds *OdooCredentials, uid int, journalID int, assumeYes, d
 func odooJournalSync(journalID int, args []string) error {
 	for _, acc := range LoadAccountConfigs() {
 		if acc.OdooJournalID == journalID {
-			return AccountOdooSync(acc.Slug, args)
+			return AccountOdooPush(acc.Slug, args)
 		}
 	}
 	return fmt.Errorf("no account linked to Odoo journal #%d. Run: chb accounts <slug> link", journalID)
+}
+
+// odooJournalsSyncAll pushes every linked account's local transactions into
+// its Odoo journal. In aggregate (quiet) mode the accounts are processed
+// serially so the per-account one-liners stay in order and can't interleave.
+// In verbose mode, up to 4 journals run concurrently.
+func odooJournalsSyncAll(args []string) error {
+	// Print the Odoo URL once at the top, unless a wrapper already did it.
+	wasQuiet := quietOdooContext()
+	if !wasQuiet {
+		if creds, err := ResolveOdooCredentials(); err == nil {
+			fmt.Printf("\n%sOdoo: %s (db: %s)%s\n", Fmt.Dim, creds.URL, creds.DB, Fmt.Reset)
+		}
+	}
+	setQuietOdooContext(true)
+	if !wasQuiet {
+		defer setQuietOdooContext(false)
+	}
+
+	configs := LoadAccountConfigs()
+	type target struct {
+		slug      string
+		journalID int
+	}
+	var targets []target
+	for _, acc := range configs {
+		if acc.OdooJournalID > 0 {
+			targets = append(targets, target{slug: acc.Slug, journalID: acc.OdooJournalID})
+		}
+	}
+	if len(targets) == 0 {
+		odooLog("\n  %sNo accounts are linked to an Odoo journal%s\n\n", Fmt.Dim, Fmt.Reset)
+		return nil
+	}
+
+	failed := 0
+	if wasQuiet {
+		// Serial: preserve one-line-per-item ordering, avoid interleaving.
+		for _, t := range targets {
+			if err := AccountOdooPush(t.slug, args); err != nil {
+				failed++
+			}
+		}
+	} else {
+		type result struct {
+			slug string
+			err  error
+		}
+		sem := make(chan struct{}, 4)
+		resultsCh := make(chan result, len(targets))
+		for _, t := range targets {
+			t := t
+			sem <- struct{}{}
+			go func() {
+				defer func() { <-sem }()
+				err := AccountOdooPush(t.slug, args)
+				resultsCh <- result{slug: t.slug, err: err}
+			}()
+		}
+		for i := 0; i < cap(sem); i++ {
+			sem <- struct{}{}
+		}
+		close(resultsCh)
+
+		for r := range resultsCh {
+			if r.err != nil {
+				fmt.Printf("  %s✗ %s: %v%s\n", Fmt.Red, r.slug, r.err, Fmt.Reset)
+				failed++
+			}
+		}
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d journal(s) failed", failed)
+	}
+	return nil
 }
 
 func odooJournalReset(creds *OdooCredentials, uid int, journalID int) error {

@@ -2,8 +2,10 @@ package cmd
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"math/big"
 	"net/http"
@@ -135,6 +137,32 @@ func fetchStripeBalance() (float64, error) {
 	}
 
 	return float64(total) / 100, nil
+}
+
+// refreshAccountBalance fetches the live balance for a single account and
+// returns (balance, cacheKey, err). cacheKey is the lowercase key under
+// which this balance should be stored in the shared balance cache.
+// Returns ("", 0, nil) if the account has no supported live source.
+func refreshAccountBalance(acc *AccountConfig) (float64, string, error) {
+	if acc.Provider == "etherscan" && acc.Address != "" && acc.Token != nil {
+		v, err := fetchTokenBalance(acc.ChainID, acc.Token.Address, acc.Address, acc.Token.Decimals)
+		if err != nil {
+			return 0, "", err
+		}
+		return v, strings.ToLower(acc.Address), nil
+	}
+	if acc.Provider == "stripe" {
+		v, err := fetchStripeBalance()
+		if err != nil {
+			return 0, "", err
+		}
+		key := strings.ToLower(acc.AccountID)
+		if key == "" {
+			key = "stripe"
+		}
+		return v, key, nil
+	}
+	return 0, "", nil
 }
 
 // fetchLiveBalances fetches on-chain + Stripe balances for all accounts and caches them.
@@ -288,6 +316,15 @@ func AccountsCommand(args []string) {
 		return
 	}
 
+	// `chb accounts sync` → fetch source → local, for all accounts.
+	if len(args) >= 1 && args[0] == "sync" {
+		if _, err := AccountsFetchAll(args[1:]); err != nil {
+			fmt.Fprintf(os.Stderr, "%sError:%s %v\n", Fmt.Red, Fmt.Reset, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	// Check for `chb accounts <slug> <action>`
 	if len(args) >= 1 && !strings.HasPrefix(args[0], "-") {
 		slug := args[0]
@@ -306,7 +343,15 @@ func AccountsCommand(args []string) {
 			}
 			switch action {
 			case "sync":
-				if err := AccountOdooSync(slug, args[2:]); err != nil {
+				// Pure source→local fetch for one account. Use `chb odoo
+				// journals <id> sync` to push into Odoo afterward.
+				if err := AccountFetch(slug, args[2:]); err != nil {
+					fmt.Fprintf(os.Stderr, "%sError:%s %v\n", Fmt.Red, Fmt.Reset, err)
+					os.Exit(1)
+				}
+			case "push":
+				// Back-channel for now: push local→Odoo for this one account.
+				if err := AccountOdooPush(slug, args[2:]); err != nil {
 					fmt.Fprintf(os.Stderr, "%sError:%s %v\n", Fmt.Red, Fmt.Reset, err)
 					os.Exit(1)
 				}
@@ -320,6 +365,11 @@ func AccountsCommand(args []string) {
 					fmt.Fprintf(os.Stderr, "%sError:%s %v\n", Fmt.Red, Fmt.Reset, err)
 					os.Exit(1)
 				}
+			case "pending":
+				if err := AccountStripePending(slug); err != nil {
+					fmt.Fprintf(os.Stderr, "%sError:%s %v\n", Fmt.Red, Fmt.Reset, err)
+					os.Exit(1)
+				}
 			case "import-csv":
 				if len(args) < 3 {
 					fmt.Fprintf(os.Stderr, "%sUsage: chb accounts %s import-csv <file.csv>%s\n", Fmt.Yellow, slug, Fmt.Reset)
@@ -330,13 +380,124 @@ func AccountsCommand(args []string) {
 					os.Exit(1)
 				}
 			default:
-				printAccountSlugHelp(slug)
+				AccountDetail(slug, args[1:])
 			}
 			return
 		}
 	}
 
 	Accounts(args)
+}
+
+// AccountDetail prints a per-account summary: latest balance, last tx, last
+// sync, Odoo journal status. Useful as a quick verification glance after
+// running a sync. Pass `--refresh`/`-r` in args to refresh the cached
+// on-chain balance for this account before printing.
+func AccountDetail(slug string, args []string) {
+	var acc *AccountConfig
+	for _, a := range LoadAccountConfigs() {
+		if strings.EqualFold(a.Slug, slug) {
+			acc = &a
+			break
+		}
+	}
+	if acc == nil {
+		fmt.Printf("  %sAccount '%s' not found%s\n\n", Fmt.Red, slug, Fmt.Reset)
+		return
+	}
+
+	refresh := HasFlag(args, "--refresh", "-r")
+
+	summaries := computeAccountSummaries()
+	fa := FinanceAccount{
+		Provider:  acc.Provider,
+		Chain:     acc.Chain,
+		Address:   acc.Address,
+		AccountID: acc.AccountID,
+		Slug:      acc.Slug,
+	}
+	s := summaries[accountKey(fa)]
+
+	currency := acc.Currency
+	if currency == "" && acc.Token != nil {
+		currency = acc.Token.Symbol
+	}
+	if currency == "" {
+		currency = "EUR"
+	}
+
+	// On --refresh, hit the live source for this one account and update
+	// just this account's entry in the shared balance cache.
+	if refresh {
+		fmt.Printf("\n  %sRefreshing on-chain balance for %s…%s\n", Fmt.Dim, acc.Slug, Fmt.Reset)
+		if v, key, err := refreshAccountBalance(acc); err == nil && key != "" {
+			cache := loadBalanceCache()
+			if cache == nil {
+				cache = &balanceCache{Balances: map[string]float64{}}
+			}
+			if cache.Balances == nil {
+				cache.Balances = map[string]float64{}
+			}
+			cache.Balances[key] = v
+			cache.FetchedAt = time.Now().UTC().Format(time.RFC3339)
+			saveBalanceCache(cache)
+		} else if err != nil {
+			fmt.Printf("  %s⚠ Failed to refresh: %v%s\n", Fmt.Yellow, err, Fmt.Reset)
+		} else {
+			fmt.Printf("  %s⚠ No live balance source for this account (provider=%s)%s\n", Fmt.Yellow, acc.Provider, Fmt.Reset)
+		}
+	}
+
+	// Prefer the cached live on-chain balance (token-scoped) over the
+	// tx-history-derived summary balance. Mirrors the list view logic.
+	var balance float64
+	hasBalance := false
+	var balanceSource string
+	if cache := loadBalanceCache(); cache != nil {
+		for _, key := range []string{acc.Address, acc.AccountID, acc.Slug} {
+			if key == "" {
+				continue
+			}
+			if v, ok := cache.Balances[strings.ToLower(key)]; ok {
+				balance = v
+				hasBalance = true
+				balanceSource = "on-chain (cached " + cache.FetchedAt + ")"
+				break
+			}
+		}
+	}
+	if !hasBalance && s != nil && s.TxCount > 0 {
+		balance = s.Balance
+		hasBalance = true
+		balanceSource = "from tx history"
+	}
+
+	fmt.Printf("\n  %s%s%s  %s%s%s\n", Fmt.Bold, acc.Slug, Fmt.Reset, Fmt.Dim, acc.Name, Fmt.Reset)
+	fmt.Println()
+
+	if hasBalance {
+		fmt.Printf("  %sBalance:    %s%s  %s(%s)%s\n",
+			Fmt.Dim, Fmt.Reset, formatBalance(balance, currency),
+			Fmt.Dim, balanceSource, Fmt.Reset)
+	}
+	if s != nil && s.TxCount > 0 {
+		fmt.Printf("  %sTxs:        %d%s\n", Fmt.Dim, s.TxCount, Fmt.Reset)
+	}
+	if s != nil && !s.LastTxAt.IsZero() {
+		fmt.Printf("  %sLast tx:    %s  %s(%s)%s\n", Fmt.Dim, s.LastTxAt.In(BrusselsTZ()).Format("2006-01-02 15:04"), Fmt.Dim, formatTimeAgo(s.LastTxAt), Fmt.Reset)
+	}
+	if lastSync := LastSyncTime("account:" + strings.ToLower(acc.Slug)); !lastSync.IsZero() {
+		fmt.Printf("  %sLast sync:  %s  %s(%s)%s\n", Fmt.Dim, lastSync.In(BrusselsTZ()).Format("2006-01-02 15:04"), Fmt.Dim, formatTimeAgo(lastSync), Fmt.Reset)
+	} else {
+		fmt.Printf("  %sLast sync:  never%s\n", Fmt.Dim, Fmt.Reset)
+	}
+
+	if acc.OdooJournalID > 0 {
+		fmt.Printf("  %sOdoo:       %s (journal #%d)%s\n", Fmt.Dim, acc.OdooJournalName, acc.OdooJournalID, Fmt.Reset)
+	}
+
+	fmt.Println()
+	printAccountSlugHelp(slug)
 }
 
 // Accounts lists all configured finance accounts with balance and last tx.
@@ -463,6 +624,9 @@ func Accounts(args []string) {
 
 		if s != nil && !s.LastTxAt.IsZero() {
 			fmt.Printf("    %sLast tx: %s%s\n", Fmt.Dim, formatTimeAgo(s.LastTxAt), Fmt.Reset)
+		}
+		if lastSync := LastSyncTime("account:" + strings.ToLower(acc.Slug)); !lastSync.IsZero() {
+			fmt.Printf("    %sLast sync: %s%s\n", Fmt.Dim, formatTimeAgo(lastSync), Fmt.Reset)
 		}
 
 		// Odoo journal sync status
@@ -786,10 +950,120 @@ func AccountOdooLink(slug string, args []string) error {
 	return nil
 }
 
-// ── Account Odoo Sync ──
+// ── Account fetch (source → local) ──
 
-// AccountOdooSync pushes local transactions to Odoo as bank statement lines.
-func AccountOdooSync(slug string, args []string) error {
+// AccountFetch fetches this account's transactions from its source (Etherscan
+// / Stripe / Monerium) into the local cache, then runs Generate so the
+// unified per-month `generated/transactions.json` files (which downstream
+// consumers like loadAccountTransactions and AccountOdooPush read from) are
+// rebuilt from the freshly-fetched raw data. Does not touch Odoo.
+func AccountFetch(slug string, args []string) error {
+	configs := LoadAccountConfigs()
+	var acc *AccountConfig
+	for i := range configs {
+		if strings.EqualFold(configs[i].Slug, slug) {
+			acc = &configs[i]
+			break
+		}
+	}
+	if acc == nil {
+		return fmt.Errorf("account '%s' not found", slug)
+	}
+	fetchArgs := append([]string{"--slug", acc.Slug}, args...)
+	if _, err := TransactionsSync(fetchArgs); err != nil {
+		return err
+	}
+	if err := GenerateTransactions(args); err != nil {
+		return fmt.Errorf("generate transactions after fetch: %v", err)
+	}
+	UpdateSyncSource("account:"+strings.ToLower(slug), false)
+	return nil
+}
+
+// AccountsFetchAll fetches all configured accounts source → local. It runs
+// accounts serially so each account gets a single summary line in order,
+// captures each fetch's verbose output, and only prints that output if the
+// fetch failed. GenerateTransactions runs once at the end, not after every
+// account. Per-account errors are reported but do not abort the run; the
+// returned error is non-nil if any account failed.
+func AccountsFetchAll(args []string) (int, error) {
+	configs := LoadAccountConfigs()
+	if len(configs) == 0 {
+		fmt.Printf("\n  %sNo accounts configured%s\n\n", Fmt.Dim, Fmt.Reset)
+		return 0, nil
+	}
+
+	fmt.Printf("\n%s🔄 Syncing accounts%s\n\n", Fmt.Bold, Fmt.Reset)
+
+	failed := 0
+	for _, acc := range configs {
+		slugArgs := append([]string{"--slug", acc.Slug}, args...)
+		output, count, err := captureTransactionsSync(slugArgs)
+		label := acc.Slug
+		if err != nil {
+			fmt.Printf("  %s%s%s: %s✗ %v%s\n", Fmt.Bold, label, Fmt.Reset, Fmt.Red, err, Fmt.Reset)
+			if strings.TrimSpace(output) != "" {
+				fmt.Print(output)
+			}
+			failed++
+			continue
+		}
+		fmt.Printf("  %s%s%s: %d new transactions\n", Fmt.Bold, label, Fmt.Reset, count)
+		UpdateSyncSource("account:"+strings.ToLower(acc.Slug), false)
+	}
+
+	// Regenerate the unified per-month transactions.json files ONCE after all
+	// accounts have been fetched, rather than after each account.
+	fmt.Printf("\n  %sRegenerating per-month transactions...%s\n", Fmt.Dim, Fmt.Reset)
+	if err := GenerateTransactions(args); err != nil {
+		fmt.Printf("  %s✗ generate: %v%s\n", Fmt.Red, err, Fmt.Reset)
+	}
+	fmt.Println()
+
+	if failed > 0 {
+		return failed, fmt.Errorf("%d account(s) failed", failed)
+	}
+	return 0, nil
+}
+
+// captureTransactionsSync runs TransactionsSync with its stdout redirected to
+// a buffer. Returns the captured output, the sync's tx count, and any error.
+// Used by aggregate callers that want one summary line per account instead
+// of the full verbose output.
+func captureTransactionsSync(args []string) (string, int, error) {
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	if err != nil {
+		// Fallback: pipe creation failed, fall back to direct call with output.
+		n, e := TransactionsSync(args)
+		return "", n, e
+	}
+	os.Stdout = w
+	done := make(chan string, 1)
+	go func() {
+		var buf bytes.Buffer
+		_, _ = io.Copy(&buf, r)
+		done <- buf.String()
+	}()
+	count, syncErr := TransactionsSync(args)
+	w.Close()
+	os.Stdout = old
+	return <-done, count, syncErr
+}
+
+// quietOdooContext is set by aggregate callers (OdooSyncAll,
+// odooJournalsSyncAll) so per-account sync functions can skip printing
+// the Odoo URL / db line — it's already been shown once by the caller.
+var quietOdooContextFlag bool
+
+func quietOdooContext() bool   { return quietOdooContextFlag }
+func setQuietOdooContext(v bool) { quietOdooContextFlag = v }
+
+// ── Account Odoo push (local → Odoo) ──
+
+// AccountOdooPush pushes local transactions to Odoo as bank statement lines.
+// Formerly AccountOdooSync; renamed to make direction explicit.
+func AccountOdooPush(slug string, args []string) error {
 	configs := LoadAccountConfigs()
 	var acc *AccountConfig
 	for i := range configs {
@@ -852,32 +1126,194 @@ func AccountOdooSync(slug string, args []string) error {
 		}
 	}
 
-	fmt.Printf("\n%s🔄 Syncing '%s' → Odoo journal '%s' (#%d)%s",
-		Fmt.Bold, acc.Name, acc.OdooJournalName, acc.OdooJournalID, Fmt.Reset)
+	header := fmt.Sprintf("%s%s%s → journal #%d", Fmt.Bold, acc.Slug, Fmt.Reset, acc.OdooJournalID)
 	if monthsLimit > 0 {
-		fmt.Printf("  %s(last %d months)%s", Fmt.Dim, monthsLimit, Fmt.Reset)
+		header += fmt.Sprintf(" %s(last %d months)%s", Fmt.Dim, monthsLimit, Fmt.Reset)
 	}
 	if !untilDate.IsZero() {
-		fmt.Printf("  %s(until %s)%s", Fmt.Dim, untilDate.AddDate(0, 0, -1).Format("2006-01-02"), Fmt.Reset)
+		header += fmt.Sprintf(" %s(until %s)%s", Fmt.Dim, untilDate.AddDate(0, 0, -1).Format("2006-01-02"), Fmt.Reset)
 	}
-	fmt.Println()
-	fmt.Printf("  %sOdoo: %s (db: %s)%s\n\n", Fmt.Dim, creds.URL, creds.DB, Fmt.Reset)
+	if !quietOdooContext() {
+		// Single-account invocation — print the Odoo target once here.
+		fmt.Printf("\n%s\n  %sOdoo: %s (db: %s)%s\n\n", header, Fmt.Dim, creds.URL, creds.DB, Fmt.Reset)
+	}
 
-	// --force without --payout: empty the entire journal first
-	if force && !dryRun && payoutFilter == "" {
+	// --force: empty the entire journal first. Stripe handles this inside
+	// the sync itself, so we only run the global wipe for non-Stripe paths.
+	if force && !dryRun && acc.Provider != "stripe" {
 		if err := emptyOdooJournal(creds, uid, acc.OdooJournalID, acc.OdooJournalName); err != nil {
 			return err
 		}
 	}
 
+	var syncErr error
+	var summary string
 	if acc.Provider == "stripe" {
-		return syncStripeToOdoo(acc, creds, uid, monthsLimit, dryRun, force, payoutFilter, untilDate)
+		summary, syncErr = syncStripeToOdoo(acc, creds, uid, monthsLimit, dryRun, force, payoutFilter, untilDate)
+	} else {
+		summary, syncErr = syncBlockchainToOdoo(acc, creds, uid, monthsLimit, dryRun, untilDate)
 	}
-	return syncBlockchainToOdoo(acc, creds, uid, monthsLimit, dryRun, untilDate)
+
+	label := fmt.Sprintf("%s → journal #%d", acc.Slug, acc.OdooJournalID)
+	if syncErr != nil {
+		if quietOdooContext() {
+			odooSyncLine(label, fmt.Sprintf("%s✗ %v%s", Fmt.Red, syncErr, Fmt.Reset))
+		}
+		return syncErr
+	}
+
+	var mismatch string
+	if !dryRun {
+		live, detail := verifyJournalBalanceAgainstLive(acc, creds, uid)
+		mismatch = detail
+		if !quietOdooContext() && live != 0 {
+			currency := acc.Currency
+			if currency == "" && acc.Token != nil {
+				currency = acc.Token.Symbol
+			}
+			if currency == "" {
+				currency = "EUR"
+			}
+			fmt.Printf("  %sbalance: %s%s\n", Fmt.Dim, formatBalance(live, currency), Fmt.Reset)
+		}
+	}
+
+	if quietOdooContext() {
+		status := summary
+		if mismatch != "" {
+			status = fmt.Sprintf("%s, %sout of sync%s", status, Fmt.Yellow, Fmt.Reset)
+		}
+		odooSyncLine(label, status)
+		if mismatch != "" {
+			fmt.Print(mismatch)
+		}
+	}
+	return nil
+}
+
+// verifyJournalBalanceAgainstLive refreshes the live balance cache for this
+// account and, if it disagrees with the Odoo journal balance, returns a
+// multi-line explanation detailing the mismatch and the remediation hint.
+// In verbose mode (not under OdooSyncAll) the explanation is also printed
+// directly. The returned string is the full detail block when there's a
+// mismatch, empty otherwise.
+func verifyJournalBalanceAgainstLive(acc *AccountConfig, creds *OdooCredentials, uid int) (float64, string) {
+	if acc.OdooJournalID == 0 {
+		return 0, ""
+	}
+	live, cacheKey, err := refreshAccountBalance(acc)
+	if cacheKey == "" && err == nil {
+		return 0, "" // no live source supported
+	}
+	if err != nil {
+		warn := fmt.Sprintf("  %s⚠ %s: could not fetch live balance: %v%s\n", Fmt.Yellow, acc.Slug, err, Fmt.Reset)
+		if !quietOdooContext() {
+			fmt.Print(warn)
+		}
+		return 0, warn
+	}
+
+	// Persist the refreshed live balance so the list/detail views see the
+	// newest number without a separate --refresh call.
+	cache := loadBalanceCache()
+	if cache == nil {
+		cache = &balanceCache{Balances: map[string]float64{}}
+	}
+	if cache.Balances == nil {
+		cache.Balances = map[string]float64{}
+	}
+	cache.Balances[cacheKey] = live
+	cache.FetchedAt = time.Now().UTC().Format(time.RFC3339)
+	saveBalanceCache(cache)
+
+	odooBalance, err := odooJournalLineSum(creds, uid, acc.OdooJournalID)
+	if err != nil {
+		warn := fmt.Sprintf("  %s⚠ %s: could not fetch Odoo journal balance: %v%s\n", Fmt.Yellow, acc.Slug, err, Fmt.Reset)
+		if !quietOdooContext() {
+			fmt.Print(warn)
+		}
+		return live, warn
+	}
+	if math.Abs(odooBalance-live) < 0.01 {
+		return live, "" // balances agree — stay silent
+	}
+	currency := acc.Currency
+	if currency == "" && acc.Token != nil {
+		currency = acc.Token.Symbol
+	}
+	if currency == "" {
+		currency = "EUR"
+	}
+	var liveLabel string
+	switch {
+	case acc.Provider == "etherscan" && acc.Token != nil:
+		liveLabel = fmt.Sprintf("on-chain %s/%s", acc.Chain, acc.Token.Symbol)
+	case acc.Provider == "stripe":
+		liveLabel = "Stripe"
+	default:
+		liveLabel = acc.Provider
+	}
+	diff := odooBalance - live
+	detail := fmt.Sprintf("    %s⚠ Odoo %s ≠ live %s (%s) — off by %s%s\n",
+		Fmt.Yellow,
+		formatBalance(odooBalance, currency),
+		formatBalance(live, currency), liveLabel,
+		formatBalance(diff, currency),
+		Fmt.Reset)
+	detail += fmt.Sprintf("    %sLikely cause: local cache is behind %s. Try: chb accounts %s sync%s\n",
+		Fmt.Dim, liveLabel, acc.Slug, Fmt.Reset)
+	detail += fmt.Sprintf("    %sIf the local cache is already correct: chb odoo journals %d fix%s\n",
+		Fmt.Dim, acc.OdooJournalID, Fmt.Reset)
+	if !quietOdooContext() {
+		fmt.Print(detail)
+	}
+	return live, detail
+}
+
+// odooJournalLineCount returns the number of statement lines on the journal.
+// Returns 0 on error.
+func odooJournalLineCount(creds *OdooCredentials, uid int, journalID int) int {
+	result, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
+		"account.bank.statement.line", "search_count",
+		[]interface{}{[]interface{}{
+			[]interface{}{"journal_id", "=", journalID},
+		}}, nil)
+	if err != nil {
+		return 0
+	}
+	var count int
+	_ = json.Unmarshal(result, &count)
+	return count
+}
+
+// odooJournalLineSum returns Σ(line.amount) across every statement line on
+// the given journal.
+func odooJournalLineSum(creds *OdooCredentials, uid int, journalID int) (float64, error) {
+	result, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
+		"account.bank.statement.line", "read_group",
+		[]interface{}{
+			[]interface{}{[]interface{}{"journal_id", "=", journalID}},
+			[]string{"amount:sum"},
+			[]string{},
+		},
+		map[string]interface{}{"lazy": false})
+	if err != nil {
+		return 0, err
+	}
+	var groups []struct {
+		Amount float64 `json:"amount"`
+	}
+	if err := json.Unmarshal(result, &groups); err != nil {
+		return 0, err
+	}
+	if len(groups) == 0 {
+		return 0, nil
+	}
+	return groups[0].Amount, nil
 }
 
 // syncBlockchainToOdoo syncs blockchain/monerium transactions to Odoo (no statements, just lines).
-func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, monthsLimit int, dryRun bool, untilDate time.Time) error {
+func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, monthsLimit int, dryRun bool, untilDate time.Time) (string, error) {
 	localTxs := loadAccountTransactions(acc)
 	if monthsLimit > 0 {
 		cutoff := time.Now().AddDate(0, -monthsLimit, 0)
@@ -898,11 +1334,9 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 		}
 		localTxs = filtered
 	}
-	fmt.Printf("  %sLocal transactions: %d%s\n", Fmt.Dim, len(localTxs), Fmt.Reset)
-
 	existingIDs, err := fetchOdooImportIDs(creds.URL, creds.DB, uid, creds.Password, acc.OdooJournalID)
 	if err != nil {
-		return fmt.Errorf("failed to fetch existing Odoo entries: %v", err)
+		return "", fmt.Errorf("failed to fetch existing Odoo entries: %v", err)
 	}
 
 	var missing []TransactionEntry
@@ -911,11 +1345,10 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 			missing = append(missing, tx)
 		}
 	}
-	fmt.Printf("  %sMissing in Odoo: %d%s\n\n", Fmt.Dim, len(missing), Fmt.Reset)
 
 	if len(missing) == 0 {
-		fmt.Printf("  %s✓ Already in sync%s\n\n", Fmt.Green, Fmt.Reset)
-		return nil
+		odooLog("  %s+0 tx%s  %s(already in sync, %d local)%s\n", Fmt.Dim, Fmt.Reset, Fmt.Dim, len(localTxs), Fmt.Reset)
+		return fmt.Sprintf("already in sync (%d local)", len(localTxs)), nil
 	}
 
 	if dryRun {
@@ -928,10 +1361,10 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 			if tx.Type == "DEBIT" {
 				amt = -math.Abs(amt)
 			}
-			fmt.Printf("    %s  %.2f  %s\n", t.Format("2006-01-02"), amt, tx.Counterparty)
+			odooLog("    %s  %.2f  %s\n", t.Format("2006-01-02"), amt, tx.Counterparty)
 		}
-		fmt.Println()
-		return nil
+		odooLog("\n")
+		return fmt.Sprintf("dry-run: %d tx would be uploaded", len(missing)), nil
 	}
 
 	partnerCache := map[string]int{}
@@ -982,11 +1415,14 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 			continue
 		}
 		synced++
-		fmt.Printf("  %s✓%s %s  %s  %.2f\n", Fmt.Green, Fmt.Reset, t.Format("2006-01-02"), paymentRef, amt)
 	}
-	fmt.Printf("\n  %s✓ Synced %d, errors %d%s\n\n", Fmt.Green, synced, errors, Fmt.Reset)
+	odooLog("  %s+%d tx%s\n", Fmt.Green, synced, Fmt.Reset)
 	warnInvalidStatements(creds, uid, acc.OdooJournalID)
-	return nil
+	summary := fmt.Sprintf("%d new transactions uploaded", synced)
+	if errors > 0 {
+		summary = fmt.Sprintf("%d uploaded, %d errors", synced, errors)
+	}
+	return summary, nil
 }
 
 // syncStats tracks metrics for the sync summary report.
@@ -1031,370 +1467,19 @@ func (s *syncStats) print() {
 	fmt.Println()
 }
 
-// syncStripeToOdoo syncs Stripe payouts as Odoo bank statements.
-// Each payout becomes one statement containing its charges (gross), fees, and the payout line.
-func syncStripeToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, monthsLimit int, dryRun, force bool, payoutFilter string, untilDate time.Time) error {
-	stripeKey := os.Getenv("STRIPE_SECRET_KEY")
-	if stripeKey == "" {
-		return fmt.Errorf("STRIPE_SECRET_KEY not set")
-	}
-
-	// Fetch existing statement references to know which payouts are already synced
-	// We store payout ID in the "reference" field, and also check "name" for backward compat
-	existingStmts := map[string]bool{}
-	stmtResult, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
-		"account.bank.statement", "search_read",
-		[]interface{}{[]interface{}{
-			[]interface{}{"journal_id", "=", acc.OdooJournalID},
-		}},
-		map[string]interface{}{"fields": []string{"name", "reference"}, "limit": 0})
-	if err == nil {
-		var stmts []struct {
-			Name      string      `json:"name"`
-			Reference interface{} `json:"reference"`
-		}
-		json.Unmarshal(stmtResult, &stmts)
-		for _, s := range stmts {
-			existingStmts[s.Name] = true
-			if ref, ok := s.Reference.(string); ok && ref != "" {
-				existingStmts[ref] = true
-			}
-		}
-	}
-
-	// Fetch payouts from Stripe
-	if payoutFilter != "" {
-		fmt.Printf("  %sPayout filter: %s%s\n", Fmt.Dim, payoutFilter, Fmt.Reset)
-	} else {
-		fmt.Printf("  %sFetching Stripe payouts...%s\n", Fmt.Dim, Fmt.Reset)
-	}
-
-	var payouts []stripePayout
-	if payoutFilter != "" {
-		// For a single payout, check cache first then fetch if needed
-		cache := loadStripePayoutsCache()
-		var found *stripePayout
-		if cache != nil {
-			for _, po := range cache.Payouts {
-				if po.ID == payoutFilter {
-					found = &po
-					break
-				}
-			}
-		}
-		if found != nil {
-			payouts = []stripePayout{*found}
-		} else {
-			singlePo, err := fetchSinglePayout(stripeKey, payoutFilter)
-			if err != nil {
-				return fmt.Errorf("failed to fetch payout %s: %v", payoutFilter, err)
-			}
-			payouts = []stripePayout{*singlePo}
-		}
-	} else {
-		var err error
-		payouts, err = refreshStripePayoutsCache(stripeKey)
-		if err != nil {
-			return fmt.Errorf("failed to fetch payouts: %v", err)
-		}
-		payouts = filterPayoutsByMonths(payouts, monthsLimit)
-	}
-
-	// Filter by --until date
-	if !untilDate.IsZero() {
-		var filtered []stripePayout
-		for _, po := range payouts {
-			if time.Unix(po.ArrivalDate, 0).Before(untilDate) {
-				filtered = append(filtered, po)
-			}
-		}
-		payouts = filtered
-	}
-
-	fmt.Printf("  %s%d payouts found%s\n", Fmt.Dim, len(payouts), Fmt.Reset)
-
-	// Filter to unsynced payouts (unless --force)
-	var toSync []stripePayout
-	for _, po := range payouts {
-		if existingStmts[po.ID] && !force {
-			continue
-		}
-		toSync = append(toSync, po)
-	}
-
-	if len(toSync) == 0 {
-		fmt.Printf("\n  %s✓ All payouts synced%s\n\n", Fmt.Green, Fmt.Reset)
-		return nil
-	}
-
-	// Sort oldest first
-	sort.Slice(toSync, func(i, j int) bool {
-		return toSync[i].ArrivalDate < toSync[j].ArrivalDate
-	})
-
-	fmt.Printf("  %s%d payouts to sync%s\n\n", Fmt.Dim, len(toSync), Fmt.Reset)
-
-	// Load cache for updating tx counts
-	payoutsCache := loadStripePayoutsCache()
-	payoutsCacheByID := map[string]int{} // po ID → index in cache
-	if payoutsCache != nil {
-		for i, po := range payoutsCache.Payouts {
-			payoutsCacheByID[po.ID] = i
-		}
-	}
-
-	partnerCache := map[string]int{}
-	totalSynced := 0
-	stats := &syncStats{}
-	autoPayoutTxIDs := map[string]bool{} // txn IDs consumed by auto payout statements
-
-	for _, po := range toSync {
-		arrivalDate := time.Unix(po.ArrivalDate, 0).In(BrusselsTZ())
-		poAmount := centsToEuros(po.Amount)
-
-		fmt.Printf("  %s📦 Payout %s%s  %s  %.2f %s\n",
-			Fmt.Bold, po.ID, Fmt.Reset, arrivalDate.Format("2006-01-02"), poAmount, po.Currency)
-
-		// Fetch balance transactions for this payout
-		poTxs, err := fetchPayoutTransactions(stripeKey, po.ID)
-		isManual := err != nil && strings.Contains(err.Error(), "manual payout")
-		if err != nil && !isManual {
-			fmt.Printf("    %s✗ Failed to fetch transactions: %v%s\n", Fmt.Red, err, Fmt.Reset)
-			continue
-		}
-		if isManual {
-			fmt.Printf("    %sManual payout — recording withdrawal only%s\n", Fmt.Dim, Fmt.Reset)
-		}
-
-		// Update tx count in cache and track consumed txn IDs
-		if payoutsCache != nil {
-			if idx, ok := payoutsCacheByID[po.ID]; ok {
-				payoutsCache.Payouts[idx].TxCount = len(poTxs)
-			}
-		}
-		if !isManual {
-			for _, tx := range poTxs {
-				autoPayoutTxIDs[tx.ID] = true
-			}
-		}
-
-		if dryRun {
-			if isManual {
-				fmt.Printf("    %sManual payout: -%.2f (withdrawal only)%s\n", Fmt.Dim, poAmount, Fmt.Reset)
-			} else {
-				var totalCharges, totalFees float64
-				charges := 0
-				for _, tx := range poTxs {
-					if tx.Type == "charge" || tx.Type == "payment" {
-						charges++
-						totalCharges += centsToEuros(tx.Amount)
-						totalFees += centsToEuros(tx.Fee)
-					}
-				}
-				fmt.Printf("    %s%d charges, gross: %.2f, fees: -%.2f, payout: -%.2f%s\n",
-					Fmt.Dim, charges, totalCharges, totalFees, poAmount, Fmt.Reset)
-			}
-			continue
-		}
-
-		// If --force and statement already exists, delete it first
-		if force && existingStmts[po.ID] && !dryRun {
-			deleteOdooStatementByName(creds, uid, acc.OdooJournalID, po.ID)
-		}
-
-		// Create the bank statement for this payout
-		// balance_start=0, balance_end_real=0 (charges - fees - payout = 0)
-		stmtName := po.statementName()
-		stmtRef := po.ID
-		if po.StatementDescriptor != "" {
-			stmtRef = po.StatementDescriptor + " (" + po.ID + ")"
-		}
-		stmtCreateResult, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
-			"account.bank.statement", "create",
-			[]interface{}{[]interface{}{map[string]interface{}{
-				"journal_id":       acc.OdooJournalID,
-				"name":             stmtName,
-				"reference":        stmtRef,
-				"balance_start":    0,
-				"balance_end_real": 0,
-			}}}, nil)
-		if err != nil {
-			fmt.Printf("    %s✗ Failed to create statement: %v%s\n", Fmt.Red, err, Fmt.Reset)
-			continue
-		}
-		var stmtIDs []int
-		json.Unmarshal(stmtCreateResult, &stmtIDs)
-		if len(stmtIDs) == 0 {
-			fmt.Printf("    %s✗ Statement creation returned no ID%s\n", Fmt.Red, Fmt.Reset)
-			continue
-		}
-		stmtID := stmtIDs[0]
-
-		// Manual payouts: create orphan withdrawal line (no statement).
-		// Statements would break the balance chain since they don't net to zero.
-		if isManual {
-			// Delete the empty statement we just created — manual payouts don't need one
-			odooExec(creds.URL, creds.DB, uid, creds.Password,
-				"account.bank.statement", "unlink",
-				[]interface{}{[]interface{}{stmtID}}, nil)
-
-			importID := fmt.Sprintf("stripe:%s:%s:0", strings.ToLower(acc.AccountID), strings.ToLower(po.ID))
-			desc := po.Description
-			if desc == "" {
-				desc = fmt.Sprintf("Manual payout %s", arrivalDate.Format("2006-01-02"))
-			}
-			lineData := map[string]interface{}{
-				"journal_id":       acc.OdooJournalID,
-				"date":             arrivalDate.Format("2006-01-02"),
-				"payment_ref":      desc,
-				"amount":           -poAmount,
-				"unique_import_id": importID,
-			}
-			created, err := createOrAdoptStatementLine(creds, uid, lineData)
-			if err != nil {
-				fmt.Printf("    %s✗ %v%s\n", Fmt.Red, err, Fmt.Reset)
-			} else if created {
-				totalSynced++
-				stats.LinesCreated++
-				stats.PayoutsTotal -= poAmount
-				fmt.Printf("    %s✓ 1 line (withdrawal: -%.2f)%s\n", Fmt.Green, poAmount, Fmt.Reset)
-			} else {
-				stats.LinesSkipped++
-			}
-			continue
-		}
-
-		// Build all lines for this payout in one batch
-		var batchLines []map[string]interface{}
-		var totalFeeCents int64
-		var chargeFeeCents int64
-		var poCharges int
-		var poChargesGross float64
-		var poRefunds int
-		var poRefundsTotal float64
-		for _, tx := range poTxs {
-			txDate := time.Unix(tx.Created, 0).In(BrusselsTZ())
-			importID := fmt.Sprintf("stripe:%s:%s:0", strings.ToLower(acc.AccountID), strings.ToLower(tx.ID))
-
-			switch tx.Type {
-			case "charge", "payment":
-				gross := centsToEuros(tx.Amount)
-				totalFeeCents += tx.Fee
-				chargeFeeCents += tx.Fee
-				poCharges++
-				poChargesGross += gross
-
-				paymentRef := tx.CustomerName
-				if paymentRef == "" {
-					paymentRef = tx.Description
-				}
-				if paymentRef == "" {
-					paymentRef = "Stripe charge"
-				}
-
-				partnerID := resolveOdooPartner(creds, uid, tx.CustomerName, tx.CustomerEmail, partnerCache, stats)
-
-				lineData := map[string]interface{}{
-					"statement_id":     stmtID,
-					"journal_id":       acc.OdooJournalID,
-					"date":             txDate.Format("2006-01-02"),
-					"payment_ref":      paymentRef,
-					"amount":           gross,
-					"unique_import_id": importID,
-				}
-				if partnerID > 0 {
-					lineData["partner_id"] = partnerID
-				}
-				batchLines = append(batchLines, lineData)
-
-			case "refund", "payment_refund":
-				refundAmt := centsToEuros(tx.Amount)
-				poRefunds++
-				poRefundsTotal += refundAmt // negative
-				paymentRef := tx.Description
-				if paymentRef == "" {
-					paymentRef = "Refund"
-				}
-				batchLines = append(batchLines, map[string]interface{}{
-					"statement_id":     stmtID,
-					"journal_id":       acc.OdooJournalID,
-					"date":             txDate.Format("2006-01-02"),
-					"payment_ref":      paymentRef,
-					"amount":           refundAmt,
-					"unique_import_id": importID,
-				})
-
-			case "payout":
-				payoutAmt := centsToEuros(tx.Amount)
-				batchLines = append(batchLines, map[string]interface{}{
-					"statement_id":     stmtID,
-					"journal_id":       acc.OdooJournalID,
-					"date":             txDate.Format("2006-01-02"),
-					"payment_ref":      fmt.Sprintf("Payout to bank %s", arrivalDate.Format("2006-01-02")),
-					"amount":           payoutAmt,
-					"unique_import_id": importID,
-				})
-
-			default:
-				// stripe_fee, adjustment, etc. — include in payout fee aggregation
-				totalFeeCents += -tx.Net
-				stats.StripeFees += centsToEuros(-tx.Net)
-			}
-		}
-
-		// Add aggregated fee line
-		totalFees := centsToEuros(totalFeeCents)
-		if totalFees > 0 {
-			batchLines = append(batchLines, map[string]interface{}{
-				"statement_id":     stmtID,
-				"journal_id":       acc.OdooJournalID,
-				"date":             arrivalDate.Format("2006-01-02"),
-				"payment_ref":      fmt.Sprintf("Stripe fees (payout %s)", arrivalDate.Format("2006-01-02")),
-				"amount":           roundCents(-totalFees),
-				"unique_import_id": fmt.Sprintf("stripe-fees:%s:%s:0", strings.ToLower(acc.AccountID), strings.ToLower(po.ID)),
-			})
-		}
-
-		// Batch create all lines for this payout
-		linesCreated, _ := batchCreateStatementLines(creds, uid, batchLines)
-		skipped := len(batchLines) - linesCreated
-		totalSynced += linesCreated
-		stats.LinesCreated += linesCreated
-		stats.LinesSkipped += skipped
-		stats.Statements++
-		stats.Charges += poCharges
-		stats.ChargesGross += poChargesGross
-		stats.Refunds += poRefunds
-		stats.RefundsTotal += poRefundsTotal
-		stats.ChargeFees += centsToEuros(chargeFeeCents)
-		stats.PayoutsTotal -= poAmount
-		fmt.Printf("    %s✓ %d lines (fees: -%.2f)%s\n", Fmt.Green, linesCreated, totalFees, Fmt.Reset)
-	}
-
-	// Save updated cache with tx counts
-	if payoutsCache != nil {
-		saveStripePayoutsCache(payoutsCache)
-	}
-
-	// Sync orphan charge lines — charges not already in any automatic payout statement.
-	// This covers: charges in manual payouts + recent pending charges.
-	if payoutFilter == "" {
-		orphanCount, err := syncStripeOrphanChargesToOdoo(acc, creds, uid, monthsLimit, untilDate, partnerCache, dryRun, stats, autoPayoutTxIDs)
-		if err != nil {
-			fmt.Printf("  %s⚠ Orphan charges sync error: %v%s\n", Fmt.Yellow, err, Fmt.Reset)
-		} else if orphanCount > 0 {
-			totalSynced += orphanCount
-		}
-	}
-
-	if !dryRun {
-		stats.print()
-		warnInvalidStatements(creds, uid, acc.OdooJournalID)
-	} else {
-		fmt.Printf("\n  %s✓ Dry run: %d payouts%s\n\n", Fmt.Green, len(toSync), Fmt.Reset)
-	}
-	return nil
+// syncStripeToOdoo syncs Stripe balance transactions into Odoo, grouping
+// them into bank statements bounded by automatic payouts. See
+// stripe_odoo_sync.go for the detailed model.
+//
+// monthsLimit is accepted but ignored — the resume cursor is derived from
+// the journal state. untilDate (if set) stops processing at that moment.
+// payoutFilter is rejected with an error (targeted-payout resync is not
+// supported in this model).
+func syncStripeToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, monthsLimit int, dryRun, force bool, payoutFilter string, untilDate time.Time) (string, error) {
+	_ = monthsLimit
+	return syncStripeChronological(acc, creds, uid, dryRun, force, payoutFilter, untilDate)
 }
+
 
 // warnInvalidStatements runs the statement invariant check and prints a warning
 // block listing any violations. Non-fatal — if Odoo is unreachable, stay silent.
@@ -1517,206 +1602,6 @@ func createOrAdoptStatementLine(creds *OdooCredentials, uid int, lineData map[st
 	return true, nil
 }
 
-// syncStripeOrphanChargesToOdoo syncs all local charge transactions not already in Odoo
-// as orphan lines (no statement). This covers charges in manual payouts and recent pending charges.
-// Charges already synced via automatic payout statements are skipped (same unique_import_id).
-func syncStripeOrphanChargesToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, monthsLimit int, untilDate time.Time, partnerCache map[string]int, dryRun bool, stats *syncStats, autoPayoutTxIDs map[string]bool) (int, error) {
-	// Load all local transactions for this account
-	localTxs := loadAccountTransactions(acc)
-
-	// Apply date filters
-	if monthsLimit > 0 {
-		cutoff := time.Now().AddDate(0, -monthsLimit, 0)
-		var filtered []TransactionEntry
-		for _, tx := range localTxs {
-			if time.Unix(tx.Timestamp, 0).After(cutoff) {
-				filtered = append(filtered, tx)
-			}
-		}
-		localTxs = filtered
-	}
-	if !untilDate.IsZero() {
-		var filtered []TransactionEntry
-		for _, tx := range localTxs {
-			if time.Unix(tx.Timestamp, 0).Before(untilDate) {
-				filtered = append(filtered, tx)
-			}
-		}
-		localTxs = filtered
-	}
-
-	// Fetch existing IDs from Odoo
-	existingIDs, _ := fetchOdooImportIDs(creds.URL, creds.DB, uid, creds.Password, acc.OdooJournalID)
-
-	// Find charges not yet in Odoo
-	var toSync []TransactionEntry
-	for _, tx := range localTxs {
-		importID := buildUniqueImportID(acc, tx)
-		if existingIDs[importID] {
-			continue // already in Odoo (e.g. charge in auto payout statement)
-		}
-		// Skip billing fee DEBITs that are already aggregated in an auto payout fee line
-		if tx.Type == "DEBIT" && autoPayoutTxIDs[tx.TxHash] {
-			continue
-		}
-		toSync = append(toSync, tx)
-	}
-
-	if len(toSync) == 0 {
-		return 0, nil
-	}
-
-	fmt.Printf("\n  %s📋 %d orphan transactions (not in any payout statement)%s\n", Fmt.Dim, len(toSync), Fmt.Reset)
-
-	// Pre-resolve all partners to avoid per-line API calls
-	if !dryRun {
-		uniquePartners := map[string]string{} // name → email
-		for _, tx := range toSync {
-			name := tx.Counterparty
-			email, _ := tx.Metadata["email"].(string)
-			if name != "" {
-				if _, exists := uniquePartners[name]; !exists {
-					uniquePartners[name] = email
-				}
-			}
-		}
-		fmt.Printf("    %sResolving %d partners...%s\n", Fmt.Dim, len(uniquePartners), Fmt.Reset)
-		for name, email := range uniquePartners {
-			resolveOdooPartner(creds, uid, name, email, partnerCache, stats)
-		}
-	}
-
-	if dryRun {
-		var totalGross float64
-		for _, tx := range toSync {
-			amt := tx.GrossAmount
-			if tx.Type == "DEBIT" {
-				amt = -amt
-			}
-			totalGross += amt
-		}
-		fmt.Printf("    %sWould create %d orphan lines, total gross: %.2f%s\n", Fmt.Dim, len(toSync), totalGross, Fmt.Reset)
-		return len(toSync), nil
-	}
-
-	// Build all orphan lines + monthly fee lines, then batch create
-	var batchLines []map[string]interface{}
-	monthlyFeeCents := map[string]int64{}
-	var orphanFeeCents int64
-
-	for _, tx := range toSync {
-		txDate := time.Unix(tx.Timestamp, 0).In(BrusselsTZ())
-		importID := buildUniqueImportID(acc, tx)
-
-		amt := roundCents(tx.GrossAmount)
-		if amt == 0 {
-			amt = roundCents(math.Abs(tx.Amount) + tx.Fee)
-		}
-
-		// Track stats by type
-		if tx.Type == "DEBIT" {
-			amt = -amt
-			// Distinguish refunds from Stripe billing fees using metadata.category
-			metaCat, _ := tx.Metadata["category"].(string)
-			if metaCat == "fee" {
-				stats.StripeFees += -amt // positive
-			} else {
-				stats.Refunds++
-				stats.RefundsTotal += amt // negative
-			}
-		} else {
-			stats.Charges++
-			stats.ChargesGross += amt
-		}
-
-		// Accumulate fees for monthly fee lines (using cents for precision)
-		if tx.Fee > 0 {
-			feeCents := int64(math.Round(tx.Fee * 100))
-			ym := txDate.Format("2006-01")
-			monthlyFeeCents[ym] += feeCents
-			orphanFeeCents += feeCents
-		}
-
-		paymentRef := tx.Counterparty
-		if paymentRef == "" {
-			if d, ok := tx.Metadata["description"].(string); ok && d != "" {
-				paymentRef = d
-			}
-		}
-		if paymentRef == "" {
-			paymentRef = "Stripe charge"
-		}
-
-		partnerEmail, _ := tx.Metadata["email"].(string)
-		partnerID := resolveOdooPartner(creds, uid, tx.Counterparty, partnerEmail, partnerCache)
-
-		lineData := map[string]interface{}{
-			"journal_id":       acc.OdooJournalID,
-			"date":             txDate.Format("2006-01-02"),
-			"payment_ref":      paymentRef,
-			"amount":           amt,
-			"unique_import_id": importID,
-		}
-		if partnerID > 0 {
-			lineData["partner_id"] = partnerID
-		}
-		batchLines = append(batchLines, lineData)
-	}
-
-	// Add monthly fee lines (computed from cent totals for precision)
-	for ym, feeCents := range monthlyFeeCents {
-		if feeCents == 0 {
-			continue
-		}
-		feeImportID := fmt.Sprintf("stripe-orphan-fees:%s:%s", strings.ToLower(acc.AccountID), ym)
-		if existingIDs[feeImportID] {
-			continue
-		}
-		parts := strings.Split(ym, "-")
-		var yi, mi int
-		fmt.Sscanf(parts[0], "%d", &yi)
-		fmt.Sscanf(parts[1], "%d", &mi)
-		lastDay := time.Date(yi, time.Month(mi)+1, 0, 0, 0, 0, 0, BrusselsTZ())
-
-		batchLines = append(batchLines, map[string]interface{}{
-			"journal_id":       acc.OdooJournalID,
-			"date":             lastDay.Format("2006-01-02"),
-			"payment_ref":      fmt.Sprintf("Stripe fees %s", ym),
-			"amount":           centsToEuros(-feeCents),
-			"unique_import_id": feeImportID,
-		})
-	}
-
-	// Update stats with cent-precise fee total
-	stats.ChargeFees += centsToEuros(orphanFeeCents)
-
-	// Batch create in chunks of 100
-	linesCreated := 0
-	chunkSize := 100
-	for i := 0; i < len(batchLines); i += chunkSize {
-		end := i + chunkSize
-		if end > len(batchLines) {
-			end = len(batchLines)
-		}
-		chunk := batchLines[i:end]
-		n, _ := batchCreateStatementLines(creds, uid, chunk)
-		linesCreated += n
-		if i+chunkSize < len(batchLines) {
-			fmt.Printf("    %s... %d/%d%s\r", Fmt.Dim, linesCreated, len(batchLines), Fmt.Reset)
-		}
-	}
-
-	// Track stats
-	skipped := len(batchLines) - linesCreated
-	stats.LinesCreated += linesCreated
-	stats.LinesSkipped += skipped
-
-	if linesCreated > 0 {
-		fmt.Printf("    %s✓ %d orphan lines created (incl. monthly fee lines)%s\n", Fmt.Green, linesCreated, Fmt.Reset)
-	}
-
-	return linesCreated, nil
-}
 
 // stripePayout represents a Stripe payout object.
 type stripePayout struct {
@@ -1935,60 +1820,6 @@ func fetchStripePayoutsFromAPI(apiKey string, createdAfter int64) ([]stripePayou
 	return allPayouts, nil
 }
 
-// fetchPayoutTransactions fetches all balance transactions for a specific payout.
-func fetchPayoutTransactions(apiKey, payoutID string) ([]StripeTransaction, error) {
-	var allTxs []StripeTransaction
-	startingAfter := ""
-
-	for {
-		url := fmt.Sprintf("https://api.stripe.com/v1/balance_transactions?payout=%s&limit=100&expand[]=data.source&expand[]=data.source.customer",
-			payoutID)
-		if startingAfter != "" {
-			url += "&starting_after=" + startingAfter
-		}
-
-		req, err := http.NewRequest("GET", url, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode == 429 {
-			time.Sleep(2 * time.Second)
-			continue
-		}
-		if resp.StatusCode == 400 {
-			return nil, fmt.Errorf("manual payout")
-		}
-		if resp.StatusCode != 200 {
-			return nil, fmt.Errorf("Stripe API returned %d", resp.StatusCode)
-		}
-
-		var listResp StripeListResponse
-		if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
-			return nil, err
-		}
-
-		for i := range listResp.Data {
-			enrichStripeTransaction(&listResp.Data[i])
-		}
-		allTxs = append(allTxs, listResp.Data...)
-
-		if !listResp.HasMore || len(listResp.Data) == 0 {
-			break
-		}
-		startingAfter = listResp.Data[len(listResp.Data)-1].ID
-		time.Sleep(200 * time.Millisecond)
-	}
-
-	return allTxs, nil
-}
 
 // emptyOdooJournal deletes all statement lines and statements for a journal after confirmation.
 // In Odoo, each bank statement line auto-creates a journal entry (account.move).
@@ -2418,130 +2249,6 @@ func fetchOdooImportIDs(odooURL, db string, uid int, password string, journalID 
 	return result, nil
 }
 
-// deleteOdooStatementByName finds and deletes a statement and its lines by name or reference.
-func deleteOdooStatementByName(creds *OdooCredentials, uid int, journalID int, name string) {
-	// Find the statement by name or reference (payout ID)
-	result, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
-		"account.bank.statement", "search_read",
-		[]interface{}{[]interface{}{
-			[]interface{}{"journal_id", "=", journalID},
-			"|",
-			[]interface{}{"name", "=", name},
-			[]interface{}{"reference", "=", name},
-		}},
-		map[string]interface{}{"fields": []string{"id", "line_ids"}, "limit": 1})
-	if err != nil {
-		return
-	}
-	var stmts []struct {
-		ID      int   `json:"id"`
-		LineIDs []int `json:"line_ids"`
-	}
-	json.Unmarshal(result, &stmts)
-	if len(stmts) == 0 {
-		return
-	}
-
-	stmt := stmts[0]
-
-	// Get move IDs for the statement lines
-	if len(stmt.LineIDs) > 0 {
-		lineIDsIface := make([]interface{}, len(stmt.LineIDs))
-		for i, id := range stmt.LineIDs {
-			lineIDsIface[i] = id
-		}
-
-		linesData, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
-			"account.bank.statement.line", "search_read",
-			[]interface{}{[]interface{}{
-				[]interface{}{"id", "in", lineIDsIface},
-			}},
-			map[string]interface{}{"fields": []string{"move_id"}})
-		if err == nil {
-			var lines []struct {
-				MoveID interface{} `json:"move_id"`
-			}
-			json.Unmarshal(linesData, &lines)
-			var moveIDs []interface{}
-			for _, l := range lines {
-				if mid := odooFieldID(l.MoveID); mid > 0 {
-					moveIDs = append(moveIDs, mid)
-				}
-			}
-			if len(moveIDs) > 0 {
-				// Unreconcile
-				reconLines, _ := odooExec(creds.URL, creds.DB, uid, creds.Password,
-					"account.move.line", "search",
-					[]interface{}{[]interface{}{
-						[]interface{}{"move_id", "in", moveIDs},
-						[]interface{}{"reconciled", "=", true},
-					}}, nil)
-				var reconIDs []int
-				json.Unmarshal(reconLines, &reconIDs)
-				if len(reconIDs) > 0 {
-					rIface := make([]interface{}, len(reconIDs))
-					for i, id := range reconIDs {
-						rIface[i] = id
-					}
-					odooExec(creds.URL, creds.DB, uid, creds.Password,
-						"account.move.line", "remove_move_reconcile",
-						[]interface{}{rIface}, nil)
-				}
-				// Reset to draft and delete
-				odooExec(creds.URL, creds.DB, uid, creds.Password,
-					"account.move", "button_draft", []interface{}{moveIDs}, nil)
-				odooExec(creds.URL, creds.DB, uid, creds.Password,
-					"account.move", "unlink", []interface{}{moveIDs}, nil)
-			}
-		}
-	}
-
-	// Delete the statement itself
-	odooExec(creds.URL, creds.DB, uid, creds.Password,
-		"account.bank.statement", "unlink",
-		[]interface{}{[]interface{}{stmt.ID}}, nil)
-}
-
-// fetchSinglePayout fetches a single payout by ID from Stripe.
-func fetchSinglePayout(apiKey, payoutID string) (*stripePayout, error) {
-	url := fmt.Sprintf("https://api.stripe.com/v1/payouts/%s?expand[]=destination", payoutID)
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("Stripe API returned %d", resp.StatusCode)
-	}
-
-	var raw json.RawMessage
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		return nil, err
-	}
-
-	var po stripePayout
-	json.Unmarshal(raw, &po)
-
-	var expanded struct {
-		Destination *struct {
-			Last4    string `json:"last4"`
-			BankName string `json:"bank_name"`
-		} `json:"destination"`
-	}
-	json.Unmarshal(raw, &expanded)
-	if expanded.Destination != nil {
-		po.BankLast4 = expanded.Destination.Last4
-		po.BankName = expanded.Destination.BankName
-	}
-	return &po, nil
-}
 
 // AccountStripePayouts lists Stripe payouts from cache (no API calls unless --refresh).
 func AccountStripePayouts(slug string, args []string) error {
@@ -2748,7 +2455,8 @@ func printAccountSlugHelp(slug string) {
 
 	fmt.Printf("  %s%schb accounts %s sync%s\n", f.Bold, f.Cyan, slug, f.Reset)
 	if acc.Provider == "stripe" {
-		fmt.Printf("    %sSync Stripe payouts to Odoo as bank statements%s\n", f.Dim, f.Reset)
+		fmt.Printf("    %sSync Stripe balance transactions into the linked Odoo journal.%s\n", f.Dim, f.Reset)
+		fmt.Printf("    %sStatements are opened/closed automatically around auto-payouts.%s\n", f.Dim, f.Reset)
 	} else {
 		fmt.Printf("    %sSync transactions to linked Odoo journal%s\n", f.Dim, f.Reset)
 	}
@@ -2762,18 +2470,15 @@ func printAccountSlugHelp(slug string) {
 	fmt.Printf("%sOPTIONS%s (for sync)\n\n", f.Bold, f.Reset)
 	fmt.Printf("  %s--dry-run%s          Preview what would be synced\n", f.Yellow, f.Reset)
 	fmt.Printf("  %s--force%s            Re-sync (delete existing data first)\n", f.Yellow, f.Reset)
-	fmt.Printf("  %s--months N%s         Limit to last N months\n", f.Yellow, f.Reset)
-	if acc.Provider == "stripe" {
-		fmt.Printf("  %s--payout po_xxx%s   Sync a specific payout only\n", f.Yellow, f.Reset)
-	}
+	fmt.Printf("  %s--until YYYYMMDD%s   Stop processing at this date\n", f.Yellow, f.Reset)
 	fmt.Println()
 
 	// Show examples
 	fmt.Printf("%sEXAMPLES%s\n\n", f.Bold, f.Reset)
 	if acc.Provider == "stripe" {
 		fmt.Printf("  %s$ chb accounts %s payouts%s\n", f.Dim, slug, f.Reset)
-		fmt.Printf("  %s$ chb accounts %s sync --months 2 --dry-run%s\n", f.Dim, slug, f.Reset)
-		fmt.Printf("  %s$ chb accounts %s sync --payout po_xxx --force%s\n", f.Dim, slug, f.Reset)
+		fmt.Printf("  %s$ chb accounts %s sync --dry-run%s\n", f.Dim, slug, f.Reset)
+		fmt.Printf("  %s$ chb accounts %s sync --force%s\n", f.Dim, slug, f.Reset)
 	} else {
 		fmt.Printf("  %s$ chb accounts %s sync --dry-run%s\n", f.Dim, slug, f.Reset)
 		fmt.Printf("  %s$ chb accounts %s sync --force%s\n", f.Dim, slug, f.Reset)
@@ -2792,8 +2497,7 @@ func printAccountsHelp() {
   %schb accounts <slug> link%s              Link account to an Odoo bank journal
   %schb accounts <slug> sync%s              Sync transactions to linked Odoo journal
   %schb accounts <slug> sync --dry-run%s    Show what would be synced
-  %schb accounts <slug> sync --months 2%s   Sync only last N months
-  %schb accounts <slug> sync --payout po_%s Sync a specific Stripe payout
+  %schb accounts <slug> sync --until YYYYMMDD%s   Stop processing at this date
   %schb accounts <slug> sync --force%s      Re-sync (delete + recreate)
   %schb accounts <slug> payouts%s           List Stripe payouts
 
@@ -2804,7 +2508,6 @@ func printAccountsHelp() {
 `,
 		f.Bold, f.Reset,
 		f.Bold, f.Reset,
-		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,

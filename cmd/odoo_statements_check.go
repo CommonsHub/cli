@@ -6,6 +6,22 @@ import (
 	"math"
 )
 
+// odooStr tolerates Odoo's habit of returning `false` for unset string fields.
+type odooStr string
+
+func (s *odooStr) UnmarshalJSON(b []byte) error {
+	if len(b) == 0 || string(b) == "false" || string(b) == "null" {
+		*s = ""
+		return nil
+	}
+	var v string
+	if err := json.Unmarshal(b, &v); err != nil {
+		return err
+	}
+	*s = odooStr(v)
+	return nil
+}
+
 // StatementBalanceIssue describes a single invariant violation on an Odoo
 // bank statement.
 //
@@ -27,8 +43,13 @@ type StatementBalanceIssue struct {
 	LineSum         float64
 	RunningBalance  float64 // BalanceStart + LineSum
 	LineCount       int
-	Kind            string  // "balance_mismatch" | "chain_gap"
-	PreviousEndReal float64 // for chain_gap only
+	Kind              string  // "balance_mismatch" | "chain_gap"
+	StatementRef      string  // Odoo statement reference field (Stripe payout ID for Stripe journals)
+	PreviousEndReal   float64 // for chain_gap only
+	PreviousStmtID    int     // for chain_gap only
+	PreviousStmtName  string  // for chain_gap only
+	PreviousStmtDate  string  // for chain_gap only
+	PreviousStmtRef   string  // for chain_gap only
 }
 
 // Diff returns running minus declared; positive means declared is too low.
@@ -45,7 +66,7 @@ func CheckOdooJournalStatements(creds *OdooCredentials, uid int, journalID int) 
 			[]interface{}{"journal_id", "=", journalID},
 		}},
 		map[string]interface{}{
-			"fields": []string{"id", "name", "date", "balance_start", "balance_end_real"},
+			"fields": []string{"id", "name", "reference", "date", "balance_start", "balance_end_real"},
 			"order":  "date asc, id asc",
 		})
 	if err != nil {
@@ -53,8 +74,9 @@ func CheckOdooJournalStatements(creds *OdooCredentials, uid int, journalID int) 
 	}
 	var stmts []struct {
 		ID             int     `json:"id"`
-		Name           string  `json:"name"`
-		Date           string  `json:"date"`
+		Name           odooStr `json:"name"`
+		Reference      odooStr `json:"reference"`
+		Date           odooStr `json:"date"`
 		BalanceStart   float64 `json:"balance_start"`
 		BalanceEndReal float64 `json:"balance_end_real"`
 	}
@@ -73,6 +95,8 @@ func CheckOdooJournalStatements(creds *OdooCredentials, uid int, journalID int) 
 
 	var issues []StatementBalanceIssue
 	var prevEndReal float64
+	var prevID int
+	var prevName, prevDate, prevRef string
 	var hasPrev bool
 	for _, s := range stmts {
 		lineSum := lineSums[s.ID]
@@ -83,8 +107,9 @@ func CheckOdooJournalStatements(creds *OdooCredentials, uid int, journalID int) 
 			issues = append(issues, StatementBalanceIssue{
 				JournalID:      journalID,
 				StatementID:    s.ID,
-				StatementName:  s.Name,
-				Date:           s.Date,
+				StatementName:  string(s.Name),
+				StatementRef:   string(s.Reference),
+				Date:           string(s.Date),
 				BalanceStart:   s.BalanceStart,
 				BalanceEndReal: s.BalanceEndReal,
 				LineSum:        lineSum,
@@ -96,21 +121,30 @@ func CheckOdooJournalStatements(creds *OdooCredentials, uid int, journalID int) 
 
 		if hasPrev && math.Abs(s.BalanceStart-prevEndReal) > 0.005 {
 			issues = append(issues, StatementBalanceIssue{
-				JournalID:       journalID,
-				StatementID:     s.ID,
-				StatementName:   s.Name,
-				Date:            s.Date,
-				BalanceStart:    s.BalanceStart,
-				BalanceEndReal:  s.BalanceEndReal,
-				LineSum:         lineSum,
-				RunningBalance:  running,
-				LineCount:       lineCount,
-				Kind:            "chain_gap",
-				PreviousEndReal: prevEndReal,
+				JournalID:        journalID,
+				StatementID:      s.ID,
+				StatementName:    string(s.Name),
+				StatementRef:     string(s.Reference),
+				Date:             string(s.Date),
+				BalanceStart:     s.BalanceStart,
+				BalanceEndReal:   s.BalanceEndReal,
+				LineSum:          lineSum,
+				RunningBalance:   running,
+				LineCount:        lineCount,
+				Kind:             "chain_gap",
+				PreviousEndReal:  prevEndReal,
+				PreviousStmtID:   prevID,
+				PreviousStmtName: prevName,
+				PreviousStmtDate: prevDate,
+				PreviousStmtRef:  prevRef,
 			})
 		}
 
 		prevEndReal = s.BalanceEndReal
+		prevID = s.ID
+		prevName = string(s.Name)
+		prevDate = string(s.Date)
+		prevRef = string(s.Reference)
 		hasPrev = true
 	}
 
@@ -159,17 +193,6 @@ func odooLineSumsByStatement(creds *OdooCredentials, uid int, journalID int) (ma
 	return sums, counts, nil
 }
 
-// FixOdooStatementBalance sets balance_end_real to the supplied running balance
-// so the statement's declared ending balance matches the sum of its lines.
-func FixOdooStatementBalance(creds *OdooCredentials, uid int, stmtID int, runningBalance float64) error {
-	_, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
-		"account.bank.statement", "write",
-		[]interface{}{[]interface{}{stmtID}, map[string]interface{}{
-			"balance_end_real": runningBalance,
-		}}, nil)
-	return err
-}
-
 // PrintStatementIssues writes a human-readable summary of the supplied issues.
 func PrintStatementIssues(issues []StatementBalanceIssue) {
 	if len(issues) == 0 {
@@ -187,6 +210,11 @@ func PrintStatementIssues(issues []StatementBalanceIssue) {
 				Fmt.Dim, fmtEUR(i.BalanceEndReal), Fmt.Red, fmtEURSigned(i.Diff()), Fmt.Reset)
 		case "chain_gap":
 			fmt.Printf("  %s#%d  %s  %s(%s) — chain gap%s\n", Fmt.Bold, i.StatementID, i.StatementName, Fmt.Dim, i.Date, Fmt.Reset)
+			prevLine := fmt.Sprintf("  %sprev statement    #%d  %s  (%s)", Fmt.Dim, i.PreviousStmtID, i.PreviousStmtName, i.PreviousStmtDate)
+			if i.PreviousStmtRef != "" {
+				prevLine += "  ref=" + i.PreviousStmtRef
+			}
+			fmt.Printf("  %s%s\n", prevLine, Fmt.Reset)
 			fmt.Printf("    %sprev end_real     %12s%s\n", Fmt.Dim, fmtEUR(i.PreviousEndReal), Fmt.Reset)
 			fmt.Printf("    %sbalance_start     %12s  %s← should equal prev end_real (off by %s)%s\n\n",
 				Fmt.Dim, fmtEUR(i.BalanceStart), Fmt.Red,

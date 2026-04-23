@@ -480,6 +480,10 @@ func getAllChannelIDs() []string {
 
 // ── Generate command ────────────────────────────────────────────────────────
 
+// Generate runs all derived-data generators (images, contributors,
+// transactions, counterparties, members, events, …). Prefer the targeted
+// variants (GenerateTransactions, GenerateMessages, GenerateEvents,
+// GenerateMembers) after a scoped sync — they skip unrelated work.
 func Generate(args []string) error {
 	if HasFlag(args, "--help", "-h", "help") {
 		printGenerateHelp()
@@ -625,6 +629,135 @@ func Generate(args []string) error {
 
 	fmt.Printf("\n%s✅ All data generation complete!%s\n\n", Fmt.Green, Fmt.Reset)
 	return nil
+}
+
+// GenerateTransactions runs only the transaction-related generators. This
+// is what AccountFetch / `chb accounts <slug> sync` invoke, since they
+// don't touch messages, images, events, members, etc.
+//
+// Steps: aggregated transactions (`transactions.json`) + counterparties.
+func GenerateTransactions(args []string) error {
+	dataDir := DataDir()
+	now := time.Now().In(BrusselsTZ())
+	posYear, posMonth, posFound := ParseYearMonthArg(args)
+	startMonth, isHistory := ResolveSinceMonth(args, "")
+	if !isHistory && !posFound {
+		startMonth = DefaultRecentStartMonth(now)
+	}
+
+	years := getAvailableYears(dataDir)
+	if len(years) == 0 {
+		return nil
+	}
+	scopes := collectGenerateScopes(dataDir, years, posYear, posMonth, posFound, startMonth)
+
+	settings, _ := LoadSettings()
+	latestDir := filepath.Join(dataDir, "latest")
+
+	fmt.Printf("\n%s💰 Generating transactions...%s\n", Fmt.Bold, Fmt.Reset)
+	totalTx := 0
+	for _, scope := range scopes {
+		n := generateTransactionsGo(dataDir, scope.Year, scope.Month, settings)
+		if n > 0 {
+			fmt.Printf("  ✓ %s-%s: %d transaction(s)\n", scope.Year, scope.Month, n)
+			totalTx += n
+		}
+	}
+	if _, err := os.Stat(latestDir); err == nil {
+		n := generateTransactionsGo(dataDir, "latest", "", settings)
+		if n > 0 {
+			fmt.Printf("  ✓ latest: %d transaction(s)\n", n)
+			totalTx += n
+		}
+	}
+
+	fmt.Printf("\n%s🏢 Generating counterparties...%s\n", Fmt.Bold, Fmt.Reset)
+	for _, scope := range scopes {
+		generateCounterpartiesGo(dataDir, scope.Year, scope.Month)
+	}
+	if _, err := os.Stat(latestDir); err == nil {
+		generateCounterpartiesGo(dataDir, "latest", "")
+	}
+
+	fmt.Printf("\n%s✓ Transaction generators complete%s (%d tx across %d month(s))\n\n",
+		Fmt.Green, Fmt.Reset, totalTx, len(scopes))
+	return nil
+}
+
+// GenerateEvents runs only event-related generators (latest events digest).
+func GenerateEvents(args []string) error {
+	dataDir := DataDir()
+	years := getAvailableYears(dataDir)
+	if len(years) == 0 {
+		return nil
+	}
+	fmt.Printf("\n%s📅 Generating latest events...%s\n", Fmt.Bold, Fmt.Reset)
+	generateLatestEventsGo(dataDir, years)
+	fmt.Printf("%s✓ Events generators complete%s\n\n", Fmt.Green, Fmt.Reset)
+	return nil
+}
+
+// GenerateMessages runs only message-derived generators: per-month images.
+func GenerateMessages(args []string) error {
+	dataDir := DataDir()
+	now := time.Now().In(BrusselsTZ())
+	posYear, posMonth, posFound := ParseYearMonthArg(args)
+	startMonth, isHistory := ResolveSinceMonth(args, "")
+	if !isHistory && !posFound {
+		startMonth = DefaultRecentStartMonth(now)
+	}
+	years := getAvailableYears(dataDir)
+	if len(years) == 0 {
+		return nil
+	}
+	scopes := collectGenerateScopes(dataDir, years, posYear, posMonth, posFound, startMonth)
+
+	fmt.Printf("\n%s📸 Generating images...%s\n", Fmt.Bold, Fmt.Reset)
+	total := 0
+	for _, scope := range scopes {
+		n := generateMonthImagesGo(dataDir, scope.Year, scope.Month)
+		if n > 0 {
+			fmt.Printf("  ✓ %s-%s: %d image(s)\n", scope.Year, scope.Month, n)
+			total += n
+		}
+	}
+	if latestDir := filepath.Join(dataDir, "latest"); dirExists(latestDir) {
+		n := generateMonthImagesGo(dataDir, "latest", "")
+		if n > 0 {
+			fmt.Printf("  ✓ latest: %d image(s)\n", n)
+			total += n
+		}
+	}
+	fmt.Printf("%s✓ Message generators complete%s (%d images)\n\n", Fmt.Green, Fmt.Reset, total)
+	return nil
+}
+
+// GenerateMembers runs only member-related generators.
+func GenerateMembers(args []string) error {
+	dataDir := DataDir()
+	now := time.Now().In(BrusselsTZ())
+	posYear, posMonth, posFound := ParseYearMonthArg(args)
+	startMonth, isHistory := ResolveSinceMonth(args, "")
+	if !isHistory && !posFound {
+		startMonth = DefaultRecentStartMonth(now)
+	}
+	years := getAvailableYears(dataDir)
+	if len(years) == 0 {
+		return nil
+	}
+	scopes := collectGenerateScopes(dataDir, years, posYear, posMonth, posFound, startMonth)
+
+	fmt.Printf("\n%s👥 Generating members...%s\n", Fmt.Bold, Fmt.Reset)
+	generateMembersGo(dataDir, scopes)
+	fmt.Printf("%s✓ Member generators complete%s\n\n", Fmt.Green, Fmt.Reset)
+	return nil
+}
+
+func dirExists(p string) bool {
+	if st, err := os.Stat(p); err == nil && st.IsDir() {
+		return true
+	}
+	return false
 }
 
 type generateScope struct {
@@ -2268,18 +2401,18 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 	for i, tx := range transactions {
 		publicTxs[i] = tx
 
-		// Extract PII: customer name (for Stripe) and email
+		// Extract PII: customer name (for Stripe) and email.
 		var piiName, piiEmail string
 		if email, ok := tx.Metadata["email"].(string); ok && email != "" {
 			piiEmail = email
 		}
 
-		// For Stripe/Monerium, counterparty may be a person's name (PII)
-		// Blockchain 0x addresses are public, not PII
+		// For Stripe/Monerium, counterparty may be a person's name (PII).
+		// Blockchain 0x addresses are public, not PII.
 		if tx.Provider == "stripe" || tx.Provider == "monerium" {
 			if tx.Counterparty != "" && !strings.HasPrefix(tx.Counterparty, "0x") {
 				piiName = tx.Counterparty
-				// Replace with description or generic label in public version
+				// Replace with description or generic label in public version.
 				if desc, ok := tx.Metadata["description"].(string); ok && desc != "" {
 					publicTxs[i].Counterparty = desc
 				} else if cat, ok := tx.Metadata["category"].(string); ok && cat != "" {
@@ -2290,13 +2423,23 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 			}
 		}
 
-		// Strip email from public metadata
-		if piiEmail != "" {
+		// Strip ANY email-looking value from public metadata. Merchant-side
+		// metadata often carries emails under keys like `stripe_email`,
+		// `stripe_receipt_email`, `customer_email` etc., so we can't just
+		// drop one well-known key — we detect by pattern and preserve
+		// the first one we see in the PII file.
+		if len(tx.Metadata) > 0 {
 			publicMeta := make(map[string]interface{}, len(tx.Metadata))
 			for k, v := range tx.Metadata {
+				if s, ok := v.(string); ok && emailPattern.MatchString(s) {
+					if piiEmail == "" {
+						piiEmail = s
+					}
+					continue
+				}
 				publicMeta[k] = v
 			}
-			delete(publicMeta, "email")
+			delete(publicMeta, "email") // legacy key, always redundant
 			publicTxs[i].Metadata = publicMeta
 		}
 
