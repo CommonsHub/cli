@@ -253,6 +253,14 @@ func uriKind(uri string) string {
 			return "ethereum:" + parts[2]
 		}
 	}
+	if strings.HasPrefix(uri, "odoo:") {
+		// odoo:<host>:<db>:<model>:<id> → odoo:<model>
+		parts := strings.Split(uri, ":")
+		if len(parts) >= 5 {
+			return "odoo:" + parts[3]
+		}
+		return "odoo"
+	}
 	return "unknown"
 }
 

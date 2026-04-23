@@ -75,6 +75,8 @@ type OdooOutgoingInvoice struct {
 	ReconciledTransaction *OdooReconciledTransaction `json:"reconciledTransaction,omitempty"`
 	Category              string                     `json:"category,omitempty"`
 	Categories            []string                   `json:"categories,omitempty"`
+	Collective            string                     `json:"collective,omitempty"`
+	Event                 string                     `json:"event,omitempty"`
 	Tags                  []string                   `json:"tags,omitempty"`
 	WriteDate             string                     `json:"writeDate,omitempty"`
 	CreateDate            string                     `json:"createDate,omitempty"`
@@ -99,6 +101,8 @@ type OdooOutgoingInvoicePublic struct {
 	ReconciledTransaction *OdooReconciledTransaction `json:"reconciledTransaction,omitempty"`
 	Category              string                     `json:"category,omitempty"`
 	Categories            []string                   `json:"categories,omitempty"`
+	Collective            string                     `json:"collective,omitempty"`
+	Event                 string                     `json:"event,omitempty"`
 	Tags                  []string                   `json:"tags,omitempty"`
 }
 
@@ -356,6 +360,9 @@ func InvoicesSync(args []string) (int, error) {
 		}
 		if byMonth[ym] == nil {
 			byMonth[ym] = map[int]OdooOutgoingInvoice{}
+		}
+		if prev, ok := byMonth[ym][inv.ID]; ok {
+			inv = preserveMoveAnnotations(inv, prev)
 		}
 		byMonth[ym][inv.ID] = inv
 		monthsTouched[ym] = true
@@ -1357,6 +1364,8 @@ func buildPublicInvoices(invoices []OdooOutgoingInvoice) []OdooOutgoingInvoicePu
 			ReconciledTransaction: inv.ReconciledTransaction,
 			Category:              inv.Category,
 			Categories:            inv.Categories,
+			Collective:            inv.Collective,
+			Event:                 inv.Event,
 			Tags:                  inv.Tags,
 		})
 	}

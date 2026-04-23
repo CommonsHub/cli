@@ -119,23 +119,67 @@ func main() {
 			cmd.TransactionsBrowser(txArgs)
 		}
 	case "invoices":
-		if len(args) > 1 && (args[1] == "sync" || args[1] == "help" || args[1] == "--help" || args[1] == "-h") {
+		invSub := ""
+		if len(args) > 1 {
+			invSub = args[1]
+		}
+		switch invSub {
+		case "sync", "help", "--help", "-h":
+			if len(args) > 2 && args[2] == "nostr" {
+				if err := cmd.InvoicesSyncNostr(args[3:]); err != nil {
+					fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
+					os.Exit(1)
+				}
+				return
+			}
 			if _, err := cmd.InvoicesSync(args[1:]); err != nil {
 				fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
 				os.Exit(1)
 			}
-		} else {
-			fmt.Fprintf(os.Stderr, "%sUsage: chb invoices sync [options]%s\n", cmd.Fmt.Yellow, cmd.Fmt.Reset)
+		case "categorize":
+			if err := cmd.InvoicesCategorize(args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
+				os.Exit(1)
+			}
+		case "publish":
+			if err := cmd.InvoicesPublish(args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
+				os.Exit(1)
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "%sUsage: chb invoices [sync|categorize|publish] [options]%s\n", cmd.Fmt.Yellow, cmd.Fmt.Reset)
 			os.Exit(1)
 		}
 	case "bills":
-		if len(args) > 1 && (args[1] == "sync" || args[1] == "help" || args[1] == "--help" || args[1] == "-h") {
+		billSub := ""
+		if len(args) > 1 {
+			billSub = args[1]
+		}
+		switch billSub {
+		case "sync", "help", "--help", "-h":
+			if len(args) > 2 && args[2] == "nostr" {
+				if err := cmd.BillsSyncNostr(args[3:]); err != nil {
+					fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
+					os.Exit(1)
+				}
+				return
+			}
 			if _, err := cmd.BillsSync(args[1:]); err != nil {
 				fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
 				os.Exit(1)
 			}
-		} else {
-			fmt.Fprintf(os.Stderr, "%sUsage: chb bills sync [options]%s\n", cmd.Fmt.Yellow, cmd.Fmt.Reset)
+		case "categorize":
+			if err := cmd.BillsCategorize(args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
+				os.Exit(1)
+			}
+		case "publish":
+			if err := cmd.BillsPublish(args[2:]); err != nil {
+				fmt.Fprintf(os.Stderr, "%sError:%s %v\n", cmd.Fmt.Red, cmd.Fmt.Reset, err)
+				os.Exit(1)
+			}
+		default:
+			fmt.Fprintf(os.Stderr, "%sUsage: chb bills [sync|categorize|publish] [options]%s\n", cmd.Fmt.Yellow, cmd.Fmt.Reset)
 			os.Exit(1)
 		}
 	case "messages":

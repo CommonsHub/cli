@@ -136,6 +136,9 @@ func BillsSync(args []string) (int, error) {
 		if byMonth[ym] == nil {
 			byMonth[ym] = map[int]OdooOutgoingInvoice{}
 		}
+		if prev, ok := byMonth[ym][bill.ID]; ok {
+			bill = preserveMoveAnnotations(bill, prev)
+		}
 		byMonth[ym][bill.ID] = bill
 		monthsTouched[ym] = true
 	}
