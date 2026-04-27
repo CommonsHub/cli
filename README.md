@@ -90,7 +90,8 @@ chb report 2025/11                # monthly report
 
 | Variable | Description |
 |---|---|
-| `DATA_DIR` | Data directory (default: `./data`) |
+| `APP_DATA_DIR` | App config/state directory for `settings.json`, `accounts.json`, `config.env`, etc. (default: `~/.chb`) |
+| `DATA_DIR` | Generated data directory override (default: `$APP_DATA_DIR/data`) |
 | `LUMA_API_KEY` | Luma API key (enables rich event data) |
 | `ETHERSCAN_API_KEY` | Etherscan/Gnosisscan API key |
 | `DISCORD_BOT_TOKEN` | Discord bot token |

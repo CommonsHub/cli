@@ -287,7 +287,7 @@ func checkRoomChannelDirs(dataDir string, report *doctorReport) {
 			Severity: "warning",
 			Scope:    "config",
 			Message:  "could not load rooms.json; room Discord channel checks skipped",
-			Fix:      "Ensure ~/.chb/rooms.json exists and is valid JSON",
+			Fix:      "Ensure APP_DATA_DIR/rooms.json exists and is valid JSON",
 		})
 		return
 	}

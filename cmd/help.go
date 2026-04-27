@@ -66,7 +66,8 @@ func PrintHelp(version string) {
   $ chb report 2025                      # yearly report%s
 
 %sENVIRONMENT%s
-  %sDATA_DIR%s            Data directory (default: ./data)
+  %sAPP_DATA_DIR%s        App config/state directory (default: ~/.chb)
+  %sDATA_DIR%s            Generated data directory (default: $APP_DATA_DIR/data)
 
   %sETHERSCAN_API_KEY%s   Etherscan/Gnosisscan API key
   %sDISCORD_BOT_TOKEN%s   Discord bot token
@@ -106,6 +107,7 @@ func PrintHelp(version string) {
 		f.Bold, f.Reset,
 		f.Dim, f.Reset,
 		f.Bold, f.Reset,
+		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,

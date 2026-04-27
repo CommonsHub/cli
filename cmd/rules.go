@@ -11,20 +11,20 @@ import (
 // RuleMatch defines what a rule matches against.
 type RuleMatch struct {
 	Sender      string `json:"sender,omitempty"`      // glob on counterparty for incoming (IBAN, 0xaddr, name)
-	Recipient   string `json:"recipient,omitempty"`    // glob on counterparty for outgoing (IBAN, 0xaddr, name)
-	Description string `json:"description,omitempty"`  // glob on tx description/memo
-	Account     string `json:"account,omitempty"`      // account slug (fridge, coffee, stripe, savings)
-	Provider    string `json:"provider,omitempty"`     // stripe, etherscan, monerium
-	Currency    string `json:"currency,omitempty"`     // EUR, EURe, EURb, CHT
-	Direction   string `json:"direction,omitempty"`    // "in" or "out"
-	Application string `json:"application,omitempty"`  // stripe connect app: Luma, Open Collective, etc.
+	Recipient   string `json:"recipient,omitempty"`   // glob on counterparty for outgoing (IBAN, 0xaddr, name)
+	Description string `json:"description,omitempty"` // glob on tx description/memo
+	Account     string `json:"account,omitempty"`     // account slug (fridge, coffee, stripe, savings)
+	Provider    string `json:"provider,omitempty"`    // stripe, etherscan, monerium
+	Currency    string `json:"currency,omitempty"`    // EUR, EURe, EURb, CHT
+	Direction   string `json:"direction,omitempty"`   // "in" or "out"
+	Application string `json:"application,omitempty"` // stripe connect app: Luma, Open Collective, etc.
 }
 
 // RuleAssign defines what a matching rule assigns.
 type RuleAssign struct {
-	Category   string `json:"category"`              // category slug (required)
-	Collective string `json:"collective,omitempty"`   // collective slug
-	Event      string `json:"event,omitempty"`        // event UID
+	Category   string `json:"category"`             // category slug (required)
+	Collective string `json:"collective,omitempty"` // collective slug
+	Event      string `json:"event,omitempty"`      // event UID
 }
 
 // Rule is a categorization rule.
@@ -34,14 +34,10 @@ type Rule struct {
 }
 
 func rulesPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(".", ".chb", "rules.json")
-	}
-	return filepath.Join(home, ".chb", "rules.json")
+	return filepath.Join(AppDataDir(), "rules.json")
 }
 
-// LoadRules reads rules from ~/.chb/rules.json.
+// LoadRules reads rules from APP_DATA_DIR/rules.json.
 // On first load, migrates from settings.json if rules.json doesn't exist.
 func LoadRules() ([]Rule, error) {
 	data, err := os.ReadFile(rulesPath())
@@ -64,7 +60,7 @@ func LoadRules() ([]Rule, error) {
 	return rules, nil
 }
 
-// SaveRules writes rules to ~/.chb/rules.json.
+// SaveRules writes rules to APP_DATA_DIR/rules.json.
 func SaveRules(rules []Rule) error {
 	data, err := json.MarshalIndent(rules, "", "  ")
 	if err != nil {

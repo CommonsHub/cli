@@ -5,12 +5,12 @@ import (
 )
 
 // AccountingSettings holds the accounting configuration from settings.json.
-// Rules have moved to ~/.chb/rules.json — the Rules field is kept for migration only.
+// Rules have moved to APP_DATA_DIR/rules.json — the Rules field is kept for migration only.
 type AccountingSettings struct {
-	Categories        []CategoryDef          `json:"categories"`
-	DefaultCollective string                 `json:"defaultCollective,omitempty"` // e.g. "commonshub"
-	Rules             []CategoryRule         `json:"rules,omitempty"`             // DEPRECATED: migrated to rules.json
-	Odoo              *OdooAccountingConfig  `json:"odoo,omitempty"`
+	Categories        []CategoryDef         `json:"categories"`
+	DefaultCollective string                `json:"defaultCollective,omitempty"` // e.g. "commonshub"
+	Rules             []CategoryRule        `json:"rules,omitempty"`             // DEPRECATED: migrated to rules.json
+	Odoo              *OdooAccountingConfig `json:"odoo,omitempty"`
 }
 
 // OdooAccountingConfig holds the Odoo→local category mapping.
@@ -30,15 +30,15 @@ type CategoryDef struct {
 // Fields are ANDed: all non-empty fields must match.
 type CategoryRule struct {
 	// Match criteria (all non-empty fields must match)
-	Account     string `json:"account,omitempty"`     // account slug (e.g. "fridge", "coffee")
-	Match       string `json:"match,omitempty"`       // glob pattern on counterparty/description
-	Provider    string `json:"provider,omitempty"`     // "stripe", "etherscan", "monerium"
-	Currency    string `json:"currency,omitempty"`     // "EUR", "EURe", "CHT"
-	TxType      string `json:"txType,omitempty"`       // "CREDIT", "DEBIT"
+	Account  string `json:"account,omitempty"`  // account slug (e.g. "fridge", "coffee")
+	Match    string `json:"match,omitempty"`    // glob pattern on counterparty/description
+	Provider string `json:"provider,omitempty"` // "stripe", "etherscan", "monerium"
+	Currency string `json:"currency,omitempty"` // "EUR", "EURe", "CHT"
+	TxType   string `json:"txType,omitempty"`   // "CREDIT", "DEBIT"
 
 	// Assignment
-	Category   string `json:"category"`               // category slug
-	Collective string `json:"collective,omitempty"`    // collective slug
+	Category   string `json:"category"`             // category slug
+	Collective string `json:"collective,omitempty"` // collective slug
 }
 
 // DefaultAccountingSettings returns a sensible default config for a commons/coworking space.

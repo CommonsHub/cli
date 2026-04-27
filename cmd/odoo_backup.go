@@ -13,7 +13,7 @@ import (
 
 // OdooBackup requests a full database backup from Odoo's /web/database/backup
 // endpoint and writes the zip (SQL dump + filestore) to
-// ~/.chb/backups/odoo/YYYYMMDD-HHMM.zip.
+// APP_DATA_DIR/backups/odoo/YYYYMMDD-HHMM.zip.
 //
 // Odoo's database manager requires the *master* password (admin_passwd from
 // odoo.conf), which is distinct from a user's login password. If
@@ -152,16 +152,12 @@ func odooBackupDir() string {
 	if d := os.Getenv("CHB_BACKUP_DIR"); d != "" {
 		return d
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(".chb", "backups", "odoo")
-	}
-	return filepath.Join(home, ".chb", "backups", "odoo")
+	return filepath.Join(AppDataDir(), "backups", "odoo")
 }
 
 func humanBytes(n int64) string {
 	const (
-		_ = iota
+		_  = iota
 		kb = 1 << (10 * iota)
 		mb
 		gb
@@ -190,7 +186,7 @@ func printOdooBackupHelp() {
   Calls Odoo's /web/database/backup endpoint and streams the resulting
   zip (SQL dump + filestore) to:
 
-      ~/.chb/backups/odoo/YYYYMMDD-HHMM.zip
+      APP_DATA_DIR/backups/odoo/YYYYMMDD-HHMM.zip
 
   Override the destination directory with CHB_BACKUP_DIR.
 
@@ -199,6 +195,7 @@ func printOdooBackupHelp() {
   %sODOO_DATABASE%s          Database name (derived from URL if unset)
   %sODOO_MASTER_PASSWORD%s   Admin password from odoo.conf (admin_passwd).
                          Falls back to ODOO_PASSWORD if unset.
+  %sAPP_DATA_DIR%s           App config/state directory (default: ~/.chb).
   %sCHB_BACKUP_DIR%s         Override backup destination directory.
 
 %sNOTES%s
@@ -214,6 +211,7 @@ func printOdooBackupHelp() {
 		f.Cyan, f.Reset,
 		f.Bold, f.Reset,
 		f.Bold, f.Reset,
+		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,

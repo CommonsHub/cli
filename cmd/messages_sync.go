@@ -411,7 +411,7 @@ func printMessagesSyncHelp() {
 %sBEHAVIOR%s
   Messages are fetched from newest to oldest (Discord API pagination).
   Each page returns 100 messages. Data is saved per month to:
-    ~/.chb/data/YYYY/MM/channels/discord/{channelId}/messages.json
+    DATA_DIR/YYYY/MM/channels/discord/{channelId}/messages.json
 
   %s--history%s: paginates backwards until hitting a month with cached
   data, then stops. Saves everything from that point forward.

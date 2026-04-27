@@ -16,7 +16,7 @@ func collectivesPath() string {
 	return filepath.Join(chbDir(), "collectives.json")
 }
 
-// LoadCollectives reads collectives from ~/.chb/collectives.json.
+// LoadCollectives reads collectives from APP_DATA_DIR/collectives.json.
 // On first load, migrates from settings.json if collectives.json doesn't exist.
 func LoadCollectives() map[string]Collective {
 	data, err := os.ReadFile(collectivesPath())
@@ -38,7 +38,7 @@ func LoadCollectives() map[string]Collective {
 	return collectives
 }
 
-// SaveCollectives writes collectives to ~/.chb/collectives.json.
+// SaveCollectives writes collectives to APP_DATA_DIR/collectives.json.
 func SaveCollectives(collectives map[string]Collective) error {
 	data, err := json.MarshalIndent(collectives, "", "  ")
 	if err != nil {

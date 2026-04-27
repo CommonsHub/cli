@@ -18,7 +18,7 @@ type OdooCredentials struct {
 	Password string
 }
 
-// ResolveOdooCredentials returns Odoo credentials from env vars (set in ~/.chb/config.env).
+// ResolveOdooCredentials returns Odoo credentials from env vars (set in APP_DATA_DIR/config.env).
 // Database is derived from the ODOO_URL hostname unless ODOO_DATABASE is set.
 func ResolveOdooCredentials() (*OdooCredentials, error) {
 	creds := &OdooCredentials{
@@ -29,7 +29,7 @@ func ResolveOdooCredentials() (*OdooCredentials, error) {
 	}
 
 	if creds.URL == "" || creds.Login == "" || creds.Password == "" {
-		return nil, fmt.Errorf("ODOO_URL/ODOO_LOGIN/ODOO_PASSWORD not set (check ~/.chb/config.env)")
+		return nil, fmt.Errorf("ODOO_URL/ODOO_LOGIN/ODOO_PASSWORD not set (check APP_DATA_DIR/config.env)")
 	}
 
 	if creds.DB == "" {
@@ -150,8 +150,8 @@ func OdooAnalyticSync(args []string) (int, error) {
 				"general_account_id", "move_line_id", "product_id",
 				"partner_id", "ref",
 			},
-			"limit":  10000,
-			"order":  "date desc",
+			"limit": 10000,
+			"order": "date desc",
 		})
 	if err != nil {
 		odooLog("  %s⚠ Could not fetch analytic lines: %v%s\n", Fmt.Yellow, err, Fmt.Reset)

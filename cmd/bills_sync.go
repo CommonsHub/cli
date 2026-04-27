@@ -402,8 +402,8 @@ func printBillsSyncHelp() {
 
 %sDATA%s
   Saves monthly vendor bill snapshots to:
-    ~/.chb/data/YYYY/MM/finance/odoo/bills.json
-    ~/.chb/data/YYYY/MM/finance/odoo/private/bills.json
+    DATA_DIR/YYYY/MM/finance/odoo/bills.json
+    DATA_DIR/YYYY/MM/finance/odoo/private/bills.json
 
   Each bill includes:
   • public: date, status, payment status, amounts, title, line items, VAT, categories, tags, journal, reconciled transaction

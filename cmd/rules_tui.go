@@ -9,10 +9,10 @@ import (
 	"strings"
 	"time"
 
+	stickertable "github.com/76creates/stickers/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
-	stickertable "github.com/76creates/stickers/table"
 )
 
 // ── Styles ──
@@ -901,7 +901,7 @@ func printRulesHelp() {
 %sDESCRIPTION%s
   Rules define how transactions are automatically categorized.
   Each rule has match conditions and category assignments.
-  Rules are stored in %s~/.chb/rules.json%s.
+  Rules are stored in %sAPP_DATA_DIR/rules.json%s.
 
 %sMATCH FIELDS%s
   %ssender%s        Glob on counterparty for incoming tx

@@ -117,11 +117,7 @@ func Setup() error {
 }
 
 func configEnvPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(".", ".chb", "config.env")
-	}
-	return filepath.Join(home, ".chb", "config.env")
+	return filepath.Join(AppDataDir(), "config.env")
 }
 
 func loadConfigEnv(path string) map[string]string {
@@ -176,7 +172,7 @@ func resolveEnvValue(config map[string]string, key string) (value, source string
 	return "", "", false
 }
 
-// LoadEnvFromConfig loads ~/.chb/config.env into os environment (if not already set)
+// LoadEnvFromConfig loads APP_DATA_DIR/config.env into os environment (if not already set)
 func LoadEnvFromConfig() {
 	env := loadConfigEnv(configEnvPath())
 	for key, val := range env {

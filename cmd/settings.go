@@ -14,15 +14,30 @@ const settingsRepo = "https://raw.githubusercontent.com/CommonsHub/commonshub.br
 
 var settingsFiles = []string{"settings.json", "rooms.json"}
 
-// chbDir returns ~/.chb/, creating it if needed
-func chbDir() string {
+// AppDataDir returns the directory for app configuration/state files.
+// Defaults to ~/.chb and can be overridden with APP_DATA_DIR.
+func AppDataDir() string {
+	if d := os.Getenv("APP_DATA_DIR"); d != "" {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			return d
+		}
+		return d
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "."
+		dir := filepath.Join(".", ".chb")
+		_ = os.MkdirAll(dir, 0755)
+		return dir
 	}
 	dir := filepath.Join(home, ".chb")
-	os.MkdirAll(dir, 0755)
+	_ = os.MkdirAll(dir, 0755)
 	return dir
+}
+
+// chbDir returns the app data directory. Kept as an internal compatibility
+// wrapper for existing config helpers.
+func chbDir() string {
+	return AppDataDir()
 }
 
 // settingsDir returns the directory to look for settings files.
@@ -32,6 +47,14 @@ func settingsDir() string {
 	settingsPath := filepath.Join(dir, "settings.json")
 
 	if _, err := os.Stat(settingsPath); err == nil {
+		return dir
+	}
+
+	if os.Getenv("APP_DATA_DIR") != "" {
+		fmt.Printf("%sDownloading settings...%s\n", Fmt.Dim, Fmt.Reset)
+		if err := DownloadSettings(dir); err != nil {
+			fmt.Printf("%sCould not download settings:%s %v\n", Fmt.Yellow, Fmt.Reset, err)
+		}
 		return dir
 	}
 
@@ -122,7 +145,7 @@ type MembershipSettings struct {
 }
 
 // OdooSettings holds Odoo product configuration.
-// URL and credentials come from env vars in ~/.chb/config.env.
+// URL and credentials come from env vars in APP_DATA_DIR/config.env.
 // Database is derived from the ODOO_URL hostname.
 type OdooSettings struct {
 	Products []OdooProduct `json:"products"`

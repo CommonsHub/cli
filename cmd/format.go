@@ -94,7 +94,9 @@ func TruncateDescription(desc string, maxLen int) string {
 	return desc[:maxLen] + "..."
 }
 
-// DataDir returns the data directory from env or default (~/.chb/data), creating it if needed
+// DataDir returns the generated data directory.
+// DATA_DIR is kept as an explicit/backward-compatible override; otherwise it
+// defaults to APP_DATA_DIR/data.
 func DataDir() string {
 	dir := resolveDataDir()
 	return ensureManagedDataDir(dir)
@@ -104,11 +106,7 @@ func resolveDataDir() string {
 	if d := os.Getenv("DATA_DIR"); d != "" {
 		return d
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return "./data"
-	}
-	return filepath.Join(home, ".chb", "data")
+	return filepath.Join(AppDataDir(), "data")
 }
 
 // writeMonthFile writes data to dataDir/year/month/<relPath> AND mirrors

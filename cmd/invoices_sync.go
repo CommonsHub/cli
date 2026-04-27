@@ -1813,8 +1813,8 @@ func printInvoicesSyncHelp() {
 
 %sDATA%s
   Saves monthly invoice snapshots to:
-    ~/.chb/data/YYYY/MM/finance/odoo/invoices.json
-    ~/.chb/data/YYYY/MM/finance/odoo/private/invoices.json
+    DATA_DIR/YYYY/MM/finance/odoo/invoices.json
+    DATA_DIR/YYYY/MM/finance/odoo/private/invoices.json
 
   Each invoice includes:
   • public: date, status, payment status, amounts, title, line items, VAT, categories, tags, journal, reconciled transaction

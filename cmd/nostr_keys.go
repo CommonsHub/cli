@@ -24,11 +24,7 @@ type NostrKeys struct {
 }
 
 func nostrKeysPath() string {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return filepath.Join(".", ".chb", ".nostr-keys.json")
-	}
-	return filepath.Join(home, ".chb", ".nostr-keys.json")
+	return filepath.Join(AppDataDir(), ".nostr-keys.json")
 }
 
 // LoadNostrKeys reads the Nostr keys from disk. Returns nil if not found.

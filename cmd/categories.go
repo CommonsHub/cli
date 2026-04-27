@@ -10,7 +10,7 @@ func categoriesPath() string {
 	return filepath.Join(chbDir(), "categories.json")
 }
 
-// LoadCategories reads categories from ~/.chb/categories.json.
+// LoadCategories reads categories from APP_DATA_DIR/categories.json.
 // On first load, migrates from settings.json if categories.json doesn't exist.
 func LoadCategories() []CategoryDef {
 	data, err := os.ReadFile(categoriesPath())
@@ -31,7 +31,7 @@ func LoadCategories() []CategoryDef {
 	return cats
 }
 
-// SaveCategories writes categories to ~/.chb/categories.json.
+// SaveCategories writes categories to APP_DATA_DIR/categories.json.
 func SaveCategories(cats []CategoryDef) error {
 	data, err := json.MarshalIndent(cats, "", "  ")
 	if err != nil {

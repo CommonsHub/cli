@@ -180,7 +180,7 @@ func DefaultRecentStartMonth(now time.Time) string {
 	return start.Format("2006-01")
 }
 
-// findOldestCachedMonth finds the oldest month in ~/.chb/data/ that has
+// findOldestCachedMonth finds the oldest month in DATA_DIR that has
 // data for the given source subdirectory, ignoring future months.
 func findOldestCachedMonth(sourceSubdir string) string {
 	dataDir := DataDir()

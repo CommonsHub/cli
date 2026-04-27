@@ -9,18 +9,18 @@ import (
 // AccountConfig represents a finance account in accounts.json.
 // Extends FinanceAccount with additional fields.
 type AccountConfig struct {
-	Name      string `json:"name"`
-	Slug      string `json:"slug"`
-	Provider  string `json:"provider"`             // stripe, etherscan, monerium
-	Chain     string `json:"chain,omitempty"`       // gnosis, celo, ethereum
-	ChainID   int    `json:"chainId,omitempty"`
-	Address   string `json:"address,omitempty"`     // wallet address
-	AccountID string `json:"accountId,omitempty"`   // stripe account ID
-	Currency  string `json:"currency,omitempty"`    // EUR, EURe, etc.
-	WalletType     string `json:"walletType,omitempty"`     // "eoa" or "safe" (default: "safe")
+	Name            string `json:"name"`
+	Slug            string `json:"slug"`
+	Provider        string `json:"provider"`        // stripe, etherscan, monerium
+	Chain           string `json:"chain,omitempty"` // gnosis, celo, ethereum
+	ChainID         int    `json:"chainId,omitempty"`
+	Address         string `json:"address,omitempty"`         // wallet address
+	AccountID       string `json:"accountId,omitempty"`       // stripe account ID
+	Currency        string `json:"currency,omitempty"`        // EUR, EURe, etc.
+	WalletType      string `json:"walletType,omitempty"`      // "eoa" or "safe" (default: "safe")
 	OdooJournalID   int    `json:"odooJournalId,omitempty"`   // linked Odoo bank journal ID
 	OdooJournalName string `json:"odooJournalName,omitempty"` // journal display name
-	Token     *struct {
+	Token           *struct {
 		Address  string `json:"address"`
 		Name     string `json:"name"`
 		Symbol   string `json:"symbol"`
@@ -40,7 +40,7 @@ func accountsConfigPath() string {
 	return filepath.Join(chbDir(), "accounts.json")
 }
 
-// LoadAccountConfigs reads accounts from ~/.chb/accounts.json.
+// LoadAccountConfigs reads accounts from APP_DATA_DIR/accounts.json.
 // On first load, migrates from settings.json if accounts.json doesn't exist.
 func LoadAccountConfigs() []AccountConfig {
 	data, err := os.ReadFile(accountsConfigPath())
@@ -61,7 +61,7 @@ func LoadAccountConfigs() []AccountConfig {
 	return accounts
 }
 
-// SaveAccountConfigs writes accounts to ~/.chb/accounts.json.
+// SaveAccountConfigs writes accounts to APP_DATA_DIR/accounts.json.
 func SaveAccountConfigs(accounts []AccountConfig) error {
 	data, err := json.MarshalIndent(accounts, "", "  ")
 	if err != nil {
@@ -111,14 +111,14 @@ func migrateAccountsFromSettings() []AccountConfig {
 	var configs []AccountConfig
 	for _, fa := range settings.Finance.Accounts {
 		ac := AccountConfig{
-			Name:      fa.Name,
-			Slug:      fa.Slug,
-			Provider:  fa.Provider,
-			Chain:     fa.Chain,
-			ChainID:   fa.ChainID,
-			Address:   fa.Address,
-			AccountID: fa.AccountID,
-			Currency:  fa.Currency,
+			Name:       fa.Name,
+			Slug:       fa.Slug,
+			Provider:   fa.Provider,
+			Chain:      fa.Chain,
+			ChainID:    fa.ChainID,
+			Address:    fa.Address,
+			AccountID:  fa.AccountID,
+			Currency:   fa.Currency,
 			WalletType: "safe", // default for crypto
 		}
 		if fa.Token != nil {

@@ -266,8 +266,7 @@ func uriKind(uri string) string {
 
 // publishedEventsPath returns the path to the JSONL log of published events.
 func publishedEventsPath() string {
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".chb", "nostr-events-published.jsonl")
+	return filepath.Join(AppDataDir(), "nostr-events-published.jsonl")
 }
 
 // loadPublishedEventIDs reads the published log and returns a set of URIs.
