@@ -431,21 +431,24 @@ func CalendarsSync(args []string) (int, int, error) {
 
 // extractEventURL returns the public URL for an ICS event, or empty string if none.
 func extractEventURL(ev ical.Event) string {
-	eventURL := ev.URL
-	if eventURL == "" && ev.Location != "" &&
-		(strings.HasPrefix(ev.Location, "http://") || strings.HasPrefix(ev.Location, "https://")) {
-		eventURL = ev.Location
+	if isAllowedPublicEventURL(ev.URL) {
+		return ev.URL
 	}
-	if eventURL == "" && ev.Description != "" {
+	if ev.Location != "" &&
+		(strings.HasPrefix(ev.Location, "http://") || strings.HasPrefix(ev.Location, "https://")) &&
+		isAllowedPublicEventURL(ev.Location) {
+		return ev.Location
+	}
+	if ev.Description != "" {
 		re := regexp.MustCompile(`https?://[^\s\n<>"']+`)
-		if m := re.FindString(ev.Description); m != "" {
-			eventURL = strings.TrimRight(m, ".,;:!?")
+		for _, m := range re.FindAllString(ev.Description, -1) {
+			candidate := strings.TrimRight(m, ".,;:!?")
+			if isAllowedPublicEventURL(candidate) {
+				return candidate
+			}
 		}
 	}
-	if !isAllowedPublicEventURL(eventURL) {
-		return ""
-	}
-	return eventURL
+	return ""
 }
 
 func isAllowedPublicEventURL(raw string) bool {
@@ -462,6 +465,13 @@ func isAllowedPublicEventURL(raw string) bool {
 	host := strings.ToLower(u.Hostname())
 	switch host {
 	case "", "mail.google.com", "calendar.google.com":
+		return false
+	}
+	// Luma host-only admin URLs (https://lu.ma/event/manage/<id> or
+	// https://luma.com/event/manage/<id>) are not public — only the event
+	// organizer can view them. Treat them as if no URL was provided.
+	if (host == "lu.ma" || host == "luma.com") &&
+		strings.HasPrefix(strings.ToLower(u.Path), "/event/manage/") {
 		return false
 	}
 	return true
