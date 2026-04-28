@@ -2585,6 +2585,11 @@ func generateLatestEventsGo(dataDir string, years []string) {
 		}
 	}
 
+	// Defensive dedup: if any per-month file still carries duplicate events
+	// (URL + start + end), collapse them so the aggregated latest feed is
+	// clean even before those months get re-synced.
+	allEvents = dedupeFullEvents(allEvents)
+
 	// Filter to upcoming public events (have a URL and startAt >= today)
 	var upcoming []LatestEvent
 	for _, ev := range allEvents {

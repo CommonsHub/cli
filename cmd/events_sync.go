@@ -896,10 +896,19 @@ func processMonthFromRooms(dataDir, year, month string, roomEvents []roomEvent, 
 }
 
 func existingEventsNeedRefresh(existingEvents map[string]FullEvent) bool {
+	type dupKey struct{ url, start, end string }
+	seen := map[dupKey]bool{}
 	for _, existing := range existingEvents {
 		if eventNeedsOGRefresh(existing) || !isAllowedPublicEventURL(existing.URL) {
 			return true
 		}
+		k := dupKey{existing.URL, existing.StartAt, existing.EndAt}
+		if seen[k] {
+			// Duplicate event sharing URL + start + end already on disk —
+			// trigger a refresh so dedupeFullEvents can collapse it.
+			return true
+		}
+		seen[k] = true
 	}
 	return false
 }
