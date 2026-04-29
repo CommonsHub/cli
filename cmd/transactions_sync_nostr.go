@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	nostrstripeplugin "github.com/CommonsHub/chb/plugins/nostrstripe"
 	"github.com/charmbracelet/huh"
 	"github.com/nbd-wtf/go-nostr"
 )
@@ -142,7 +143,7 @@ func TransactionsSyncNostr(args []string) error {
 				FetchedAt:   time.Now().UTC().Format(time.RFC3339),
 				Annotations: monthAnns,
 			}
-			_ = writePluginDataJSON(dataDir, parts[0], parts[1], "nostr-stripe", cache, "annotations.json")
+			_ = writePluginDataJSON(dataDir, parts[0], parts[1], nostrstripeplugin.Name, cache, nostrstripeplugin.AnnotationsFile)
 		}
 		fmt.Printf("  %sSaved stripe annotations to disk%s\n", Fmt.Dim, Fmt.Reset)
 	}

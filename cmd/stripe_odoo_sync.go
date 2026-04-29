@@ -6,6 +6,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	stripesource "github.com/CommonsHub/chb/sources/stripe"
 )
 
 // stripe_odoo_sync implements the chronological BT-iteration sync model.
@@ -60,7 +62,7 @@ func syncStripeChronological(
 	}
 
 	odooLog("  %sLoading archived Stripe source transactions...%s\n", Fmt.Dim, Fmt.Reset)
-	bts, err := loadStripeBTsSinceFromSources(DataDir(), acc.AccountID, resumeCursor)
+	bts, err := stripesource.LoadTransactionsSince(DataDir(), acc.AccountID, resumeCursor)
 	if err != nil {
 		return "", fmt.Errorf("load Stripe source transactions: %v", err)
 	}
@@ -612,7 +614,7 @@ func AccountStripePending(slug string) error {
 	// Walk archived balance_transactions newest-first to find the last payout,
 	// then collect every BT created after it.
 	fmt.Printf("\n  %sLoading archived Stripe source transactions...%s\n", Fmt.Dim, Fmt.Reset)
-	all, err := loadStripeBTsFromSources(DataDir(), acc.AccountID)
+	all, err := stripesource.LoadTransactions(DataDir(), acc.AccountID)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return fmt.Errorf("no Stripe source data found; run `chb transactions sync --source stripe --reset` first")

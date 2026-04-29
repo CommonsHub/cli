@@ -12,6 +12,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	nostrstripeplugin "github.com/CommonsHub/chb/plugins/nostrstripe"
+	stripesource "github.com/CommonsHub/chb/sources/stripe"
 )
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -1819,7 +1822,7 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 	if _, err := os.Stat(financeDir); os.IsNotExist(err) {
 		financeExists = false
 	}
-	stripePaths := stripeTransactionCachePaths(dataDir, year, month)
+	stripePaths := stripesource.TransactionCachePaths(dataDir, year, month)
 	if !financeExists && len(stripePaths) == 0 {
 		return 0
 	}
@@ -2273,7 +2276,7 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 	// Load Nostr annotations (highest priority for categorization)
 	nostrAnnotations := map[string]*TxAnnotation{}
 	// Stripe annotations
-	stripeAnnotPath := pluginDataPath(dataDir, year, month, "nostr-stripe", "annotations.json")
+	stripeAnnotPath := nostrstripeplugin.Path(dataDir, year, month, nostrstripeplugin.AnnotationsFile)
 	if data, err := os.ReadFile(stripeAnnotPath); err == nil {
 		var cache NostrAnnotationCache
 		if json.Unmarshal(data, &cache) == nil {

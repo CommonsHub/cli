@@ -10,9 +10,9 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
-)
 
-const lumaEventURLCacheFile = "event-urls.json"
+	lumaplugin "github.com/CommonsHub/chb/plugins/luma"
+)
 
 type lumaPlugin struct {
 	baseURL          string
@@ -50,7 +50,7 @@ func newLumaPlugin() *lumaPlugin {
 }
 
 func (p *lumaPlugin) Name() string {
-	return "luma"
+	return lumaplugin.Name
 }
 
 func (p *lumaPlugin) EnvVars() []PluginEnvVar {
@@ -170,11 +170,11 @@ func (p *lumaPlugin) loadEventURLCaches(ctx *PluginContext) error {
 		return nil
 	}
 
-	monthPath := filepath.Join(ctx.DataDir, ctx.Year, ctx.Month, "plugins", p.Name(), lumaEventURLCacheFile)
+	monthPath := lumaplugin.Path(ctx.DataDir, ctx.Year, ctx.Month, lumaplugin.EventURLsFile)
 	if err := load(monthPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	latestPath := filepath.Join(ctx.DataDir, "latest", "plugins", p.Name(), lumaEventURLCacheFile)
+	latestPath := lumaplugin.Path(ctx.DataDir, "latest", "", lumaplugin.EventURLsFile)
 	if err := load(latestPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
@@ -365,7 +365,7 @@ func (p *lumaPlugin) Flush(ctx *PluginContext) error {
 		FetchedAt: time.Now().UTC().Format(time.RFC3339),
 		EventURLs: p.eventURLs,
 	}
-	return ctx.WritePublicJSON(p.Name(), lumaEventURLCacheFile, cache)
+	return ctx.WritePublicJSON(p.Name(), lumaplugin.EventURLsFile, cache)
 }
 
 func (p *lumaPlugin) transactionLumaEventID(tx TransactionEntry) string {

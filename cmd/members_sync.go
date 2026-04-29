@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	stripesource "github.com/CommonsHub/chb/sources/stripe"
 )
 
 // ── Types ───────────────────────────────────────────────────────────────────
@@ -186,7 +188,7 @@ func MembersSync(args []string) error {
 		yearStr := strconv.Itoa(ym.year)
 		monthStr := fmt.Sprintf("%02d", ym.month)
 		isCurrent := ym.year == now.Year() && ym.month == int(now.Month())
-		if isCurrent || !fileExists(providerSourcePath(dataDir, yearStr, monthStr, "stripe", "subscriptions.json")) {
+		if isCurrent || !fileExists(stripesource.Path(dataDir, yearStr, monthStr, stripesource.SubscriptionsFile)) {
 			stripeNeedsFetch = true
 			break
 		}
@@ -233,11 +235,11 @@ func MembersSync(args []string) error {
 		if doStripe && len(stripeSubscriptions) > 0 {
 			snap := buildStripeMonthSnapshot(stripeSubscriptions, year, month, salt, stripeProductID, stripeKey, customerCache)
 			fmt.Printf("  Stripe: %d subscriptions\n", len(snap.Subscriptions))
-			_ = writeProviderSourceJSON(dataDir, yearStr, monthStr, "stripe", snap, "subscriptions.json")
+			_ = writeProviderSourceJSON(dataDir, yearStr, monthStr, stripesource.Source, snap, stripesource.SubscriptionsFile)
 			snapshots = append(snapshots, snap)
 		} else {
 			// Try loading cached
-			snapPath := providerSourcePath(dataDir, yearStr, monthStr, "stripe", "subscriptions.json")
+			snapPath := stripesource.Path(dataDir, yearStr, monthStr, stripesource.SubscriptionsFile)
 			if data, err := os.ReadFile(snapPath); err == nil {
 				var snap providerSnapshot
 				if json.Unmarshal(data, &snap) == nil {

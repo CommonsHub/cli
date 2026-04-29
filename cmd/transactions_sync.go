@@ -11,61 +11,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	nostrstripeplugin "github.com/CommonsHub/chb/plugins/nostrstripe"
+	stripesource "github.com/CommonsHub/chb/sources/stripe"
 )
 
 var stripeHTTPClient = &http.Client{Timeout: 20 * time.Second}
-
-// StripeTransaction represents a Stripe balance transaction
-type StripeTransaction struct {
-	ID                string                 `json:"id"`
-	Created           int64                  `json:"created"`
-	Amount            int64                  `json:"amount"`
-	Fee               int64                  `json:"fee"`
-	Net               int64                  `json:"net"`
-	Currency          string                 `json:"currency"`
-	Type              string                 `json:"type"`
-	Description       string                 `json:"description,omitempty"`
-	Source            json.RawMessage        `json:"source,omitempty"`
-	ReportingCategory string                 `json:"reporting_category"`
-	Metadata          map[string]interface{} `json:"metadata,omitempty"`
-	// Enriched fields extracted from expanded source during fetch
-	CustomerName  string `json:"customerName,omitempty"`
-	CustomerEmail string `json:"customerEmail,omitempty"`
-	ChargeID      string `json:"chargeId,omitempty"`
-
-	// Populated for BTs whose source is a payout (type="payout")
-	PayoutID                  string `json:"payoutId,omitempty"`
-	PayoutAutomatic           bool   `json:"payoutAutomatic,omitempty"`
-	PayoutStatementDescriptor string `json:"payoutStatementDescriptor,omitempty"`
-	PayoutBankLast4           string `json:"payoutBankLast4,omitempty"`
-	PayoutArrivalDate         int64  `json:"payoutArrivalDate,omitempty"`
-}
-
-// StripeListResponse is the response from /v1/balance_transactions
-type StripeListResponse struct {
-	Data    []StripeTransaction `json:"data"`
-	HasMore bool                `json:"has_more"`
-}
-
-// StripeCacheFile is the structure saved to disk (public, no PII)
-type StripeCacheFile struct {
-	Transactions []StripeTransaction `json:"transactions"`
-	CachedAt     string              `json:"cachedAt"`
-	AccountID    string              `json:"accountId,omitempty"`
-	Currency     string              `json:"currency"`
-}
-
-// StripeCustomerData holds PII extracted from Stripe charges.
-// Saved separately in sources/stripe/customers.json.
-type StripeCustomerData struct {
-	FetchedAt string                        `json:"fetchedAt"`
-	Customers map[string]*StripeCustomerPII `json:"customers"` // keyed by balance transaction ID (txn_...)
-}
-
-type StripeCustomerPII struct {
-	Name  string `json:"name,omitempty"`
-	Email string `json:"email,omitempty"`
-}
 
 // EtherscanResponse represents the Etherscan V2 API response
 type EtherscanResponse struct {
@@ -396,7 +347,7 @@ func TransactionsSync(args []string) (int, error) {
 					// Check if we can skip the full fetch
 					if !force {
 						relPathFn := func(year, month string) string {
-							return providerSourceRelPath("stripe", "balance-transactions.json")
+							return stripesource.RelPath(stripesource.BalanceTransactionsFile)
 						}
 						if allMonthsCached(DataDir(), startMonth, endMonth, relPathFn) {
 							if !monthRangeIncludes(time.Now().In(BrusselsTZ()).Format("2006-01"), startMonth, endMonth) {
@@ -441,7 +392,7 @@ func TransactionsSync(args []string) (int, error) {
 						}
 						year, month := parts[0], parts[1]
 						dataDir := DataDir()
-						filePath := providerSourcePath(dataDir, year, month, "stripe", "balance-transactions.json")
+						filePath := stripesource.TransactionCachePath(dataDir, year, month)
 
 						if force || ym == fmt.Sprintf("%d-%02d", now.Year(), now.Month()) || !fileExists(filePath) {
 							monthsToUpdate[ym] = true
@@ -479,7 +430,7 @@ func TransactionsSync(args []string) (int, error) {
 							Currency:     acc.Currency,
 						}
 
-						if err := writeProviderSourceJSON(dataDir, year, month, "stripe", cache, "balance-transactions.json"); err != nil {
+						if err := writeProviderSourceJSON(dataDir, year, month, stripesource.Source, cache, stripesource.BalanceTransactionsFile); err != nil {
 							fmt.Printf("    %s✗ Failed to write Stripe source data: %v%s\n", Fmt.Red, err, Fmt.Reset)
 							continue
 						}
@@ -529,7 +480,7 @@ func TransactionsSync(args []string) (int, error) {
 											FetchedAt:   time.Now().UTC().Format(time.RFC3339),
 											Annotations: monthAnnotations,
 										}
-										_ = writePluginDataJSON(DataDir(), parts[0], parts[1], "nostr-stripe", cache, "annotations.json")
+										_ = writePluginDataJSON(DataDir(), parts[0], parts[1], nostrstripeplugin.Name, cache, nostrstripeplugin.AnnotationsFile)
 									}
 								}
 							}
@@ -652,7 +603,7 @@ func TransactionsSync(args []string) (int, error) {
 							if len(customers.Customers) > 0 {
 								parts := strings.Split(ym, "-")
 								if len(parts) == 2 {
-									_ = writeProviderSourceJSON(DataDir(), parts[0], parts[1], "stripe", customers, "customers.json")
+									_ = writeProviderSourceJSON(DataDir(), parts[0], parts[1], stripesource.Source, customers, stripesource.CustomersFile)
 								}
 							}
 						}
@@ -1033,7 +984,7 @@ func fetchStripeTransactions(apiKey, accountID, startMonth, endMonth string, lim
 			localCount := 0
 			parts := strings.Split(oldestMonth, "-")
 			if len(parts) == 2 {
-				localCount = localStripeTransactionCount(providerSourcePath(dataDir, parts[0], parts[1], "stripe", "balance-transactions.json"))
+				localCount = localStripeTransactionCount(stripesource.TransactionCachePath(dataDir, parts[0], parts[1]))
 			}
 			if localCount > 0 && countSeen == localCount {
 				fmt.Printf("    %sStripe stop heuristic: %s count matches local cache (%d)%s\n", Fmt.Dim, oldestMonth, localCount, Fmt.Reset)

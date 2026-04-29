@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	stripesource "github.com/CommonsHub/chb/sources/stripe"
 )
 
 // MembersFile represents members.json
@@ -444,7 +446,7 @@ func printTransactionsSummary(dataDir, year, month string) {
 		}
 
 		if acc.Provider == "stripe" {
-			filePath := providerSourcePath(dataDir, year, month, "stripe", "balance-transactions.json")
+			filePath := stripesource.TransactionCachePath(dataDir, year, month)
 			data, err := os.ReadFile(filePath)
 			if err != nil {
 				continue
@@ -542,7 +544,7 @@ func calculateMonthTransactions(dataDir, year, month string) (income, expenses f
 		}
 
 		if acc.Provider == "stripe" {
-			filePath := providerSourcePath(dataDir, year, month, "stripe", "balance-transactions.json")
+			filePath := stripesource.TransactionCachePath(dataDir, year, month)
 			data, err := os.ReadFile(filePath)
 			if err != nil {
 				continue

@@ -16,6 +16,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	stripesource "github.com/CommonsHub/chb/sources/stripe"
 )
 
 // accountSummary holds computed balance and last tx info for an account.
@@ -1871,7 +1873,7 @@ type stripePayoutsCache struct {
 }
 
 func stripePayoutsCachePath() string {
-	return providerSourcePath(DataDir(), "latest", "", "stripe", "payouts.json")
+	return stripesource.Path(DataDir(), "latest", "", stripesource.PayoutsFile)
 }
 
 func loadStripePayoutsCache() *stripePayoutsCache {
@@ -1892,7 +1894,7 @@ func saveStripePayoutsCache(cache *stripePayoutsCache) {
 }
 
 func rebuildStripePayoutsCacheFromSources() ([]stripePayout, error) {
-	bts, err := loadStripeBTsFromSources(DataDir(), "")
+	bts, err := stripesource.LoadTransactions(DataDir(), "")
 	if err != nil {
 		return nil, err
 	}
