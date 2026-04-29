@@ -11,31 +11,31 @@ import (
 	"strings"
 	"time"
 
-	lumaplugin "github.com/CommonsHub/chb/plugins/luma"
+	lumastripeplugin "github.com/CommonsHub/chb/plugins/luma-stripe"
 )
 
-type lumaPlugin struct {
+type lumaStripePlugin struct {
 	baseURL          string
 	client           *http.Client
 	eventURLs        map[string]string
-	eventByID        map[string]lumaCalendarEventRef
-	eventByURL       map[string]lumaCalendarEventRef
-	transactionHints []lumaTransactionEventHint
+	eventByID        map[string]lumaStripeCalendarEventRef
+	eventByURL       map[string]lumaStripeCalendarEventRef
+	transactionHints []lumaStripeTransactionEventHint
 	changed          bool
 }
 
-type lumaCalendarEventRef struct {
+type lumaStripeCalendarEventRef struct {
 	ID   string
 	Name string
 	URL  string
 }
 
-type lumaEventURLCache struct {
+type lumaStripeEventURLCache struct {
 	FetchedAt string            `json:"fetchedAt"`
 	EventURLs map[string]string `json:"eventUrls"`
 }
 
-type lumaTransactionEventHint struct {
+type lumaStripeTransactionEventHint struct {
 	LumaEventID string
 	EventID     string
 	Name        string
@@ -43,17 +43,17 @@ type lumaTransactionEventHint struct {
 	Collective  string
 }
 
-func newLumaPlugin() *lumaPlugin {
-	return &lumaPlugin{
+func newLumaStripePlugin() *lumaStripePlugin {
+	return &lumaStripePlugin{
 		baseURL: "https://luma.com/event/",
 	}
 }
 
-func (p *lumaPlugin) Name() string {
-	return lumaplugin.Name
+func (p *lumaStripePlugin) Name() string {
+	return lumastripeplugin.Name
 }
 
-func (p *lumaPlugin) EnvVars() []PluginEnvVar {
+func (p *lumaStripePlugin) EnvVars() []PluginEnvVar {
 	return []PluginEnvVar{
 		{
 			Name:        "LUMA_API_KEY",
@@ -63,10 +63,10 @@ func (p *lumaPlugin) EnvVars() []PluginEnvVar {
 	}
 }
 
-func (p *lumaPlugin) WarmUp(ctx *PluginContext) error {
+func (p *lumaStripePlugin) WarmUp(ctx *PluginContext) error {
 	p.eventURLs = map[string]string{}
-	p.eventByID = map[string]lumaCalendarEventRef{}
-	p.eventByURL = map[string]lumaCalendarEventRef{}
+	p.eventByID = map[string]lumaStripeCalendarEventRef{}
+	p.eventByURL = map[string]lumaStripeCalendarEventRef{}
 	p.transactionHints = nil
 	p.changed = false
 	p.client = ctx.HTTPClient
@@ -87,7 +87,7 @@ func (p *lumaPlugin) WarmUp(ctx *PluginContext) error {
 	return nil
 }
 
-func (p *lumaPlugin) AugmentTransaction(ctx *PluginContext, tx *TransactionEntry) error {
+func (p *lumaStripePlugin) AugmentTransaction(ctx *PluginContext, tx *TransactionEntry) error {
 	eventID := p.transactionLumaEventID(*tx)
 	if eventID == "" {
 		if hint := p.inferTransactionEvent(*tx); hint.LumaEventID != "" {
@@ -126,7 +126,7 @@ func (p *lumaPlugin) AugmentTransaction(ctx *PluginContext, tx *TransactionEntry
 		if canonical.Name != "" {
 			addTransactionTag(&tx.Tags, "eventName", canonical.Name)
 		}
-		p.applyLumaTransactionMetadata(tx, lumaTransactionEventHint{
+		p.applyLumaTransactionMetadata(tx, lumaStripeTransactionEventHint{
 			LumaEventID: eventID,
 			EventID:     canonical.ID,
 			Name:        canonical.Name,
@@ -152,13 +152,13 @@ func (p *lumaPlugin) AugmentTransaction(ctx *PluginContext, tx *TransactionEntry
 	return nil
 }
 
-func (p *lumaPlugin) loadEventURLCaches(ctx *PluginContext) error {
+func (p *lumaStripePlugin) loadEventURLCaches(ctx *PluginContext) error {
 	load := func(path string) error {
 		data, err := os.ReadFile(path)
 		if err != nil {
 			return err
 		}
-		var cache lumaEventURLCache
+		var cache lumaStripeEventURLCache
 		if err := json.Unmarshal(data, &cache); err != nil {
 			return err
 		}
@@ -170,18 +170,18 @@ func (p *lumaPlugin) loadEventURLCaches(ctx *PluginContext) error {
 		return nil
 	}
 
-	monthPath := lumaplugin.Path(ctx.DataDir, ctx.Year, ctx.Month, lumaplugin.EventURLsFile)
+	monthPath := lumastripeplugin.Path(ctx.DataDir, ctx.Year, ctx.Month, lumastripeplugin.EventURLsFile)
 	if err := load(monthPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	latestPath := lumaplugin.Path(ctx.DataDir, "latest", "", lumaplugin.EventURLsFile)
+	latestPath := lumastripeplugin.Path(ctx.DataDir, "latest", "", lumastripeplugin.EventURLsFile)
 	if err := load(latestPath); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
 }
 
-func (p *lumaPlugin) AugmentEvent(ctx *PluginContext, ev *FullEvent) error {
+func (p *lumaStripePlugin) AugmentEvent(ctx *PluginContext, ev *FullEvent) error {
 	if ev.URL != "" || !isLumaEventID(ev.ID) {
 		return nil
 	}
@@ -193,14 +193,14 @@ func (p *lumaPlugin) AugmentEvent(ctx *PluginContext, ev *FullEvent) error {
 	return nil
 }
 
-func (p *lumaPlugin) buildTransactionHints() {
+func (p *lumaStripePlugin) buildTransactionHints() {
 	seen := map[string]bool{}
 	for lumaEventID, eventURL := range p.eventURLs {
 		if !isLumaEventID(lumaEventID) || eventURL == "" {
 			continue
 		}
 		ref := p.canonicalEvent(lumaEventID, eventURL)
-		hint := lumaTransactionEventHint{
+		hint := lumaStripeTransactionEventHint{
 			LumaEventID: lumaEventID,
 			EventID:     firstNonEmptyStr(ref.ID, lumaEventID),
 			Name:        ref.Name,
@@ -216,9 +216,9 @@ func (p *lumaPlugin) buildTransactionHints() {
 	}
 }
 
-func (p *lumaPlugin) inferTransactionEvent(tx TransactionEntry) lumaTransactionEventHint {
+func (p *lumaStripePlugin) inferTransactionEvent(tx TransactionEntry) lumaStripeTransactionEventHint {
 	if tx.Provider != "stripe" || len(p.transactionHints) == 0 || !looksLikeLumaTicketTransaction(tx) {
-		return lumaTransactionEventHint{}
+		return lumaStripeTransactionEventHint{}
 	}
 
 	if eventURL := firstNonEmptyStr(firstTransactionTagValue(tx, "eventUrl"), stringMetadata(tx.Metadata, "eventUrl"), stringMetadata(tx.Metadata, "stripe_event_url")); eventURL != "" {
@@ -238,7 +238,7 @@ func (p *lumaPlugin) inferTransactionEvent(tx TransactionEntry) lumaTransactionE
 		tx.Counterparty,
 	))
 
-	var match lumaTransactionEventHint
+	var match lumaStripeTransactionEventHint
 	for _, hint := range p.transactionHints {
 		if hint.Name == "" || normalizeLumaMatchText(hint.Name) != txText {
 			continue
@@ -248,14 +248,14 @@ func (p *lumaPlugin) inferTransactionEvent(tx TransactionEntry) lumaTransactionE
 			continue
 		}
 		if match.LumaEventID != "" {
-			return lumaTransactionEventHint{}
+			return lumaStripeTransactionEventHint{}
 		}
 		match = hint
 	}
 	return match
 }
 
-func (p *lumaPlugin) applyLumaTransactionMetadata(tx *TransactionEntry, hint lumaTransactionEventHint) {
+func (p *lumaStripePlugin) applyLumaTransactionMetadata(tx *TransactionEntry, hint lumaStripeTransactionEventHint) {
 	if tx.Metadata == nil {
 		tx.Metadata = map[string]interface{}{}
 	}
@@ -289,7 +289,7 @@ func (p *lumaPlugin) applyLumaTransactionMetadata(tx *TransactionEntry, hint lum
 	}
 }
 
-func (p *lumaPlugin) loadCalendarEventAliases(ctx *PluginContext) error {
+func (p *lumaStripePlugin) loadCalendarEventAliases(ctx *PluginContext) error {
 	visit := func(path string) {
 		data, err := os.ReadFile(path)
 		if err != nil {
@@ -303,7 +303,7 @@ func (p *lumaPlugin) loadCalendarEventAliases(ctx *PluginContext) error {
 			if ev.ID == "" {
 				continue
 			}
-			ref := lumaCalendarEventRef{
+			ref := lumaStripeCalendarEventRef{
 				ID:   ev.ID,
 				Name: ev.Name,
 				URL:  ev.URL,
@@ -343,7 +343,7 @@ func (p *lumaPlugin) loadCalendarEventAliases(ctx *PluginContext) error {
 	return nil
 }
 
-func (p *lumaPlugin) canonicalEvent(eventID, eventURL string) lumaCalendarEventRef {
+func (p *lumaStripePlugin) canonicalEvent(eventID, eventURL string) lumaStripeCalendarEventRef {
 	if eventID != "" {
 		if canonical := p.eventByID[eventID]; canonical.ID != "" {
 			return canonical
@@ -354,21 +354,21 @@ func (p *lumaPlugin) canonicalEvent(eventID, eventURL string) lumaCalendarEventR
 			return canonical
 		}
 	}
-	return lumaCalendarEventRef{}
+	return lumaStripeCalendarEventRef{}
 }
 
-func (p *lumaPlugin) Flush(ctx *PluginContext) error {
+func (p *lumaStripePlugin) Flush(ctx *PluginContext) error {
 	if !p.changed {
 		return nil
 	}
-	cache := lumaEventURLCache{
+	cache := lumaStripeEventURLCache{
 		FetchedAt: time.Now().UTC().Format(time.RFC3339),
 		EventURLs: p.eventURLs,
 	}
-	return ctx.WritePublicJSON(p.Name(), lumaplugin.EventURLsFile, cache)
+	return ctx.WritePublicJSON(p.Name(), lumastripeplugin.EventURLsFile, cache)
 }
 
-func (p *lumaPlugin) transactionLumaEventID(tx TransactionEntry) string {
+func (p *lumaStripePlugin) transactionLumaEventID(tx TransactionEntry) string {
 	if isLumaEventID(tx.Event) {
 		return tx.Event
 	}
@@ -385,7 +385,7 @@ func (p *lumaPlugin) transactionLumaEventID(tx TransactionEntry) string {
 	return ""
 }
 
-func (p *lumaPlugin) resolveEventURL(eventID string) (string, error) {
+func (p *lumaStripePlugin) resolveEventURL(eventID string) (string, error) {
 	if eventURL := p.eventURLs[eventID]; eventURL != "" {
 		return eventURL, nil
 	}
@@ -398,7 +398,7 @@ func (p *lumaPlugin) resolveEventURL(eventID string) (string, error) {
 	return eventURL, nil
 }
 
-func (p *lumaPlugin) fetchEventURL(eventID string) (string, error) {
+func (p *lumaStripePlugin) fetchEventURL(eventID string) (string, error) {
 	client := *p.client
 	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
 		return http.ErrUseLastResponse

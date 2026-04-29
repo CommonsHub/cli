@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	nostrstripeplugin "github.com/CommonsHub/chb/plugins/nostrstripe"
+	nostrstripeplugin "github.com/CommonsHub/chb/plugins/nostr-stripe"
 	"github.com/charmbracelet/huh"
 	"github.com/nbd-wtf/go-nostr"
 )

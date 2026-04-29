@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	nostrstripeplugin "github.com/CommonsHub/chb/plugins/nostrstripe"
+	nostrstripeplugin "github.com/CommonsHub/chb/plugins/nostr-stripe"
 	stripesource "github.com/CommonsHub/chb/sources/stripe"
 )
 
@@ -1881,8 +1881,8 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 			// Load private customer data (PII: names, emails)
 			stripeCustomers := loadStripeCustomerData(dataDir, year, month)
 
-			// Load private charge enrichment (app info, payment methods)
-			stripeCharges, refundToCharge := LoadStripeChargeEnrichment(dataDir, year, month)
+			// Load private charge data (app info, payment methods)
+			stripeCharges, refundToCharge := LoadStripeChargeData(dataDir, year, month)
 
 			for _, tx := range stripeCacheFile.Transactions {
 				amount := centsToEuros(tx.Amount)
@@ -1907,7 +1907,7 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 					currency = "EUR"
 				}
 
-				// Determine counterparty: prefer private customer data, then inline, then charge enrichment
+				// Determine counterparty: prefer private customer data, then inline, then charge data
 				counterparty := tx.CustomerName
 				metadata := map[string]interface{}{
 					"category":    tx.ReportingCategory,

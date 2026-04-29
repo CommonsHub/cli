@@ -1,9 +1,9 @@
-package luma
+package lumastripe
 
 import "path/filepath"
 
 const (
-	Name          = "luma"
+	Name          = "luma-stripe"
 	EventURLsFile = "event-urls.json"
 )
 

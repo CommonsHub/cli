@@ -11,14 +11,14 @@ import (
 
 var httpClient = &http.Client{Timeout: 20 * time.Second}
 
-// ChargeEnrichment holds customer/app data from Stripe charges.
-type ChargeEnrichment struct {
+// ChargeData holds Stripe provider objects related to balance transactions.
+type ChargeData struct {
 	FetchedAt      string             `json:"fetchedAt"`
 	Charges        map[string]*Charge `json:"charges"`
 	RefundToCharge map[string]string  `json:"refundToCharge,omitempty"`
 }
 
-// Charge holds enrichment data from a Stripe charge object and checkout session.
+// Charge holds data from a Stripe charge object and checkout session.
 type Charge struct {
 	ID              string            `json:"id"`
 	CustomerName    string            `json:"customerName,omitempty"`
@@ -284,16 +284,16 @@ func (c *Charge) BestEmail() string {
 	return ""
 }
 
-func LoadChargeEnrichment(dataDir, year, month string) (map[string]*Charge, map[string]string) {
+func LoadChargeData(dataDir, year, month string) (map[string]*Charge, map[string]string) {
 	data, err := os.ReadFile(Path(dataDir, year, month, ChargesFile))
 	if err != nil {
 		return nil, nil
 	}
-	var enrichment ChargeEnrichment
-	if json.Unmarshal(data, &enrichment) != nil {
+	var chargeData ChargeData
+	if json.Unmarshal(data, &chargeData) != nil {
 		return nil, nil
 	}
-	return enrichment.Charges, enrichment.RefundToCharge
+	return chargeData.Charges, chargeData.RefundToCharge
 }
 
 func LoadCustomerData(dataDir, year, month string) map[string]*CustomerPII {

@@ -8,7 +8,7 @@ import (
 	stripesource "github.com/CommonsHub/chb/sources/stripe"
 )
 
-type StripeChargeEnrichment = stripesource.ChargeEnrichment
+type StripeChargeData = stripesource.ChargeData
 type StripeCharge = stripesource.Charge
 
 var knownStripeApps = stripesource.KnownApps
@@ -19,17 +19,17 @@ func fetchStripeCharges(apiKey, accountID string, chargeIDs []string) (map[strin
 	})
 }
 
-func LoadStripeChargeEnrichment(dataDir, year, month string) (map[string]*StripeCharge, map[string]string) {
-	return stripesource.LoadChargeEnrichment(dataDir, year, month)
+func LoadStripeChargeData(dataDir, year, month string) (map[string]*StripeCharge, map[string]string) {
+	return stripesource.LoadChargeData(dataDir, year, month)
 }
 
-func SaveStripeChargeEnrichment(dataDir, year, month string, charges map[string]*StripeCharge, refundToCharge map[string]string) {
-	enrichment := StripeChargeEnrichment{
+func SaveStripeChargeData(dataDir, year, month string, charges map[string]*StripeCharge, refundToCharge map[string]string) {
+	chargeData := StripeChargeData{
 		FetchedAt:      time.Now().UTC().Format(time.RFC3339),
 		Charges:        charges,
 		RefundToCharge: refundToCharge,
 	}
-	_ = writeProviderSourceJSON(dataDir, year, month, stripesource.Source, enrichment, stripesource.ChargesFile)
+	_ = writeProviderSourceJSON(dataDir, year, month, stripesource.Source, chargeData, stripesource.ChargesFile)
 }
 
 func loadStripeCustomerData(dataDir, year, month string) map[string]*StripeCustomerPII {

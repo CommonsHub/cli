@@ -5,7 +5,7 @@ the core transaction or event builders. A plugin can warm a cache once per month
 augment every transaction and/or event, then flush public and private cache files.
 
 Plugin-specific code should live under `plugins/<plugin>/` with generic file
-names such as `archive.go`, `types.go`, or `client.go`. The CLI adapter still
+names such as `cache.go`, `types.go`, or `client.go`. The CLI adapter still
 implements the `DataPlugin` interface from `cmd/data_plugins.go`; keep only the
 thin command wiring in `cmd/`.
 
@@ -128,7 +128,7 @@ it to `registeredDataPlugins()` in `cmd/data_plugins.go`:
 ```go
 func registeredDataPlugins() []DataPlugin {
 	return []DataPlugin{
-		newLumaPlugin(),
+		newLumaStripePlugin(),
 		newMoneriumPlugin(),
 	}
 }
@@ -218,10 +218,11 @@ func (p *moneriumPlugin) Flush(ctx *PluginContext) error {
 
 ## Example: Luma
 
-`cmd/plugin_luma.go` is the reference implementation. It:
+`cmd/plugin_luma_stripe.go` is the reference implementation for the `luma-stripe`
+plugin. It:
 
 - Declares optional `LUMA_API_KEY`.
-- Loads `plugins/luma/event-urls.json` and generated calendar events in
+- Loads `plugins/luma-stripe/event-urls.json` and generated calendar events in
   `WarmUp`.
 - For each transaction with a Luma event id (`evt-...`), preserves it as
   `["lumaEvent", "evt-..."]`.

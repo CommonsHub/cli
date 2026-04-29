@@ -21,7 +21,7 @@ func TestLumaPluginAddsEventURLTagAndCachesRedirect(t *testing.T) {
 	}))
 	defer server.Close()
 
-	plugin := newLumaPlugin()
+	plugin := newLumaStripePlugin()
 	plugin.baseURL = server.URL + "/event/"
 	ctx := newPluginContext(dataDir, "2026", "04")
 	ctx.HTTPClient = server.Client()
@@ -43,12 +43,12 @@ func TestLumaPluginAddsEventURLTagAndCachesRedirect(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cachePath := filepath.Join(dataDir, "2026", "04", "plugins", "luma", "event-urls.json")
+	cachePath := filepath.Join(dataDir, "2026", "04", "plugins", "luma-stripe", "event-urls.json")
 	data, err := os.ReadFile(cachePath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var cache lumaEventURLCache
+	var cache lumaStripeEventURLCache
 	if err := json.Unmarshal(data, &cache); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestLumaPluginSkipsExistingEventURLTag(t *testing.T) {
 	}))
 	defer server.Close()
 
-	plugin := newLumaPlugin()
+	plugin := newLumaStripePlugin()
 	plugin.baseURL = server.URL + "/event/"
 	ctx := newPluginContext(t.TempDir(), "2026", "04")
 	ctx.HTTPClient = server.Client()
@@ -109,7 +109,7 @@ func TestLumaPluginMapsExistingEventURLToCalendarEvent(t *testing.T) {
 	  }]
 	}`)
 
-	plugin := newLumaPlugin()
+	plugin := newLumaStripePlugin()
 	ctx := newPluginContext(dataDir, "2026", "04")
 	if err := plugin.WarmUp(ctx); err != nil {
 		t.Fatal(err)
@@ -168,7 +168,7 @@ func TestLumaPluginMapsResolvedEventURLToCalendarEvent(t *testing.T) {
 	}))
 	defer server.Close()
 
-	plugin := newLumaPlugin()
+	plugin := newLumaStripePlugin()
 	plugin.baseURL = server.URL + "/event/"
 	ctx := newPluginContext(dataDir, "2026", "04")
 	ctx.HTTPClient = server.Client()
@@ -208,7 +208,7 @@ func TestLumaPluginInfersEventFromCachedURLTitleAndCollective(t *testing.T) {
 	  }
 	}`)
 
-	plugin := newLumaPlugin()
+	plugin := newLumaStripePlugin()
 	ctx := newPluginContext(dataDir, "2026", "04")
 	if err := plugin.WarmUp(ctx); err != nil {
 		t.Fatal(err)
@@ -305,7 +305,7 @@ func TestLumaPluginDoesNotInferStripeFeesOrTaxes(t *testing.T) {
 	  }
 	}`)
 
-	plugin := newLumaPlugin()
+	plugin := newLumaStripePlugin()
 	ctx := newPluginContext(dataDir, "2026", "04")
 	if err := plugin.WarmUp(ctx); err != nil {
 		t.Fatal(err)
@@ -338,7 +338,7 @@ func TestLumaPluginDoesNotInferStripeFeesOrTaxes(t *testing.T) {
 	}
 }
 
-func TestGenerateTransactionsMergesStripeChargeEnrichmentEvenWithCustomerData(t *testing.T) {
+func TestGenerateTransactionsMergesStripeChargeDataEvenWithCustomerData(t *testing.T) {
 	dataDir := t.TempDir()
 	sourceDir := filepath.Join(dataDir, "2026", "04", "sources", "stripe")
 	if err := os.MkdirAll(sourceDir, 0755); err != nil {
@@ -447,7 +447,7 @@ func writeTestLumaEventURLCache(t *testing.T, dataDir, year, month, payload stri
 	if month != "" {
 		parts = append(parts, month)
 	}
-	parts = append(parts, "plugins", "luma")
+	parts = append(parts, "plugins", "luma-stripe")
 	dir := filepath.Join(parts...)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		t.Fatal(err)

@@ -42,7 +42,7 @@ func newPluginContext(dataDir, year, month string) *PluginContext {
 
 func registeredDataPlugins() []DataPlugin {
 	return []DataPlugin{
-		newLumaPlugin(),
+		newLumaStripePlugin(),
 	}
 }
 

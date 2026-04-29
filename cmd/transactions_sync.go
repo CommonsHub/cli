@@ -12,7 +12,7 @@ import (
 	"strings"
 	"time"
 
-	nostrstripeplugin "github.com/CommonsHub/chb/plugins/nostrstripe"
+	nostrstripeplugin "github.com/CommonsHub/chb/plugins/nostr-stripe"
 	stripesource "github.com/CommonsHub/chb/sources/stripe"
 )
 
@@ -576,7 +576,7 @@ func TransactionsSync(args []string) (int, error) {
 							if len(monthCharges) > 0 {
 								parts := strings.Split(ym, "-")
 								if len(parts) == 2 {
-									SaveStripeChargeEnrichment(DataDir(), parts[0], parts[1], monthCharges, refundToCharge)
+									SaveStripeChargeData(DataDir(), parts[0], parts[1], monthCharges, refundToCharge)
 								}
 							}
 						}
