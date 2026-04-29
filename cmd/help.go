@@ -181,7 +181,7 @@ func PrintDoctorHelp() {
 
 %sCHECKS%s
   • Room Discord channel directories exist in latest/messages/discord/
-  • Generated files exist when raw source data is present
+  • Generated files exist when source archives are present
   • images.json entries use canonical year/month image paths
   • Referenced local image files exist under DATA_DIR
   • images.json does not contain deprecated proxyUrl fields or \u escapes

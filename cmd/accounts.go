@@ -1871,7 +1871,7 @@ type stripePayoutsCache struct {
 }
 
 func stripePayoutsCachePath() string {
-	return filepath.Join(DataDir(), "latest", "stripe-payouts.json")
+	return providerSourcePath(DataDir(), "latest", "", "stripe", "payouts.json")
 }
 
 func loadStripePayoutsCache() *stripePayoutsCache {
@@ -1888,68 +1888,37 @@ func loadStripePayoutsCache() *stripePayoutsCache {
 
 func saveStripePayoutsCache(cache *stripePayoutsCache) {
 	data, _ := json.MarshalIndent(cache, "", "  ")
-	dir := filepath.Dir(stripePayoutsCachePath())
-	os.MkdirAll(dir, 0755)
-	os.WriteFile(stripePayoutsCachePath(), data, 0644)
+	_ = writeDataFile(stripePayoutsCachePath(), data)
 }
 
-// refreshStripePayoutsCache fetches new payouts from Stripe API and merges with cache.
-// Only fetches payouts created after the latest cached one.
-func refreshStripePayoutsCache(apiKey string) ([]stripePayout, error) {
-	cache := loadStripePayoutsCache()
-
-	// Find the most recent cached payout's created timestamp for incremental fetch
-	var fetchAfter int64
-	cachedByID := map[string]bool{}
-	if cache != nil {
-		for _, po := range cache.Payouts {
-			cachedByID[po.ID] = true
-			if po.Created > fetchAfter {
-				fetchAfter = po.Created
-			}
-		}
-	}
-
-	// Fetch new payouts from Stripe (only those created after the latest cached one)
-	newPayouts, err := fetchStripePayoutsFromAPI(apiKey, fetchAfter)
+func rebuildStripePayoutsCacheFromSources() ([]stripePayout, error) {
+	bts, err := loadStripeBTsFromSources(DataDir(), "")
 	if err != nil {
-		// If API fails but we have cache, return cached data
-		if cache != nil {
-			return cache.Payouts, nil
-		}
 		return nil, err
 	}
 
-	// Merge: add new payouts not already in cache, preserve tx counts from cache
-	txCounts := map[string]int{}
 	var merged []stripePayout
-	if cache != nil {
-		for _, po := range cache.Payouts {
-			if po.TxCount > 0 {
-				txCounts[po.ID] = po.TxCount
-			}
+	for _, bt := range bts {
+		if bt.Type != "payout" {
+			continue
 		}
-		merged = append(merged, cache.Payouts...)
-	}
-	added := 0
-	for _, po := range newPayouts {
-		if !cachedByID[po.ID] {
-			merged = append(merged, po)
-			added++
+		id := firstNonEmptyStr(bt.PayoutID, bt.ID)
+		arrival := bt.PayoutArrivalDate
+		if arrival == 0 {
+			arrival = bt.Created
 		}
-	}
-
-	// Update status of cached payouts that may have changed
-	freshByID := map[string]stripePayout{}
-	for _, po := range newPayouts {
-		freshByID[po.ID] = po
-	}
-	for i, po := range merged {
-		if fresh, ok := freshByID[po.ID]; ok {
-			// Preserve cached TxCount
-			fresh.TxCount = txCounts[po.ID]
-			merged[i] = fresh
-		}
+		merged = append(merged, stripePayout{
+			ID:                  id,
+			Amount:              -bt.Net,
+			ArrivalDate:         arrival,
+			Created:             bt.Created,
+			Currency:            bt.Currency,
+			Status:              "paid",
+			Description:         bt.Description,
+			StatementDescriptor: bt.PayoutStatementDescriptor,
+			Automatic:           bt.PayoutAutomatic,
+			BankLast4:           bt.PayoutBankLast4,
+		})
 	}
 
 	// Sort by arrival_date descending (most recent first)
@@ -1963,9 +1932,7 @@ func refreshStripePayoutsCache(apiKey string) ([]stripePayout, error) {
 		Payouts:   merged,
 	})
 
-	if added > 0 {
-		fmt.Printf("  %s%d new payouts fetched, %d total cached%s\n", Fmt.Dim, added, len(merged), Fmt.Reset)
-	}
+	fmt.Printf("  %s%d payout(s) cached from source archives%s\n", Fmt.Dim, len(merged), Fmt.Reset)
 
 	return merged, nil
 }
@@ -1982,77 +1949,6 @@ func filterPayoutsByMonths(payouts []stripePayout, monthsLimit int) []stripePayo
 		}
 	}
 	return filtered
-}
-
-// fetchStripePayoutsFromAPI fetches payouts from Stripe API, optionally only those created after a timestamp.
-func fetchStripePayoutsFromAPI(apiKey string, createdAfter int64) ([]stripePayout, error) {
-	baseURL := "https://api.stripe.com/v1/payouts?limit=100&status=paid&expand[]=data.destination"
-	if createdAfter > 0 {
-		baseURL += fmt.Sprintf("&created[gt]=%d", createdAfter)
-	}
-
-	var allPayouts []stripePayout
-	startingAfter := ""
-
-	for {
-		reqURL := baseURL
-		if startingAfter != "" {
-			reqURL += "&starting_after=" + startingAfter
-		}
-
-		req, err := http.NewRequest("GET", reqURL, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode != 200 {
-			return nil, fmt.Errorf("Stripe API returned %d", resp.StatusCode)
-		}
-
-		// Parse with raw destination for bank details extraction
-		var listResp struct {
-			Data    []json.RawMessage `json:"data"`
-			HasMore bool              `json:"has_more"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
-			return nil, err
-		}
-
-		for _, raw := range listResp.Data {
-			var po stripePayout
-			json.Unmarshal(raw, &po)
-
-			// Extract bank details from expanded destination
-			var expanded struct {
-				Destination *struct {
-					Last4    string `json:"last4"`
-					BankName string `json:"bank_name"`
-				} `json:"destination"`
-			}
-			json.Unmarshal(raw, &expanded)
-			if expanded.Destination != nil {
-				po.BankLast4 = expanded.Destination.Last4
-				po.BankName = expanded.Destination.BankName
-			}
-
-			allPayouts = append(allPayouts, po)
-		}
-
-		if !listResp.HasMore || len(listResp.Data) == 0 {
-			break
-		}
-		startingAfter = allPayouts[len(allPayouts)-1].ID
-		time.Sleep(200 * time.Millisecond)
-	}
-
-	return allPayouts, nil
 }
 
 // emptyOdooJournal deletes all statement lines and statements for a journal after confirmation.
@@ -2587,7 +2483,7 @@ func fetchOdooImportIDs(odooURL, db string, uid int, password string, journalID 
 	return result, nil
 }
 
-// AccountStripePayouts lists Stripe payouts from cache (no API calls unless --refresh).
+// AccountStripePayouts lists Stripe payouts derived from archived Stripe source data.
 func AccountStripePayouts(slug string, args []string) error {
 	monthsLimit := 0
 	for i, a := range args {
@@ -2597,22 +2493,16 @@ func AccountStripePayouts(slug string, args []string) error {
 	}
 
 	if HasFlag(args, "--refresh") {
-		stripeKey := os.Getenv("STRIPE_SECRET_KEY")
-		if stripeKey == "" {
-			return fmt.Errorf("STRIPE_SECRET_KEY not set")
-		}
-		fmt.Printf("\n  %sRefreshing payouts from Stripe...%s\n", Fmt.Dim, Fmt.Reset)
-		// Full refresh: clear cache to re-fetch all payouts with expanded data
-		os.Remove(stripePayoutsCachePath())
-		_, err := refreshStripePayoutsCache(stripeKey)
+		fmt.Printf("\n  %sRebuilding payouts from archived Stripe source data...%s\n", Fmt.Dim, Fmt.Reset)
+		_, err := rebuildStripePayoutsCacheFromSources()
 		if err != nil {
-			return fmt.Errorf("failed to refresh: %v", err)
+			return fmt.Errorf("failed to rebuild payouts cache: %v", err)
 		}
 	}
 
 	cache := loadStripePayoutsCache()
 	if cache == nil || len(cache.Payouts) == 0 {
-		fmt.Printf("\n  %sNo cached payouts. Run 'chb accounts %s payouts --refresh'.%s\n\n", Fmt.Dim, slug, Fmt.Reset)
+		fmt.Printf("\n  %sNo cached payouts. Run 'chb transactions sync --source stripe --reset', then 'chb accounts %s payouts --refresh'.%s\n\n", Fmt.Dim, slug, Fmt.Reset)
 		return nil
 	}
 

@@ -340,8 +340,8 @@ func TestLumaPluginDoesNotInferStripeFeesOrTaxes(t *testing.T) {
 
 func TestGenerateTransactionsMergesStripeChargeEnrichmentEvenWithCustomerData(t *testing.T) {
 	dataDir := t.TempDir()
-	financeDir := filepath.Join(dataDir, "2026", "04", "finance", "stripe")
-	if err := os.MkdirAll(filepath.Join(financeDir, "private"), 0755); err != nil {
+	sourceDir := filepath.Join(dataDir, "2026", "04", "sources", "stripe")
+	if err := os.MkdirAll(sourceDir, 0755); err != nil {
 		t.Fatal(err)
 	}
 	writeTestLumaEventsFile(t, dataDir, "2026", "04", `{
@@ -380,7 +380,7 @@ func TestGenerateTransactionsMergesStripeChargeEnrichmentEvenWithCustomerData(t 
 	    "source": {"id": "ch_1"}
 	  }]
 	}`
-	if err := os.WriteFile(filepath.Join(financeDir, "transactions.json"), []byte(stripeCache), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(sourceDir, "balance-transactions.json"), []byte(stripeCache), 0644); err != nil {
 		t.Fatal(err)
 	}
 	charges := `{
@@ -397,7 +397,7 @@ func TestGenerateTransactionsMergesStripeChargeEnrichmentEvenWithCustomerData(t 
 	    }
 	  }
 	}`
-	if err := os.WriteFile(filepath.Join(financeDir, "private", "charges.json"), []byte(charges), 0600); err != nil {
+	if err := os.WriteFile(filepath.Join(sourceDir, "charges.json"), []byte(charges), 0600); err != nil {
 		t.Fatal(err)
 	}
 

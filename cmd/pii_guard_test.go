@@ -79,8 +79,8 @@ func TestPathHasPrivateSegment(t *testing.T) {
 		path string
 		want bool
 	}{
-		{"/data/2025/01/finance/stripe/private/customers.json", true},
-		{"/data/2025/01/finance/stripe/subscriptions.json", false},
+		{"/data/2025/01/generated/private/customers.json", true},
+		{"/data/2025/01/sources/stripe/subscriptions.json", false},
 		{filepath.Join("data", "private", "x.json"), true},
 		{"private/x.json", true},
 		{"xprivate/x.json", false},
@@ -92,19 +92,19 @@ func TestPathHasPrivateSegment(t *testing.T) {
 	}
 }
 
-func TestPathHasSourceDataSegment(t *testing.T) {
+func TestPathHasSourcesSegment(t *testing.T) {
 	cases := []struct {
 		path string
 		want bool
 	}{
-		{"/org-data/2026/04/data/stripe/balance-transactions.json", true},
-		{"/org-data/latest/data/luma/events.json", true},
+		{"/org-data/2026/04/sources/stripe/balance-transactions.json", true},
+		{"/org-data/latest/sources/luma/events.json", true},
 		{"/org-data/data/2026/04/generated/transactions.json", false},
-		{"/org-data/2026/04/generated/data.json", false},
+		{"/org-data/2026/04/generated/sources.json", false},
 	}
 	for _, c := range cases {
-		if got := pathHasSourceDataSegment(c.path); got != c.want {
-			t.Errorf("pathHasSourceDataSegment(%q) = %v; want %v", c.path, got, c.want)
+		if got := pathHasSourcesSegment(c.path); got != c.want {
+			t.Errorf("pathHasSourcesSegment(%q) = %v; want %v", c.path, got, c.want)
 		}
 	}
 }
@@ -148,7 +148,7 @@ func TestEnforcePIIPolicyScrubsOnlyOutsidePrivate(t *testing.T) {
 	if strings.Contains(string(cleaned), "@") {
 		t.Errorf("expected '@' scrubbed in public path, got %s", cleaned)
 	}
-	privCleaned := enforcePIIPolicy("/tmp/data/2025/01/finance/stripe/private/customers.json", data)
+	privCleaned := enforcePIIPolicy("/tmp/data/2025/01/generated/private/customers.json", data)
 	if !strings.Contains(string(privCleaned), "@") {
 		t.Errorf("expected private path to be untouched, got %s", privCleaned)
 	}

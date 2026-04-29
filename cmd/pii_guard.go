@@ -8,7 +8,7 @@ import (
 )
 
 // emailPattern roughly matches email addresses. Used to detect PII leaks in
-// files written outside a /private/ subdirectory.
+// files written outside a /private/ subdirectory or /sources/ archive.
 var emailPattern = regexp.MustCompile(`[a-zA-Z0-9._%+\-]+@[a-zA-Z0-9.\-]+\.[a-zA-Z]{2,}`)
 
 // pathHasPrivateSegment reports whether the given slash- or os-separated path
@@ -24,16 +24,16 @@ func pathHasPrivateSegment(path string) bool {
 	return false
 }
 
-// pathHasSourceDataSegment reports whether the path is under a monthly or
-// latest source dump directory: <YYYY>/<MM>/data/<source>/... or
-// latest/data/<source>/.... Source dumps are private backups by default; only
-// generated files are expected to be public-safe.
-func pathHasSourceDataSegment(path string) bool {
+// pathHasSourcesSegment reports whether the path is under a monthly or latest
+// source dump directory: <YYYY>/<MM>/sources/<source>/... or
+// latest/sources/<source>/.... Source dumps are private backups by default;
+// only generated files are expected to be public-safe.
+func pathHasSourcesSegment(path string) bool {
 	parts := strings.FieldsFunc(path, func(r rune) bool {
 		return r == '/' || r == '\\'
 	})
 	for i, part := range parts {
-		if part != "data" {
+		if part != "sources" {
 			continue
 		}
 		if i >= 2 && isYearSegment(parts[i-2]) && isMonthSegment(parts[i-1]) {

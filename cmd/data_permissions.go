@@ -71,13 +71,13 @@ func writeDataFile(path string, data []byte) error {
 }
 
 // enforcePIIPolicy scrubs name fields and warns about emails for JSON files
-// written outside a /private/ subdirectory. Non-JSON files and files inside a
-// /private/ path are returned as-is.
+// written outside /private/ and monthly /sources/ archives. Non-JSON files,
+// private paths, and source dumps are returned as-is.
 func enforcePIIPolicy(path string, data []byte) []byte {
 	if !strings.HasSuffix(path, ".json") {
 		return data
 	}
-	if pathHasPrivateSegment(path) || pathHasSourceDataSegment(path) {
+	if pathHasPrivateSegment(path) || pathHasSourcesSegment(path) {
 		return data
 	}
 	cleaned, scrubbed := scrubNameFields(data)
@@ -126,7 +126,7 @@ func applyDataPathPolicy(baseDir, targetPath string, isDir bool) error {
 				continue
 			}
 			current = filepath.Join(current, part)
-			if part == "private" || sourceDataStartsAt(baseDir, current) {
+			if part == "private" || sourcesStartAt(baseDir, current) {
 				privateMode = true
 			}
 			mode := dataPublicDirMode
@@ -148,16 +148,16 @@ func applyDataPathPolicy(baseDir, targetPath string, isDir bool) error {
 	return nil
 }
 
-func sourceDataStartsAt(baseDir, currentPath string) bool {
+func sourcesStartAt(baseDir, currentPath string) bool {
 	rel, err := filepath.Rel(baseDir, currentPath)
 	if err != nil || rel == "." {
 		return false
 	}
 	parts := strings.Split(rel, string(os.PathSeparator))
-	if len(parts) == 3 && isYearSegment(parts[0]) && isMonthSegment(parts[1]) && parts[2] == "data" {
+	if len(parts) == 3 && isYearSegment(parts[0]) && isMonthSegment(parts[1]) && parts[2] == "sources" {
 		return true
 	}
-	if len(parts) == 2 && parts[0] == "latest" && parts[1] == "data" {
+	if len(parts) == 2 && parts[0] == "latest" && parts[1] == "sources" {
 		return true
 	}
 	return false

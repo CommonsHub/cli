@@ -5,13 +5,12 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 )
 
-// StripeChargeEnrichment holds private customer/app data from Stripe charges.
-// Stored in finance/stripe/private/charges.json per month.
+// StripeChargeEnrichment holds customer/app data from Stripe charges.
+// Stored in sources/stripe/charges.json per month.
 type StripeChargeEnrichment struct {
 	FetchedAt      string                   `json:"fetchedAt"`
 	Charges        map[string]*StripeCharge `json:"charges"`                  // keyed by charge ID (ch_...)
@@ -298,14 +297,10 @@ func (c *StripeCharge) BestEmail() string {
 
 // LoadStripeChargeEnrichment reads the private charge data for a month.
 func LoadStripeChargeEnrichment(dataDir, year, month string) (map[string]*StripeCharge, map[string]string) {
-	path := providerDataPath(dataDir, year, month, "stripe", "charges.json")
+	path := providerSourcePath(dataDir, year, month, "stripe", "charges.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		path = filepath.Join(dataDir, year, month, "finance", "stripe", "private", "charges.json")
-		data, err = os.ReadFile(path)
-		if err != nil {
-			return nil, nil
-		}
+		return nil, nil
 	}
 	var enrichment StripeChargeEnrichment
 	if json.Unmarshal(data, &enrichment) != nil {
@@ -321,24 +316,15 @@ func SaveStripeChargeEnrichment(dataDir, year, month string, charges map[string]
 		Charges:        charges,
 		RefundToCharge: refundToCharge,
 	}
-	data, _ := json.MarshalIndent(enrichment, "", "  ")
-	relPath := filepath.Join("finance", "stripe", "private", "charges.json")
-	_ = writeDataFile(filepath.Join(dataDir, year, month, relPath), data)
-	// Also write to latest
-	_ = writeDataFile(filepath.Join(dataDir, "latest", relPath), data)
-	_ = writeProviderDataJSON(dataDir, year, month, "stripe", enrichment, "charges.json")
+	_ = writeProviderSourceJSON(dataDir, year, month, "stripe", enrichment, "charges.json")
 }
 
-// loadStripeCustomerData reads the private customer PII for a month.
+// loadStripeCustomerData reads the archived Stripe customer PII for a month.
 func loadStripeCustomerData(dataDir, year, month string) map[string]*StripeCustomerPII {
-	path := providerDataPath(dataDir, year, month, "stripe", "customers.json")
+	path := providerSourcePath(dataDir, year, month, "stripe", "customers.json")
 	data, err := os.ReadFile(path)
 	if err != nil {
-		path = filepath.Join(dataDir, year, month, "finance", "stripe", "private", "customers.json")
-		data, err = os.ReadFile(path)
-		if err != nil {
-			return nil
-		}
+		return nil
 	}
 	var customerData StripeCustomerData
 	if json.Unmarshal(data, &customerData) != nil {

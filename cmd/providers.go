@@ -4,11 +4,12 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
 // Provider owns one external source. A provider syncs source data into the
-// monthly data/<source>/ archive, then maps that archived data into standard
+// monthly sources/<source>/ archive, then maps that archived data into standard
 // generated objects. Cross-source enrichment belongs in DataPlugin.
 type Provider interface {
 	Source() string
@@ -53,22 +54,22 @@ type ProviderGeneratedObjects struct {
 	Images       []ImageEntry
 }
 
-func providerDataRelPath(source string, elems ...string) string {
-	parts := append([]string{"data", normalizeSourceName(source)}, elems...)
+func providerSourceRelPath(source string, elems ...string) string {
+	parts := append([]string{"sources", normalizeSourceName(source)}, elems...)
 	return filepath.Join(parts...)
 }
 
-func providerDataPath(dataDir, year, month, source string, elems ...string) string {
-	parts := []string{dataDir, year, month, providerDataRelPath(source, elems...)}
+func providerSourcePath(dataDir, year, month, source string, elems ...string) string {
+	parts := []string{dataDir, year, month, providerSourceRelPath(source, elems...)}
 	return filepath.Join(parts...)
 }
 
-func writeProviderDataJSON(dataDir, year, month, source string, v interface{}, elems ...string) error {
+func writeProviderSourceJSON(dataDir, year, month, source string, v interface{}, elems ...string) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	return writeMonthFile(dataDir, year, month, providerDataRelPath(source, elems...), data)
+	return writeMonthFile(dataDir, year, month, providerSourceRelPath(source, elems...), data)
 }
 
 func normalizeSourceName(source string) string {
@@ -109,22 +110,84 @@ func (stripeProvider) GenerateObjects(*ProviderGenerateContext, ProviderGenerate
 }
 
 func stripeTransactionCachePaths(dataDir, year, month string) []string {
-	sourcePath := providerDataPath(dataDir, year, month, "stripe", "balance-transactions.json")
+	sourcePath := providerSourcePath(dataDir, year, month, "stripe", "balance-transactions.json")
 	if fileExists(sourcePath) {
 		return []string{sourcePath}
 	}
+	return nil
+}
 
-	stripeDir := filepath.Join(dataDir, year, month, "finance", "stripe")
-	entries, err := os.ReadDir(stripeDir)
+func loadStripeBTsSinceFromSources(dataDir, accountID string, sinceUnix int64) ([]StripeTransaction, error) {
+	all, err := loadStripeBTsFromSources(dataDir, accountID)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-	var paths []string
-	for _, e := range entries {
-		if e.IsDir() {
+	var out []StripeTransaction
+	for _, bt := range all {
+		if bt.Created > sinceUnix {
+			out = append(out, bt)
+		}
+	}
+	return out, nil
+}
+
+func loadStripeBTsFromSources(dataDir, accountID string) ([]StripeTransaction, error) {
+	years, err := os.ReadDir(dataDir)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	foundCache := false
+	var out []StripeTransaction
+	for _, y := range years {
+		if !y.IsDir() || len(y.Name()) != 4 {
 			continue
 		}
-		paths = append(paths, filepath.Join(stripeDir, e.Name()))
+		months, err := os.ReadDir(filepath.Join(dataDir, y.Name()))
+		if err != nil {
+			continue
+		}
+		for _, m := range months {
+			if !m.IsDir() || len(m.Name()) != 2 {
+				continue
+			}
+			cache, ok := loadStripeBTCache(providerSourcePath(dataDir, y.Name(), m.Name(), "stripe", "balance-transactions.json"))
+			if !ok {
+				continue
+			}
+			if accountID != "" && cache.AccountID != "" && !strings.EqualFold(accountID, cache.AccountID) {
+				continue
+			}
+			foundCache = true
+			for _, bt := range cache.Transactions {
+				if bt.ID == "" || seen[bt.ID] {
+					continue
+				}
+				seen[bt.ID] = true
+				out = append(out, bt)
+			}
+		}
 	}
-	return paths
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].Created == out[j].Created {
+			return out[i].ID < out[j].ID
+		}
+		return out[i].Created < out[j].Created
+	})
+	if !foundCache {
+		return nil, os.ErrNotExist
+	}
+	return out, nil
+}
+
+func loadStripeBTCache(path string) (StripeCacheFile, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return StripeCacheFile{}, false
+	}
+	var cache StripeCacheFile
+	if json.Unmarshal(data, &cache) != nil {
+		return StripeCacheFile{}, false
+	}
+	return cache, len(cache.Transactions) > 0
 }

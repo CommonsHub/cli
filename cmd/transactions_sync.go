@@ -56,7 +56,7 @@ type StripeCacheFile struct {
 }
 
 // StripeCustomerData holds PII extracted from Stripe charges.
-// Saved separately in finance/stripe/private/customers.json.
+// Saved separately in sources/stripe/customers.json.
 type StripeCustomerData struct {
 	FetchedAt string                        `json:"fetchedAt"`
 	Customers map[string]*StripeCustomerPII `json:"customers"` // keyed by balance transaction ID (txn_...)
@@ -396,12 +396,14 @@ func TransactionsSync(args []string) (int, error) {
 					// Check if we can skip the full fetch
 					if !force {
 						relPathFn := func(year, month string) string {
-							return filepath.Join("finance", "stripe", "transactions.json")
+							return providerSourceRelPath("stripe", "balance-transactions.json")
 						}
 						if allMonthsCached(DataDir(), startMonth, endMonth, relPathFn) {
-							cachedPath := currentMonthCacheFile(DataDir(), relPathFn)
-							cachedLatest := latestCachedStripeTxID(cachedPath)
-							if cachedLatest != "" {
+							if !monthRangeIncludes(time.Now().In(BrusselsTZ()).Format("2006-01"), startMonth, endMonth) {
+								fmt.Printf("    %s✓ Cached source data for past month range%s\n", Fmt.Green, Fmt.Reset)
+								continue
+							}
+							if cachedLatest := latestCachedStripeTxID(currentMonthCacheFile(DataDir(), relPathFn)); cachedLatest != "" {
 								peekID, peekErr := peekStripeLatest(stripeKey, acc.AccountID, startMonth, endMonth)
 								if peekErr == nil && peekID == cachedLatest {
 									fmt.Printf("    %s✓ Up to date%s\n", Fmt.Green, Fmt.Reset)
@@ -439,8 +441,7 @@ func TransactionsSync(args []string) (int, error) {
 						}
 						year, month := parts[0], parts[1]
 						dataDir := DataDir()
-						relPath := filepath.Join("finance", "stripe", "transactions.json")
-						filePath := filepath.Join(dataDir, year, month, relPath)
+						filePath := providerSourcePath(dataDir, year, month, "stripe", "balance-transactions.json")
 
 						if force || ym == fmt.Sprintf("%d-%02d", now.Year(), now.Month()) || !fileExists(filePath) {
 							monthsToUpdate[ym] = true
@@ -470,7 +471,6 @@ func TransactionsSync(args []string) (int, error) {
 						year, month := parts[0], parts[1]
 
 						dataDir := DataDir()
-						relPath := filepath.Join("finance", "stripe", "transactions.json")
 
 						cache := StripeCacheFile{
 							Transactions: monthTxs,
@@ -479,12 +479,7 @@ func TransactionsSync(args []string) (int, error) {
 							Currency:     acc.Currency,
 						}
 
-						data, _ := json.MarshalIndent(cache, "", "  ")
-						if err := writeMonthFile(dataDir, year, month, relPath, data); err != nil {
-							fmt.Printf("    %s✗ Failed to write: %v%s\n", Fmt.Red, err, Fmt.Reset)
-							continue
-						}
-						if err := writeProviderDataJSON(dataDir, year, month, "stripe", cache, "balance-transactions.json"); err != nil {
+						if err := writeProviderSourceJSON(dataDir, year, month, "stripe", cache, "balance-transactions.json"); err != nil {
 							fmt.Printf("    %s✗ Failed to write Stripe source data: %v%s\n", Fmt.Red, err, Fmt.Reset)
 							continue
 						}
@@ -534,9 +529,7 @@ func TransactionsSync(args []string) (int, error) {
 											FetchedAt:   time.Now().UTC().Format(time.RFC3339),
 											Annotations: monthAnnotations,
 										}
-										cacheData, _ := json.MarshalIndent(cache, "", "  ")
-										writeMonthFile(DataDir(), parts[0], parts[1],
-											filepath.Join("finance", "stripe", "nostr-annotations.json"), cacheData)
+										_ = writeProviderSourceJSON(DataDir(), parts[0], parts[1], "stripe", cache, "nostr-annotations.json")
 									}
 								}
 							}
@@ -659,10 +652,7 @@ func TransactionsSync(args []string) (int, error) {
 							if len(customers.Customers) > 0 {
 								parts := strings.Split(ym, "-")
 								if len(parts) == 2 {
-									piiData, _ := json.MarshalIndent(customers, "", "  ")
-									piiRelPath := filepath.Join("finance", "stripe", "private", "customers.json")
-									writeMonthFile(DataDir(), parts[0], parts[1], piiRelPath, piiData)
-									_ = writeProviderDataJSON(DataDir(), parts[0], parts[1], "stripe", customers, "customers.json")
+									_ = writeProviderSourceJSON(DataDir(), parts[0], parts[1], "stripe", customers, "customers.json")
 								}
 							}
 						}
@@ -1040,7 +1030,11 @@ func fetchStripeTransactions(apiKey, accountID, startMonth, endMonth string, lim
 					countSeen++
 				}
 			}
-			localCount := localStripeTransactionCount(filepath.Join(dataDir, strings.ReplaceAll(oldestMonth, "-", "/"), "finance", "stripe", "transactions.json"))
+			localCount := 0
+			parts := strings.Split(oldestMonth, "-")
+			if len(parts) == 2 {
+				localCount = localStripeTransactionCount(providerSourcePath(dataDir, parts[0], parts[1], "stripe", "balance-transactions.json"))
+			}
 			if localCount > 0 && countSeen == localCount {
 				fmt.Printf("    %sStripe stop heuristic: %s count matches local cache (%d)%s\n", Fmt.Dim, oldestMonth, localCount, Fmt.Reset)
 				break
@@ -1521,6 +1515,10 @@ func expandMonthRange(startMonth, endMonth string) []string {
 		}
 	}
 	return months
+}
+
+func monthRangeIncludes(month, startMonth, endMonth string) bool {
+	return month >= startMonth && month <= endMonth
 }
 
 // currentMonthCacheFile returns the path to the cache file for the current month.

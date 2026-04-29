@@ -180,12 +180,25 @@ func MembersSync(args []string) error {
 		return fmt.Errorf("failed to load settings: %w", err)
 	}
 	stripeProductID := settings.Membership.Stripe.ProductID
+	stripeNeedsFetch := false
+	now := time.Now()
+	for _, ym := range months {
+		yearStr := strconv.Itoa(ym.year)
+		monthStr := fmt.Sprintf("%02d", ym.month)
+		isCurrent := ym.year == now.Year() && ym.month == int(now.Month())
+		if isCurrent || !fileExists(providerSourcePath(dataDir, yearStr, monthStr, "stripe", "subscriptions.json")) {
+			stripeNeedsFetch = true
+			break
+		}
+	}
 
 	// Fetch all Stripe subscriptions (once)
 	var stripeSubscriptions []stripeSubscription
 	customerCache := map[string]*stripeCustomer{}
 
-	if doStripe && stripeKey != "" {
+	if doStripe && !stripeNeedsFetch {
+		doStripe = false
+	} else if doStripe && stripeKey != "" {
 		fmt.Println("📥 Fetching Stripe subscriptions...")
 		var err error
 		stripeSubscriptions, err = fetchAllStripeMemberSubscriptions(stripeKey, stripeProductID)
@@ -220,12 +233,11 @@ func MembersSync(args []string) error {
 		if doStripe && len(stripeSubscriptions) > 0 {
 			snap := buildStripeMonthSnapshot(stripeSubscriptions, year, month, salt, stripeProductID, stripeKey, customerCache)
 			fmt.Printf("  Stripe: %d subscriptions\n", len(snap.Subscriptions))
-			snapData, _ := json.MarshalIndent(snap, "", "  ")
-			writeMonthFile(dataDir, yearStr, monthStr, filepath.Join("finance", "stripe", "subscriptions.json"), snapData)
+			_ = writeProviderSourceJSON(dataDir, yearStr, monthStr, "stripe", snap, "subscriptions.json")
 			snapshots = append(snapshots, snap)
 		} else {
 			// Try loading cached
-			snapPath := filepath.Join(monthDir, "finance", "stripe", "subscriptions.json")
+			snapPath := providerSourcePath(dataDir, yearStr, monthStr, "stripe", "subscriptions.json")
 			if data, err := os.ReadFile(snapPath); err == nil {
 				var snap providerSnapshot
 				if json.Unmarshal(data, &snap) == nil {

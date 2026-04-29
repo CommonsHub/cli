@@ -3,7 +3,6 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -42,11 +41,6 @@ func syncStripeChronological(
 		return "", fmt.Errorf("--payout is not supported in the chronological sync model; use --force to reset and resync everything")
 	}
 
-	stripeKey := os.Getenv("STRIPE_SECRET_KEY")
-	if stripeKey == "" {
-		return "", fmt.Errorf("STRIPE_SECRET_KEY not set")
-	}
-
 	if force && !dryRun {
 		if err := emptyOdooJournal(creds, uid, acc.OdooJournalID, acc.OdooJournalName); err != nil {
 			return "", err
@@ -65,10 +59,10 @@ func syncStripeChronological(
 		odooLog("  %sNo prior sync — starting from account history%s\n", Fmt.Dim, Fmt.Reset)
 	}
 
-	odooLog("  %sFetching Stripe balance transactions...%s\n", Fmt.Dim, Fmt.Reset)
-	bts, err := fetchStripeBTsSince(stripeKey, resumeCursor)
+	odooLog("  %sLoading archived Stripe source transactions...%s\n", Fmt.Dim, Fmt.Reset)
+	bts, err := loadStripeBTsSinceFromSources(DataDir(), acc.AccountID, resumeCursor)
 	if err != nil {
-		return "", fmt.Errorf("fetch balance transactions: %v", err)
+		return "", fmt.Errorf("load Stripe source transactions: %v", err)
 	}
 	odooLog("  %s%d new balance transactions%s\n\n", Fmt.Dim, len(bts), Fmt.Reset)
 	if len(bts) == 0 {
@@ -411,72 +405,6 @@ func updateBTStats(s *syncStats, bt StripeTransaction, amount float64) {
 	}
 }
 
-// ── Stripe API ──────────────────────────────────────────────────────────────
-
-// fetchStripeBTsSince fetches balance transactions with created > sinceUnix,
-// ordered chronologically ASC. Expands source + source.customer +
-// source.destination so each BT is self-contained.
-func fetchStripeBTsSince(apiKey string, sinceUnix int64) ([]StripeTransaction, error) {
-	base := "https://api.stripe.com/v1/balance_transactions?limit=100" +
-		"&expand[]=data.source" +
-		"&expand[]=data.source.customer" +
-		"&expand[]=data.source.destination"
-	if sinceUnix > 0 {
-		base += fmt.Sprintf("&created[gt]=%d", sinceUnix)
-	}
-
-	var all []StripeTransaction
-	startingAfter := ""
-	for {
-		reqURL := base
-		if startingAfter != "" {
-			reqURL += "&starting_after=" + startingAfter
-		}
-		req, err := http.NewRequest("GET", reqURL, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return nil, err
-		}
-		if resp.StatusCode == 429 {
-			resp.Body.Close()
-			time.Sleep(2 * time.Second)
-			continue
-		}
-		if resp.StatusCode != 200 {
-			resp.Body.Close()
-			return nil, fmt.Errorf("Stripe API returned %d", resp.StatusCode)
-		}
-		var list StripeListResponse
-		if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
-			resp.Body.Close()
-			return nil, err
-		}
-		resp.Body.Close()
-
-		for i := range list.Data {
-			enrichStripeTransaction(&list.Data[i])
-		}
-		all = append(all, list.Data...)
-
-		if !list.HasMore || len(list.Data) == 0 {
-			break
-		}
-		startingAfter = list.Data[len(list.Data)-1].ID
-		time.Sleep(200 * time.Millisecond)
-	}
-
-	// Stripe returns newest first; flip to chronological ASC.
-	for i, j := 0, len(all)-1; i < j; i, j = i+1, j-1 {
-		all[i], all[j] = all[j], all[i]
-	}
-	return all, nil
-}
-
 // ── Odoo statement helpers ──────────────────────────────────────────────────
 
 // findOrCreateOpenStatement returns the ID, balance_start, and current
@@ -681,63 +609,29 @@ func AccountStripePending(slug string) error {
 	if acc.Provider != "stripe" {
 		return fmt.Errorf("account '%s' is not a Stripe account", slug)
 	}
-	key := os.Getenv("STRIPE_SECRET_KEY")
-	if key == "" {
-		return fmt.Errorf("STRIPE_SECRET_KEY not set")
+	// Walk archived balance_transactions newest-first to find the last payout,
+	// then collect every BT created after it.
+	fmt.Printf("\n  %sLoading archived Stripe source transactions...%s\n", Fmt.Dim, Fmt.Reset)
+	all, err := loadStripeBTsFromSources(DataDir(), acc.AccountID)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return fmt.Errorf("no Stripe source data found; run `chb transactions sync --source stripe --reset` first")
+		}
+		return err
 	}
-
-	// Walk balance_transactions newest-first to find the last payout, then
-	// collect every BT created after it.
-	fmt.Printf("\n  %sFetching balance transactions from Stripe...%s\n", Fmt.Dim, Fmt.Reset)
 	var lastPayout *StripeTransaction
 	var since []StripeTransaction
-	startingAfter := ""
-	done := false
-	for !done {
-		url := "https://api.stripe.com/v1/balance_transactions?limit=100&expand[]=data.source"
-		if startingAfter != "" {
-			url += "&starting_after=" + startingAfter
-		}
-		req, err := http.NewRequest("GET", url, nil)
-		if err != nil {
-			return err
-		}
-		req.Header.Set("Authorization", "Bearer "+key)
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return err
-		}
-		if resp.StatusCode == 429 {
-			resp.Body.Close()
-			time.Sleep(2 * time.Second)
-			continue
-		}
-		if resp.StatusCode != 200 {
-			resp.Body.Close()
-			return fmt.Errorf("Stripe API returned %d", resp.StatusCode)
-		}
-		var list StripeListResponse
-		if err := json.NewDecoder(resp.Body).Decode(&list); err != nil {
-			resp.Body.Close()
-			return err
-		}
-		resp.Body.Close()
-
-		for i := range list.Data {
-			bt := &list.Data[i]
-			enrichStripeTransaction(bt)
-			if bt.Type == "payout" {
-				lastPayout = bt
-				done = true
-				break
+	for i := len(all) - 1; i >= 0; i-- {
+		if all[i].Type == "payout" {
+			lastPayout = &all[i]
+			if i+1 < len(all) {
+				since = append(since, all[i+1:]...)
 			}
-			since = append(since, *bt)
-		}
-		if done || !list.HasMore || len(list.Data) == 0 {
 			break
 		}
-		startingAfter = list.Data[len(list.Data)-1].ID
-		time.Sleep(200 * time.Millisecond)
+	}
+	if lastPayout == nil {
+		since = all
 	}
 
 	// Accumulate buckets. In Stripe semantics:

@@ -142,9 +142,7 @@ func TransactionsSyncNostr(args []string) error {
 				FetchedAt:   time.Now().UTC().Format(time.RFC3339),
 				Annotations: monthAnns,
 			}
-			cacheData, _ := json.MarshalIndent(cache, "", "  ")
-			writeMonthFile(dataDir, parts[0], parts[1],
-				filepath.Join("finance", "stripe", "nostr-annotations.json"), cacheData)
+			_ = writeProviderSourceJSON(dataDir, parts[0], parts[1], "stripe", cache, "nostr-annotations.json")
 		}
 		fmt.Printf("  %sSaved stripe annotations to disk%s\n", Fmt.Dim, Fmt.Reset)
 	}

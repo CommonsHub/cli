@@ -444,13 +444,7 @@ func printTransactionsSummary(dataDir, year, month string) {
 		}
 
 		if acc.Provider == "stripe" {
-			accountID := acc.AccountID
-			if accountID == "" {
-				accountID = acc.Slug
-			}
-			filePath := filepath.Join(dataDir, year, month, "finance", "stripe",
-				fmt.Sprintf("%s.json", accountID))
-
+			filePath := providerSourcePath(dataDir, year, month, "stripe", "balance-transactions.json")
 			data, err := os.ReadFile(filePath)
 			if err != nil {
 				continue
@@ -548,13 +542,7 @@ func calculateMonthTransactions(dataDir, year, month string) (income, expenses f
 		}
 
 		if acc.Provider == "stripe" {
-			accountID := acc.AccountID
-			if accountID == "" {
-				accountID = acc.Slug
-			}
-			filePath := filepath.Join(dataDir, year, month, "finance", "stripe",
-				fmt.Sprintf("%s.json", accountID))
-
+			filePath := providerSourcePath(dataDir, year, month, "stripe", "balance-transactions.json")
 			data, err := os.ReadFile(filePath)
 			if err != nil {
 				continue

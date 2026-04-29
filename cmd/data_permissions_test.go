@@ -38,25 +38,24 @@ func TestWriteDataFileSetsPrivateDirectoryPermissions(t *testing.T) {
 	dataDir := t.TempDir()
 	t.Setenv("DATA_DIR", dataDir)
 
-	path := filepath.Join(DataDir(), "2026", "04", "finance", "stripe", "private", "customers", "customer-1.json")
+	path := filepath.Join(DataDir(), "2026", "04", "generated", "private", "customers", "customer-1.json")
 	if err := writeDataFile(path, []byte(`{"ok":true}`)); err != nil {
 		t.Fatalf("write private data file: %v", err)
 	}
 
-	assertMode(t, filepath.Join(dataDir, "2026", "04", "finance"), 0755)
-	assertMode(t, filepath.Join(dataDir, "2026", "04", "finance", "stripe"), 0755)
-	assertMode(t, filepath.Join(dataDir, "2026", "04", "finance", "stripe", "private"), 0700)
-	assertMode(t, filepath.Join(dataDir, "2026", "04", "finance", "stripe", "private", "customers"), 0700)
+	assertMode(t, filepath.Join(dataDir, "2026", "04", "generated"), 0755)
+	assertMode(t, filepath.Join(dataDir, "2026", "04", "generated", "private"), 0700)
+	assertMode(t, filepath.Join(dataDir, "2026", "04", "generated", "private", "customers"), 0700)
 	assertMode(t, path, 0644)
 }
 
-func TestWriteDataFileTreatsSourceDataAsPrivate(t *testing.T) {
+func TestWriteDataFileTreatsSourcesAsPrivate(t *testing.T) {
 	dataDir := t.TempDir()
 	t.Setenv("DATA_DIR", dataDir)
 
-	path := filepath.Join(DataDir(), "2026", "04", "data", "stripe", "customers.json")
+	path := filepath.Join(DataDir(), "2026", "04", "sources", "stripe", "customers.json")
 	if err := writeDataFile(path, []byte(`{"name":"alice@example.org"}`)); err != nil {
-		t.Fatalf("write source data file: %v", err)
+		t.Fatalf("write sources file: %v", err)
 	}
 
 	data, err := os.ReadFile(path)
@@ -64,10 +63,10 @@ func TestWriteDataFileTreatsSourceDataAsPrivate(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(data) != `{"name":"alice@example.org"}` {
-		t.Fatalf("source data should not be scrubbed, got %s", data)
+		t.Fatalf("sources should not be scrubbed, got %s", data)
 	}
-	assertMode(t, filepath.Join(dataDir, "2026", "04", "data"), 0700)
-	assertMode(t, filepath.Join(dataDir, "2026", "04", "data", "stripe"), 0700)
+	assertMode(t, filepath.Join(dataDir, "2026", "04", "sources"), 0700)
+	assertMode(t, filepath.Join(dataDir, "2026", "04", "sources", "stripe"), 0700)
 }
 
 func TestDataDirNormalizesExistingPrivateDirectoryModes(t *testing.T) {

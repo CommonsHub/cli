@@ -2273,7 +2273,7 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 	// Load Nostr annotations (highest priority for categorization)
 	nostrAnnotations := map[string]*TxAnnotation{}
 	// Stripe annotations
-	stripeAnnotPath := filepath.Join(dataDir, year, month, "finance", "stripe", "nostr-annotations.json")
+	stripeAnnotPath := providerSourcePath(dataDir, year, month, "stripe", "nostr-annotations.json")
 	if data, err := os.ReadFile(stripeAnnotPath); err == nil {
 		var cache NostrAnnotationCache
 		if json.Unmarshal(data, &cache) == nil {
