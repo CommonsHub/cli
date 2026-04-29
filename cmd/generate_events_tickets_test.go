@@ -39,6 +39,27 @@ func TestSummariseEventTxEmpty(t *testing.T) {
 	}
 }
 
+func TestTransactionEventIDsIncludesEventTags(t *testing.T) {
+	tx := TransactionEntry{
+		Event: "calendar-uid-1",
+		Tags: [][]string{
+			{"event", "calendar-uid-1"},
+			{"event", "calendar-uid-2"},
+			{"lumaEvent", "evt-abc"},
+		},
+	}
+	got := transactionEventIDs(tx)
+	want := []string{"calendar-uid-1", "calendar-uid-2"}
+	if len(got) != len(want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("got %v want %v", got, want)
+		}
+	}
+}
+
 func TestEventTicketSalesEqual(t *testing.T) {
 	a := summariseEventTx([]TransactionEntry{{ID: "a", Type: "CREDIT", NormalizedAmount: 10, Currency: "EUR", Timestamp: 1}})
 	b := summariseEventTx([]TransactionEntry{{ID: "a", Type: "CREDIT", NormalizedAmount: 10, Currency: "EUR", Timestamp: 1}})

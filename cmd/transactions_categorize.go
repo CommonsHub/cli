@@ -10,10 +10,10 @@ import (
 	"strings"
 	"time"
 
+	stickertable "github.com/76creates/stickers/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/huh"
 	"github.com/charmbracelet/lipgloss"
-	stickertable "github.com/76creates/stickers/table"
 )
 
 // ── Bucket: a group of uncategorized transactions sharing a description ──
@@ -31,12 +31,12 @@ type txBucket struct {
 func findUncategorizedBuckets(txs []TransactionEntry) []txBucket {
 	tz := BrusselsTZ()
 	type bucketData struct {
-		count  int
-		total  float64
-		first  time.Time
-		last   time.Time
-		curr   string
-		ids    []string
+		count int
+		total float64
+		first time.Time
+		last  time.Time
+		curr  string
+		ids   []string
 	}
 
 	groups := map[string]*bucketData{}
@@ -412,6 +412,7 @@ func applyCategoriesToTxs(idSet map[string]bool, category, collective, event str
 					if event != "" {
 						txFile.Transactions[i].Event = event
 					}
+					syncTransactionTags(&txFile.Transactions[i])
 					changed = true
 					updated++
 				}

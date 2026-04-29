@@ -375,10 +375,14 @@ func OdooJournals(args []string) error {
 		if len(args) >= 2 && args[1] == "sync" {
 			syncArgs := args[2:]
 			if HasFlag(syncArgs, "--reset") {
+				printOdooTargetLine(creds)
 				if err := odooJournalReset(creds, uid, journalID); err != nil {
 					return err
 				}
 				syncArgs = filterFlag(syncArgs, "--reset")
+				wasPrinted := odooTargetAlreadyPrinted()
+				setOdooTargetAlreadyPrinted(true)
+				defer setOdooTargetAlreadyPrinted(wasPrinted)
 			}
 			return odooJournalSync(journalID, syncArgs)
 		}
@@ -388,7 +392,11 @@ func OdooJournals(args []string) error {
 		if len(args) >= 2 && args[1] == "fix" {
 			return odooJournalFix(creds, uid, journalID, HasFlag(args, "--yes", "-y"), HasFlag(args, "--dry-run"))
 		}
+		if len(args) >= 2 && args[1] == "reconcile" {
+			return odooJournalReconcile(creds, uid, journalID, HasFlag(args, "--yes", "-y"), HasFlag(args, "--dry-run"))
+		}
 		if HasFlag(args, "--reset") {
+			printOdooTargetLine(creds)
 			return odooJournalReset(creds, uid, journalID)
 		}
 		return odooJournalDetail(creds, uid, journalID)
@@ -424,9 +432,18 @@ func OdooJournals(args []string) error {
 		var stmtCount int
 		json.Unmarshal(stmtResult, &stmtCount)
 
+		reconciledResult, _ := odooExec(creds.URL, creds.DB, uid, creds.Password,
+			"account.bank.statement.line", "search_count",
+			[]interface{}{[]interface{}{
+				[]interface{}{"journal_id", "=", acc.OdooJournalID},
+				[]interface{}{"is_reconciled", "=", true},
+			}}, nil)
+		var reconciledCount int
+		json.Unmarshal(reconciledResult, &reconciledCount)
+
 		fmt.Printf("  %s%s%s  %s#%d%s\n", Fmt.Bold, acc.OdooJournalName, Fmt.Reset, Fmt.Dim, acc.OdooJournalID, Fmt.Reset)
 		fmt.Printf("    %sAccount: %s (%s)%s\n", Fmt.Dim, acc.Name, acc.Slug, Fmt.Reset)
-		fmt.Printf("    %s%d statement lines, %d statements%s\n", Fmt.Dim, lineCount, stmtCount, Fmt.Reset)
+		fmt.Printf("    %s%d statement lines, %d reconciled, %d statements%s\n", Fmt.Dim, lineCount, reconciledCount, stmtCount, Fmt.Reset)
 		fmt.Println()
 	}
 
@@ -445,6 +462,8 @@ func OdooJournals(args []string) error {
 	fmt.Printf("    %sReport statements whose running balance is invalid%s\n\n", Fmt.Dim, Fmt.Reset)
 	fmt.Printf("  %s%schb odoo journals <id> fix%s\n", Fmt.Bold, Fmt.Cyan, Fmt.Reset)
 	fmt.Printf("    %sSet balance_end_real = running balance on invalid statements%s\n\n", Fmt.Dim, Fmt.Reset)
+	fmt.Printf("  %s%schb odoo journals <id> reconcile [--dry-run] [--yes]%s\n", Fmt.Bold, Fmt.Cyan, Fmt.Reset)
+	fmt.Printf("    %sMatch unreconciled statement lines against open invoices and bills%s\n\n", Fmt.Dim, Fmt.Reset)
 	fmt.Printf("  %s%schb odoo journals <id> --reset%s\n", Fmt.Bold, Fmt.Cyan, Fmt.Reset)
 	fmt.Printf("    %sEmpty a journal (delete all statements and lines)%s\n\n", Fmt.Dim, Fmt.Reset)
 
@@ -452,6 +471,12 @@ func OdooJournals(args []string) error {
 }
 
 func odooJournalDetail(creds *OdooCredentials, uid int, journalID int) error {
+	linkedAccount := linkedAccountForJournal(journalID)
+	currency := "EUR"
+	if linkedAccount != nil {
+		currency = accountConfigCurrency(linkedAccount)
+	}
+
 	// Fetch journal info
 	result, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
 		"account.journal", "search_read",
@@ -482,38 +507,185 @@ func odooJournalDetail(creds *OdooCredentials, uid int, journalID int) error {
 	var lineCount int
 	json.Unmarshal(lineResult, &lineCount)
 
+	reconciledResult, _ := odooExec(creds.URL, creds.DB, uid, creds.Password,
+		"account.bank.statement.line", "search_count",
+		[]interface{}{[]interface{}{
+			[]interface{}{"journal_id", "=", journalID},
+			[]interface{}{"is_reconciled", "=", true},
+		}}, nil)
+	var reconciledCount int
+	json.Unmarshal(reconciledResult, &reconciledCount)
+
+	currentBalance, balanceErr := odooJournalLineSum(creds, uid, journalID)
+
 	stmtResult, _ := odooExec(creds.URL, creds.DB, uid, creds.Password,
 		"account.bank.statement", "search_read",
 		[]interface{}{[]interface{}{
 			[]interface{}{"journal_id", "=", journalID},
 		}},
 		map[string]interface{}{
-			"fields": []string{"name", "line_ids"},
-			"order":  "name desc",
+			"fields": []string{"id", "name", "date", "line_ids", "balance_start", "balance_end_real", "reference"},
+			"order":  "date desc, id desc",
 			"limit":  0,
 		})
 	var stmts []struct {
-		Name    string `json:"name"`
-		LineIDs []int  `json:"line_ids"`
+		ID             int     `json:"id"`
+		Name           odooStr `json:"name"`
+		Date           odooStr `json:"date"`
+		Reference      odooStr `json:"reference"`
+		LineIDs        []int   `json:"line_ids"`
+		BalanceStart   float64 `json:"balance_start"`
+		BalanceEndReal float64 `json:"balance_end_real"`
 	}
 	json.Unmarshal(stmtResult, &stmts)
 
+	journalURL := OdooWebURL(creds.URL, "account.journal", journalID)
 	fmt.Printf("\n  %s%s%s  %s#%d  type: %s%s\n", Fmt.Bold, j.Name, Fmt.Reset, Fmt.Dim, j.ID, j.Type, Fmt.Reset)
-	fmt.Printf("  %s%s (db: %s)%s\n\n", Fmt.Dim, creds.URL, creds.DB, Fmt.Reset)
+	fmt.Printf("  %sOdoo: %s  db: %s%s\n", Fmt.Dim, creds.URL, creds.DB, Fmt.Reset)
+	fmt.Printf("  %sJournal: %s%s\n", Fmt.Dim, hyperlink(journalURL, journalURL), Fmt.Reset)
+	if lastSync := LastSyncTime(fmt.Sprintf("odoo:journal:%d", journalID)); !lastSync.IsZero() {
+		fmt.Printf("  %sLast sync: %s  (%s)%s\n", Fmt.Dim, lastSync.In(BrusselsTZ()).Format("2006-01-02 15:04"), formatTimeAgo(lastSync), Fmt.Reset)
+	} else {
+		fmt.Printf("  %sLast sync: never%s\n", Fmt.Dim, Fmt.Reset)
+	}
+	fmt.Println()
+	if balanceErr == nil {
+		fmt.Printf("  %sCurrent balance: %s%s\n", Fmt.Dim, formatBalance(currentBalance, currency), Fmt.Reset)
+	} else {
+		fmt.Printf("  %sCurrent balance: unavailable (%v)%s\n", Fmt.Dim, balanceErr, Fmt.Reset)
+	}
 	fmt.Printf("  %sStatement lines: %d%s\n", Fmt.Dim, lineCount, Fmt.Reset)
+	fmt.Printf("  %sReconciled lines: %d%s\n", Fmt.Dim, reconciledCount, Fmt.Reset)
 	fmt.Printf("  %sStatements: %d%s\n\n", Fmt.Dim, len(stmts), Fmt.Reset)
 
 	if len(stmts) > 0 {
-		fmt.Printf("  %-32s  %s\n", "Statement", "Lines")
-		fmt.Printf("  %s%s%s\n", Fmt.Dim, strings.Repeat("─", 45), Fmt.Reset)
+		rows := [][]string{}
 		for _, s := range stmts {
-			fmt.Printf("  %-32s  %d\n", s.Name, len(s.LineIDs))
+			name := string(s.Name)
+			if string(s.Reference) == "open" && !strings.Contains(strings.ToLower(name), "open") {
+				name += " (open)"
+			}
+			rows = append(rows, []string{
+				string(s.Date),
+				truncate(name, 36),
+				fmt.Sprintf("%d", len(s.LineIDs)),
+				formatBalancePlain(s.BalanceStart, currency),
+				formatBalancePlain(s.BalanceEndReal, currency),
+			})
+		}
+		printAlignedTable(
+			[]string{"Date", "Statement", "Lines", "Start", "End"},
+			rows,
+			map[int]bool{2: true, 3: true, 4: true},
+		)
+		fmt.Println()
+	}
+
+	if linkedAccount != nil {
+		fmt.Printf("  %sLinked account%s\n", Fmt.Bold, Fmt.Reset)
+		printAccountDetailSummary(linkedAccount, nil)
+		fmt.Println()
+	} else {
+		fmt.Printf("  %sNo local account is linked to this Odoo journal.%s\n\n", Fmt.Dim, Fmt.Reset)
+	}
+
+	fmt.Printf("  %sTo reset: chb odoo journals %d --reset%s\n\n", Fmt.Dim, journalID, Fmt.Reset)
+	fmt.Printf("  %sTo reconcile: chb odoo journals %d reconcile --dry-run%s\n\n", Fmt.Dim, journalID, Fmt.Reset)
+	return nil
+}
+
+func linkedAccountForJournal(journalID int) *AccountConfig {
+	configs := LoadAccountConfigs()
+	for i := range configs {
+		if configs[i].OdooJournalID == journalID {
+			return &configs[i]
+		}
+	}
+	return nil
+}
+
+func accountConfigCurrency(acc *AccountConfig) string {
+	if acc == nil {
+		return "EUR"
+	}
+	if acc.Currency != "" {
+		return acc.Currency
+	}
+	if acc.Token != nil && acc.Token.Symbol != "" {
+		return acc.Token.Symbol
+	}
+	return "EUR"
+}
+
+func printAlignedTable(headers []string, rows [][]string, rightAlign map[int]bool) {
+	widths := make([]int, len(headers))
+	for i, h := range headers {
+		widths[i] = displayWidth(h)
+	}
+	for _, row := range rows {
+		for i, cell := range row {
+			if i >= len(widths) {
+				continue
+			}
+			if w := displayWidth(cell); w > widths[i] {
+				widths[i] = w
+			}
+		}
+	}
+
+	printRow := func(row []string) {
+		fmt.Print("  ")
+		for i := range headers {
+			cell := ""
+			if i < len(row) {
+				cell = row[i]
+			}
+			if i > 0 {
+				fmt.Print("  ")
+			}
+			if rightAlign[i] {
+				fmt.Print(padLeft(cell, widths[i]))
+			} else {
+				fmt.Print(padRight(cell, widths[i]))
+			}
 		}
 		fmt.Println()
 	}
 
-	fmt.Printf("  %sTo reset: chb odoo journals %d --reset%s\n\n", Fmt.Dim, journalID, Fmt.Reset)
-	return nil
+	printRow(headers)
+	fmt.Printf("  %s%s%s\n", Fmt.Dim, strings.Repeat("─", tableWidth(widths, len(headers))), Fmt.Reset)
+	for _, row := range rows {
+		printRow(row)
+	}
+}
+
+func tableWidth(widths []int, cols int) int {
+	total := 0
+	for _, w := range widths {
+		total += w
+	}
+	if cols > 1 {
+		total += (cols - 1) * 2
+	}
+	return total
+}
+
+func padRight(s string, width int) string {
+	if n := width - displayWidth(s); n > 0 {
+		return s + strings.Repeat(" ", n)
+	}
+	return s
+}
+
+func padLeft(s string, width int) string {
+	if n := width - displayWidth(s); n > 0 {
+		return strings.Repeat(" ", n) + s
+	}
+	return s
+}
+
+func displayWidth(s string) int {
+	return len([]rune(s))
 }
 
 // odooJournalCheck reports statements in the journal that violate Odoo's
@@ -835,6 +1007,13 @@ func odooJournalReset(creds *OdooCredentials, uid int, journalID int) error {
 	}
 
 	return emptyOdooJournal(creds, uid, journalID, journals[0].Name)
+}
+
+func printOdooTargetLine(creds *OdooCredentials) {
+	if quietOdooContext() || creds == nil {
+		return
+	}
+	fmt.Printf("\n%sOdoo: %s (db: %s)%s\n", Fmt.Dim, creds.URL, creds.DB, Fmt.Reset)
 }
 
 // PrintOdooHelp shows the top-level odoo command help.

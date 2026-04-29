@@ -75,6 +75,10 @@ func syncStripeChronological(
 		odooLog("  %s✓ Already in sync%s\n\n", Fmt.Green, Fmt.Reset)
 		return "already in sync", nil
 	}
+	if force {
+		odooLog("  %sReset rebuild: importing chronologically, skipping per-line reconciliation, using in-memory balances unless Odoo create mismatches occur.%s\n\n",
+			Fmt.Dim, Fmt.Reset)
+	}
 
 	// Find (or create) the currently-open statement. runningBalance is
 	// seeded from the actual line sum so that resumes over a partially-
@@ -91,35 +95,98 @@ func syncStripeChronological(
 	stats := &syncStats{}
 	partnerCache := map[string]int{}
 	var batch []map[string]interface{}
+	feeCents := int64(0)
+	feeBTs := 0
+	feeStartDate := ""
+	feeEndDate := ""
+	feeFirstBTID := ""
+	feeLastBTID := ""
+	processedBTs := 0
+	skippedBTs := 0
+	payoutsSeen := 0
+	createMismatch := false
 
-	flush := func() {
+	resetFeeAccumulator := func() {
+		feeCents = 0
+		feeBTs = 0
+		feeStartDate = ""
+		feeEndDate = ""
+		feeFirstBTID = ""
+		feeLastBTID = ""
+	}
+	appendAggregateFeeLine := func(paymentRef, importID, date string) {
+		if feeCents == 0 {
+			resetFeeAccumulator()
+			return
+		}
+		amount := stripeAggregateFeeLineAmount(feeCents)
+		runningBalance += amount
+		if feeBTs > 0 && feeStartDate != "" && feeEndDate != "" && feeStartDate != feeEndDate {
+			paymentRef = fmt.Sprintf("%s (%s to %s)", paymentRef, feeStartDate, feeEndDate)
+		}
+		batch = append(batch, map[string]interface{}{
+			"statement_id":     openStmtID,
+			"journal_id":       acc.OdooJournalID,
+			"date":             date,
+			"payment_ref":      paymentRef,
+			"amount":           amount,
+			"unique_import_id": importID,
+		})
+		resetFeeAccumulator()
+	}
+
+	flush := func(reason string) {
 		if dryRun || len(batch) == 0 {
 			batch = nil
 			return
 		}
-		created, _ := batchCreateStatementLines(creds, uid, batch)
-		stats.LinesCreated += created
-		stats.LinesSkipped += len(batch) - created
+		batchLen := len(batch)
+		start := time.Now()
+		odooLog("    %screating %d statement line(s) in Odoo (%s)...%s\n", Fmt.Dim, batchLen, reason, Fmt.Reset)
+		createdIDs, _ := batchCreateStatementLinesWithIDs(creds, uid, batch)
+		odooLog("    %screated %d/%d line(s) in %s%s\n", Fmt.Dim, len(createdIDs), batchLen, time.Since(start).Round(time.Second), Fmt.Reset)
+		stats.LinesCreated += len(createdIDs)
+		stats.LinesSkipped += batchLen - len(createdIDs)
+		if len(createdIDs) != batchLen {
+			createMismatch = true
+		}
+		if force {
+			// Reset rebuilds are dominated by Odoo writes. Per-line reconciliation is
+			// better handled with `chb odoo journals <id> reconcile` after the import.
+			odooLog("    %sreset rebuild: skipping per-line reconciliation%s\n", Fmt.Dim, Fmt.Reset)
+		} else {
+			reconcileStart := time.Now()
+			odooLog("    %sreconciling %d new line(s)...%s\n", Fmt.Dim, len(createdIDs), Fmt.Reset)
+			reconcileCreatedStatementLines(creds, uid, createdIDs, false, stats)
+			odooLog("    %sreconcile pass done in %s%s\n", Fmt.Dim, time.Since(reconcileStart).Round(time.Second), Fmt.Reset)
+		}
 		batch = nil
 	}
 
-	for _, bt := range bts {
+	for i, bt := range bts {
 		if !untilDate.IsZero() && time.Unix(bt.Created, 0).After(untilDate) {
 			break
+		}
+		processedBTs++
+		if processedBTs == 1 || processedBTs%100 == 0 {
+			odooLog("  %spreparing Stripe BT %d/%d (%s)%s\n",
+				Fmt.Dim, processedBTs, len(bts), time.Unix(bt.Created, 0).In(BrusselsTZ()).Format("2006-01-02"), Fmt.Reset)
 		}
 		importID := fmt.Sprintf("stripe:%s:%s:0", strings.ToLower(acc.AccountID), strings.ToLower(bt.ID))
 		if existingIDs[importID] {
 			stats.LinesSkipped++
+			skippedBTs++
 			continue
 		}
 
-		amount := centsToEuros(bt.Net)
+		amount := stripeStatementLineAmount(bt)
 		runningBalance += amount
+		date := time.Unix(bt.Created, 0).In(BrusselsTZ()).Format("2006-01-02")
 
 		line := map[string]interface{}{
 			"statement_id":     openStmtID,
 			"journal_id":       acc.OdooJournalID,
-			"date":             time.Unix(bt.Created, 0).In(BrusselsTZ()).Format("2006-01-02"),
+			"date":             date,
 			"payment_ref":      btPaymentRef(bt),
 			"amount":           amount,
 			"unique_import_id": importID,
@@ -133,21 +200,52 @@ func syncStripeChronological(
 
 		updateBTStats(stats, bt, amount)
 
+		if cents, ok := stripeFeeAdjustmentCents(bt); ok {
+			feeCents += cents
+			feeBTs++
+			if feeStartDate == "" {
+				feeStartDate = date
+			}
+			feeEndDate = date
+			if feeFirstBTID == "" {
+				feeFirstBTID = bt.ID
+			}
+			feeLastBTID = bt.ID
+		}
+
 		// Close the open statement on automatic payout.
 		if bt.Type == "payout" && bt.PayoutAutomatic {
-			flush()
+			payoutsSeen++
 			name, ref := payoutStatementLabels(bt)
+			odooLog("  %sPayout %d: %s  (%d/%d BTs)%s\n", Fmt.Dim, payoutsSeen, name, i+1, len(bts), Fmt.Reset)
+			feeKey := bt.PayoutID
+			if feeKey == "" {
+				feeKey = bt.ID
+			}
+			appendAggregateFeeLine(
+				fmt.Sprintf("Stripe fees for payout %s", feeKey),
+				fmt.Sprintf("stripe:%s:%s:fees", strings.ToLower(acc.AccountID), strings.ToLower(feeKey)),
+				date,
+			)
+			flush("before payout close")
 			closingBalance := runningBalance
 			if !dryRun {
-				// Re-derive from the authoritative Odoo line sum — guards
-				// against any in-memory drift.
-				if authoritative, err := statementEndBalance(creds, uid, openStmtID); err == nil {
-					closingBalance = authoritative
-					runningBalance = authoritative
+				if !force || createMismatch {
+					// Re-derive from the authoritative Odoo line sum on incremental
+					// syncs. During a reset rebuild, the in-memory sum is authoritative
+					// for the lines we just created and avoids two Odoo reads per payout.
+					// If any line failed to create, fall back to Odoo's authoritative sum.
+					if authoritative, err := statementEndBalance(creds, uid, openStmtID); err == nil {
+						closingBalance = authoritative
+						runningBalance = authoritative
+					}
 				}
+				closeStart := time.Now()
+				odooLog("    %sclosing Odoo statement #%d...%s\n", Fmt.Dim, openStmtID, Fmt.Reset)
 				if err := closeOpenStatement(creds, uid, openStmtID, name, ref, closingBalance); err != nil {
 					fmt.Printf("    %s✗ Failed to close statement %d: %v%s\n", Fmt.Red, openStmtID, err, Fmt.Reset)
 				}
+				odooLog("    %sclosed statement in %s%s\n", Fmt.Dim, time.Since(closeStart).Round(time.Second), Fmt.Reset)
 			}
 			odooLog("  %s✓ Closed %s  (end balance %s)%s\n",
 				Fmt.Green, name, fmtEURSigned(closingBalance), Fmt.Reset)
@@ -155,26 +253,50 @@ func syncStripeChronological(
 			// Open a new statement for subsequent BTs, chaining from the
 			// closing balance.
 			if !dryRun {
+				openStart := time.Now()
+				odooLog("    %sopening next Odoo statement...%s\n", Fmt.Dim, Fmt.Reset)
 				newID, err := createOpenStatement(creds, uid, acc.OdooJournalID, closingBalance)
 				if err != nil {
 					return "", fmt.Errorf("open new statement: %v", err)
 				}
+				odooLog("    %sopened statement #%d in %s%s\n", Fmt.Dim, newID, time.Since(openStart).Round(time.Second), Fmt.Reset)
 				openStmtID = newID
 			}
 		}
 	}
 
-	flush()
+	if feeCents != 0 {
+		importID := fmt.Sprintf("stripe:%s:open:%s:%s:fees",
+			strings.ToLower(acc.AccountID),
+			strings.ToLower(feeFirstBTID),
+			strings.ToLower(feeLastBTID),
+		)
+		date := feeEndDate
+		if date == "" {
+			date = time.Now().In(BrusselsTZ()).Format("2006-01-02")
+		}
+		appendAggregateFeeLine("Stripe fees for open statement", importID, date)
+	}
+	flush("final open statement")
 
 	// Persist the trailing open statement's running balance from the
 	// authoritative Odoo line sum so the invariant holds until the next
 	// auto-payout closes it.
 	if !dryRun {
-		if end, err := statementEndBalance(creds, uid, openStmtID); err == nil {
-			if err := setStatementBalanceEndReal(creds, uid, openStmtID, end); err != nil {
-				fmt.Printf("  %s⚠ Failed to update open statement balance: %v%s\n", Fmt.Yellow, err, Fmt.Reset)
+		end := runningBalance
+		if !force || createMismatch {
+			if authoritative, err := statementEndBalance(creds, uid, openStmtID); err == nil {
+				end = authoritative
 			}
 		}
+		odooLog("  %supdating open statement balance...%s\n", Fmt.Dim, Fmt.Reset)
+		if err := setStatementBalanceEndReal(creds, uid, openStmtID, end); err != nil {
+			fmt.Printf("  %s⚠ Failed to update open statement balance: %v%s\n", Fmt.Yellow, err, Fmt.Reset)
+		}
+	}
+	if skippedBTs > 0 || processedBTs > 0 {
+		odooLog("  %sprocessed %d Stripe BT(s), skipped %d duplicate(s), closed %d statement(s)%s\n",
+			Fmt.Dim, processedBTs, skippedBTs, stats.Statements, Fmt.Reset)
 	}
 
 	stats.PayoutsTotal = 0 // recomputed from lines already
@@ -242,16 +364,46 @@ func payoutStatementLabels(bt StripeTransaction) (string, string) {
 	return name, bt.PayoutID
 }
 
+// stripeStatementLineAmount returns the amount to write on the Odoo statement
+// line. Customer-facing transactions use the gross amount paid/refunded; Stripe
+// fees are represented by separate rows, so folding the fee into each charge
+// would understate customer revenue and double count fees in the journal view.
+func stripeStatementLineAmount(bt StripeTransaction) float64 {
+	switch bt.Type {
+	case "charge", "payment", "refund", "payment_refund":
+		return centsToEuros(bt.Amount)
+	default:
+		return centsToEuros(bt.Net)
+	}
+}
+
+func stripeFeeAdjustmentCents(bt StripeTransaction) (int64, bool) {
+	if bt.Fee == 0 {
+		return 0, false
+	}
+	switch bt.Type {
+	case "charge", "payment", "refund", "payment_refund":
+		return bt.Fee, true
+	default:
+		return 0, false
+	}
+}
+
+func stripeAggregateFeeLineAmount(feeCents int64) float64 {
+	return -centsToEuros(feeCents)
+}
+
 // updateBTStats tallies stats per BT type.
 func updateBTStats(s *syncStats, bt StripeTransaction, amount float64) {
 	switch bt.Type {
 	case "charge", "payment":
 		s.Charges++
-		s.ChargesGross += amount + centsToEuros(bt.Fee)
+		s.ChargesGross += centsToEuros(bt.Amount)
 		s.ChargeFees += centsToEuros(bt.Fee)
 	case "refund", "payment_refund":
 		s.Refunds++
-		s.RefundsTotal += amount
+		s.RefundsTotal += centsToEuros(bt.Amount)
+		s.ChargeFees += centsToEuros(bt.Fee)
 	case "payout":
 		s.PayoutsTotal += amount
 	case "stripe_fee", "adjustment":

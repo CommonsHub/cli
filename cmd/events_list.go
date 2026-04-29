@@ -12,18 +12,16 @@ import (
 
 // EventEntry matches the events.json structure
 type EventEntry struct {
-	ID             string     `json:"id"`
-	Name           string     `json:"name"`
-	StartAt        string     `json:"startAt"`
-	EndAt          string     `json:"endAt,omitempty"`
-	URL            string     `json:"url,omitempty"`
-	Source         string     `json:"source"`
-	CalendarSource string     `json:"calendarSource,omitempty"`
-	Tags           []EventTag `json:"tags,omitempty"`
+	ID             string        `json:"id"`
+	Name           string        `json:"name"`
+	StartAt        string        `json:"startAt"`
+	EndAt          string        `json:"endAt,omitempty"`
+	URL            string        `json:"url,omitempty"`
+	Source         string        `json:"source"`
+	CalendarSource string        `json:"calendarSource,omitempty"`
+	Tags           []EventTag    `json:"tags,omitempty"`
 	Metadata       EventMetadata `json:"metadata"`
 }
-
-
 
 type EventTag struct {
 	Name  string `json:"name"`
@@ -31,13 +29,80 @@ type EventTag struct {
 }
 
 type EventsFile struct {
-	Month      string       `json:"month"`
-	GeneratedAt string      `json:"generatedAt"`
-	Events     []EventEntry `json:"events"`
+	Month       string       `json:"month"`
+	GeneratedAt string       `json:"generatedAt"`
+	Events      []EventEntry `json:"events"`
+}
+
+type eventListFilter struct {
+	Since        time.Time
+	Until        time.Time
+	HasSince     bool
+	HasUntil     bool
+	Desc         bool
+	ForceMonthly bool
 }
 
 func loadAllEvents() []EventEntry {
-	dataDir := DataDir()
+	return loadMonthlyEvents(DataDir(), eventListFilter{})
+}
+
+func loadEventsForList(dataDir string, filter eventListFilter) []EventEntry {
+	latest := loadLatestEvents(dataDir)
+	if len(latest) > 0 && !shouldLoadMonthlyEvents(latest, filter) {
+		return latest
+	}
+	return loadMonthlyEvents(dataDir, filter)
+}
+
+func loadLatestEvents(dataDir string) []EventEntry {
+	eventsPath := filepath.Join(dataDir, "latest", "generated", "events.json")
+	data, err := os.ReadFile(eventsPath)
+	if err != nil {
+		return nil
+	}
+	var ef EventsFile
+	if err := json.Unmarshal(data, &ef); err != nil {
+		return nil
+	}
+	return ef.Events
+}
+
+func shouldLoadMonthlyEvents(latest []EventEntry, filter eventListFilter) bool {
+	if filter.ForceMonthly {
+		return true
+	}
+	oldest, ok := oldestEventStart(latest)
+	if !ok {
+		return true
+	}
+	oldestDay := eventDayStart(oldest)
+	if filter.HasSince && filter.Since.Before(oldestDay) {
+		return true
+	}
+	if filter.HasUntil && filter.Until.Before(oldestDay) {
+		return true
+	}
+	return false
+}
+
+func oldestEventStart(events []EventEntry) (time.Time, bool) {
+	var oldest time.Time
+	found := false
+	for _, e := range events {
+		t, ok := parseEventStart(e.StartAt)
+		if !ok {
+			continue
+		}
+		if !found || t.Before(oldest) {
+			oldest = t
+			found = true
+		}
+	}
+	return oldest, found
+}
+
+func loadMonthlyEvents(dataDir string, filter eventListFilter) []EventEntry {
 	var events []EventEntry
 
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
@@ -65,6 +130,9 @@ func loadAllEvents() []EventEntry {
 		sort.Strings(months)
 
 		for _, month := range months {
+			if !filter.monthMayMatch(year, month) {
+				continue
+			}
 			eventsPath := filepath.Join(yearPath, month, "generated", "events.json")
 			data, err := os.ReadFile(eventsPath)
 			if err != nil {
@@ -92,36 +160,13 @@ func EventsList(args []string) {
 
 	n := GetNumber(args, []string{"-n"}, 10)
 	skip := GetNumber(args, []string{"--skip"}, 0)
-	showAll := HasFlag(args, "--all")
-
-	var sinceDate time.Time
-	if sinceStr := GetOption(args, "--since"); sinceStr != "" {
-		if d, ok := ParseSinceDate(sinceStr); ok {
-			sinceDate = d
-		} else {
-			sinceDate = time.Now()
-		}
-	} else if showAll {
-		sinceDate = time.Time{} // epoch
-	} else {
-		sinceDate = time.Now()
+	filter, err := parseEventListFilter(args, time.Now())
+	if err != nil {
+		fmt.Printf("%sError: %v%s\n", Fmt.Red, err, Fmt.Reset)
+		return
 	}
 
-	allEvents := loadAllEvents()
-	var filtered []EventEntry
-	for _, e := range allEvents {
-		t, err := time.Parse(time.RFC3339, e.StartAt)
-		if err != nil {
-			t, err = time.Parse("2006-01-02T15:04:05.000Z", e.StartAt)
-			if err != nil {
-				continue
-			}
-		}
-		if t.Before(sinceDate) {
-			continue
-		}
-		filtered = append(filtered, e)
-	}
+	filtered := filterAndSortEvents(loadEventsForList(DataDir(), filter), filter)
 
 	sliced := filtered
 	if skip < len(sliced) {
@@ -148,10 +193,7 @@ func EventsList(args []string) {
 	}
 	var rows []row
 	for _, e := range sliced {
-		t, _ := time.Parse(time.RFC3339, e.StartAt)
-		if t.IsZero() {
-			t, _ = time.Parse("2006-01-02T15:04:05.000Z", e.StartAt)
-		}
+		t, _ := parseEventStart(e.StartAt)
 		var tagNames []string
 		for _, tag := range e.Tags {
 			tagNames = append(tagNames, tag.Name)
@@ -202,4 +244,117 @@ func EventsList(args []string) {
 		fmt.Printf("\n%s… %d more. Use -n or --skip to paginate.%s\n", Fmt.Dim, remaining, Fmt.Reset)
 	}
 	fmt.Println()
+}
+
+func parseEventListFilter(args []string, now time.Time) (eventListFilter, error) {
+	filter := eventListFilter{}
+
+	if sinceStr := GetOption(args, "--since"); sinceStr != "" {
+		d, ok := parseEventListDate(sinceStr)
+		if !ok {
+			return filter, fmt.Errorf("invalid --since value %q (expected YYYYMMDD)", sinceStr)
+		}
+		filter.Since = d
+		filter.HasSince = true
+	}
+
+	if untilStr := GetOption(args, "--until"); untilStr != "" {
+		d, ok := parseEventListDate(untilStr)
+		if !ok {
+			return filter, fmt.Errorf("invalid --until value %q (expected YYYYMMDD)", untilStr)
+		}
+		filter.Until = d.Add(24*time.Hour - time.Second)
+		filter.HasUntil = true
+	}
+
+	if !filter.HasSince && !filter.HasUntil && !HasFlag(args, "--all") {
+		filter.Since = now
+		filter.HasSince = true
+	}
+	filter.ForceMonthly = HasFlag(args, "--all")
+
+	// `--until` by itself is a "latest before date" view, so newest first.
+	// `--since`, and bounded `--since --until`, are chronological views.
+	filter.Desc = filter.HasUntil && !filter.HasSince
+	return filter, nil
+}
+
+func (filter eventListFilter) monthMayMatch(year, month string) bool {
+	ym := year + "-" + month
+	if filter.HasSince {
+		sinceYM := fmt.Sprintf("%04d-%02d", filter.Since.Year(), filter.Since.Month())
+		if ym < sinceYM {
+			return false
+		}
+	}
+	if filter.HasUntil {
+		untilYM := fmt.Sprintf("%04d-%02d", filter.Until.Year(), filter.Until.Month())
+		if ym > untilYM {
+			return false
+		}
+	}
+	return true
+}
+
+func parseEventListDate(s string) (time.Time, bool) {
+	clean := strings.ReplaceAll(s, "-", "")
+	if len(clean) != 8 {
+		return time.Time{}, false
+	}
+	t, err := time.ParseInLocation("20060102", clean, BrusselsTZ())
+	if err != nil {
+		return time.Time{}, false
+	}
+	return t, true
+}
+
+func eventDayStart(t time.Time) time.Time {
+	local := t.In(BrusselsTZ())
+	return time.Date(local.Year(), local.Month(), local.Day(), 0, 0, 0, 0, BrusselsTZ())
+}
+
+func filterAndSortEvents(events []EventEntry, filter eventListFilter) []EventEntry {
+	type datedEvent struct {
+		event EventEntry
+		start time.Time
+	}
+	var dated []datedEvent
+	for _, e := range events {
+		t, ok := parseEventStart(e.StartAt)
+		if !ok {
+			continue
+		}
+		if filter.HasSince && t.Before(filter.Since) {
+			continue
+		}
+		if filter.HasUntil && t.After(filter.Until) {
+			continue
+		}
+		dated = append(dated, datedEvent{event: e, start: t})
+	}
+
+	sort.Slice(dated, func(i, j int) bool {
+		if filter.Desc {
+			return dated[i].start.After(dated[j].start)
+		}
+		return dated[i].start.Before(dated[j].start)
+	})
+
+	out := make([]EventEntry, len(dated))
+	for i := range dated {
+		out[i] = dated[i].event
+	}
+	return out
+}
+
+func parseEventStart(startAt string) (time.Time, bool) {
+	t, err := time.Parse(time.RFC3339, startAt)
+	if err == nil {
+		return t, true
+	}
+	t, err = time.Parse("2006-01-02T15:04:05.000Z", startAt)
+	if err == nil {
+		return t, true
+	}
+	return time.Time{}, false
 }

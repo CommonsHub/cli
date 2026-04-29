@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
+	stickertable "github.com/76creates/stickers/table"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
-	stickertable "github.com/76creates/stickers/table"
 	overlay "github.com/rmhubbert/bubbletea-overlay"
 )
 
@@ -82,10 +82,11 @@ func shortAddr(s string) string {
 // TxFilter narrows the set of transactions returned by loadFilteredTransactions.
 // Zero-valued fields are treated as "no filter".
 type TxFilter struct {
-	AccountSlug string    // matches AccountSlug or Slug-like account fields
-	Currency    string    // "EUR" matches the EUR family; other codes are exact
-	Since       time.Time // inclusive lower bound
-	Until       time.Time // inclusive upper bound (end-of-day handled by caller)
+	AccountSlug string     // matches AccountSlug or Slug-like account fields
+	Currency    string     // "EUR" matches the EUR family; other codes are exact
+	Since       time.Time  // inclusive lower bound
+	Until       time.Time  // inclusive upper bound (end-of-day handled by caller)
+	Tags        [][]string // all Nostr-style tags must match
 }
 
 func loadAllTransactions(currencyFilter string) []TransactionEntry {
@@ -93,6 +94,14 @@ func loadAllTransactions(currencyFilter string) []TransactionEntry {
 }
 
 func loadFilteredTransactions(f TxFilter) []TransactionEntry {
+	return loadFilteredTransactionsWithPII(f, true)
+}
+
+func loadPublicFilteredTransactions(f TxFilter) []TransactionEntry {
+	return loadFilteredTransactionsWithPII(f, false)
+}
+
+func loadFilteredTransactionsWithPII(f TxFilter, includePII bool) []TransactionEntry {
 	dataDir := DataDir()
 	var all []TransactionEntry
 
@@ -106,7 +115,7 @@ func loadFilteredTransactions(f TxFilter) []TransactionEntry {
 			if !md.IsDir() || len(md.Name()) != 2 {
 				continue
 			}
-			txFile := LoadTransactionsWithPII(dataDir, yd.Name(), md.Name())
+			txFile := loadTransactionsFile(dataDir, yd.Name(), md.Name(), includePII)
 			if txFile == nil {
 				continue
 			}
@@ -128,6 +137,22 @@ func loadFilteredTransactions(f TxFilter) []TransactionEntry {
 	return all
 }
 
+func loadTransactionsFile(dataDir, year, month string, includePII bool) *TransactionsFile {
+	if includePII {
+		return LoadTransactionsWithPII(dataDir, year, month)
+	}
+	txPath := filepath.Join(dataDir, year, month, "generated", "transactions.json")
+	data, err := os.ReadFile(txPath)
+	if err != nil {
+		return nil
+	}
+	var txFile TransactionsFile
+	if json.Unmarshal(data, &txFile) != nil {
+		return nil
+	}
+	return &txFile
+}
+
 func (f TxFilter) matches(tx TransactionEntry) bool {
 	if f.Currency != "" {
 		if strings.EqualFold(f.Currency, "EUR") {
@@ -146,6 +171,11 @@ func (f TxFilter) matches(tx TransactionEntry) bool {
 	}
 	if !f.Until.IsZero() && tx.Timestamp > f.Until.Unix() {
 		return false
+	}
+	for _, tag := range f.Tags {
+		if !transactionHasTag(tx, tag) {
+			return false
+		}
 	}
 	return true
 }
@@ -546,6 +576,7 @@ func (m *txBrowserModel) commitInlineEdit() {
 		for i := range m.txs {
 			if m.txs[i].ID == m.detailTx.ID {
 				m.txs[i].Collective = m.editInput
+				syncTransactionTags(&m.txs[i])
 				break
 			}
 		}
@@ -554,12 +585,14 @@ func (m *txBrowserModel) commitInlineEdit() {
 		for i := range m.txs {
 			if m.txs[i].ID == m.detailTx.ID {
 				m.txs[i].Category = m.editInput
+				syncTransactionTags(&m.txs[i])
 				break
 			}
 		}
 	case modeEditDate:
 		// editInput is stored as spread metadata; save handled by saveTransactionUpdate
 	}
+	syncTransactionTags(m.detailTx)
 	saveTransactionUpdate(m.detailTx)
 	// Rebuild table
 	m.table.ClearRows()
@@ -777,8 +810,11 @@ func (m txBrowserModel) renderDetailBox() string {
 	if tx.Event != "" {
 		add("Event", tx.Event)
 	}
+	if tx.Application != "" {
+		add("Application", tx.Application)
+	}
 	if app, ok := tx.Metadata["application"]; ok {
-		if s, ok := app.(string); ok && s != "" {
+		if s, ok := app.(string); ok && s != "" && s != tx.Application {
 			add("Application", s)
 		}
 	}
@@ -813,6 +849,11 @@ func (m txBrowserModel) renderDetailBox() string {
 		"memo": true, "state": true, "accountSlug": true,
 	}
 	var tagLines []string
+	for _, tag := range tx.Tags {
+		if label := formatTransactionTag(tag); label != "" {
+			tagLines = append(tagLines, lipgloss.NewStyle().Foreground(lipgloss.Color("5")).Background(bg).Render(label))
+		}
+	}
 	for k, v := range tx.Metadata {
 		if standardKeys[k] || strings.HasPrefix(k, "stripe_") || strings.HasPrefix(k, "custom_") {
 			continue
@@ -997,6 +1038,7 @@ func saveTransactionUpdate(tx *TransactionEntry) bool {
 		if txFile.Transactions[i].ID == tx.ID {
 			txFile.Transactions[i].Category = tx.Category
 			txFile.Transactions[i].Collective = tx.Collective
+			syncTransactionTags(&txFile.Transactions[i])
 			out, _ := json.MarshalIndent(txFile, "", "  ")
 			writeMonthFile(dataDir, year, month, filepath.Join("generated", "transactions.json"), out)
 			return true
@@ -1032,7 +1074,7 @@ func TransactionsBrowser(args []string) {
 	}
 
 	if JSONMode(args) {
-		emitTransactionsJSON(filter, n, skip)
+		emitTransactionsJSON(filter, n, skip, HasFlag(args, "--with-pii"))
 		return
 	}
 
@@ -1075,6 +1117,40 @@ func parseTxListFlags(args []string) (TxFilter, int, int, error) {
 	f := TxFilter{
 		AccountSlug: GetOption(args, "--account"),
 		Currency:    strings.ToUpper(GetOption(args, "--currency")),
+	}
+	for _, spec := range GetOptions(args, "--tag") {
+		tag, ok := parseTransactionTagSpec(spec)
+		if !ok {
+			return f, 0, 0, fmt.Errorf("invalid --tag value %q", spec)
+		}
+		f.Tags = append(f.Tags, tag)
+	}
+	for _, specs := range GetOptions(args, "--tags") {
+		for _, spec := range strings.Split(specs, ",") {
+			spec = strings.TrimSpace(spec)
+			if spec == "" {
+				continue
+			}
+			tag, ok := parseTransactionTagSpec(spec)
+			if !ok {
+				return f, 0, 0, fmt.Errorf("invalid --tags value %q", spec)
+			}
+			f.Tags = append(f.Tags, tag)
+		}
+	}
+	for _, alias := range []struct {
+		flag string
+		key  string
+	}{
+		{"--category", "category"},
+		{"--collective", "collective"},
+		{"--event", "event"},
+		{"--application", "application"},
+		{"--payment-link", "paymentLink"},
+	} {
+		if value := GetOption(args, alias.flag); value != "" {
+			addTransactionTag(&f.Tags, alias.key, value)
+		}
 	}
 
 	if f.Currency == "" {
@@ -1127,8 +1203,12 @@ func applyOffsetLimit(txs []TransactionEntry, skip, limit int) []TransactionEntr
 	return txs
 }
 
-func emitTransactionsJSON(f TxFilter, limit, skip int) {
-	txs := applyOffsetLimit(loadFilteredTransactions(f), skip, limit)
+func emitTransactionsJSON(f TxFilter, limit, skip int, includePII bool) {
+	loader := loadPublicFilteredTransactions
+	if includePII {
+		loader = loadFilteredTransactions
+	}
+	txs := applyOffsetLimit(loader(f), skip, limit)
 	out := struct {
 		Count        int                `json:"count"`
 		Transactions []TransactionEntry `json:"transactions"`
@@ -1150,6 +1230,9 @@ func printTransactionsBrowserHelp() {
 %sUSAGE%s
   %schb transactions%s                                  Browse all transactions
   %schb transactions --account savings%s                Browse one account
+  %schb transactions --application luma%s                Browse Luma transactions
+  %schb transactions --event evt-2gc6B12TEyRNRqN%s       Browse one event
+  %schb transactions --tag '#color:red'%s                Browse by Nostr-style tag
   %schb transactions --currency EUR%s                   Browse EUR-family transactions
   %schb transactions --since 20260101 --until 20260131%s   Date range (inclusive)
   %schb transactions -n 50 --skip 100%s                 Paginate
@@ -1159,11 +1242,19 @@ func printTransactionsBrowserHelp() {
 %sFILTERS%s
   %s--account <slug>%s     Limit to one account (e.g. savings, stripe-asbl)
   %s--currency <CODE>%s    EUR (matches the EUR family), CHT, etc.
+  %s--category <slug>%s    Match tag ["category", slug]
+  %s--collective <slug>%s  Match tag ["collective", slug]
+  %s--event <id>%s         Match tag ["event", id]
+  %s--application <slug>%s Match tag ["application", slug]
+  %s--payment-link <id>%s  Match tag ["paymentLink", id]
+  %s--tag <spec>%s         Match #tag, #key:value, or #[key:long value]
+  %s--tags <a,b>%s         Match several tag specs
   %s--since YYYYMMDD%s     Inclusive lower bound on transaction date
   %s--until YYYYMMDD%s     Inclusive upper bound on transaction date
   %s-n N%s                 Limit to N transactions (most recent first)
   %s--skip N%s             Skip the first N matches before applying -n
   %s--json%s               Emit JSON instead of launching the interactive browser
+  %s--with-pii%s           With --json, merge private enrichment into results
 
 %sINTERACTIVE KEYS%s
   %s↑↓/jk%s       Navigate rows
@@ -1188,7 +1279,18 @@ func printTransactionsBrowserHelp() {
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
 		f.Bold, f.Reset, // FILTERS
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,

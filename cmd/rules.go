@@ -147,7 +147,7 @@ func (r *Rule) MatchesTransaction(tx TransactionEntry) bool {
 	}
 
 	if m.Application != "" {
-		txApp := ""
+		txApp := tx.Application
 		if app, ok := tx.Metadata["application"]; ok {
 			if s, ok := app.(string); ok {
 				txApp = s

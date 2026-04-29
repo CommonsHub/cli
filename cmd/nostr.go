@@ -27,6 +27,7 @@ type TxMetadata struct {
 	TxHash       string            `json:"txHash"`
 	Description  string            `json:"description"`
 	Tags         map[string]string `json:"tags"` // project, category, etc.
+	TagList      [][]string        `json:"tagList,omitempty"`
 	NostrEventID string            `json:"nostrEventId"`
 	Author       string            `json:"author"`
 	CreatedAt    int64             `json:"createdAt"`
@@ -272,11 +273,15 @@ func parseTxMetadata(txHash string, ev NostrEvent) *TxMetadata {
 	}
 	skipTags := map[string]bool{"i": true, "k": true, "e": true, "p": true}
 	for _, tag := range ev.Tags {
-		if len(tag) < 2 || skipTags[tag[0]] {
+		if len(tag) < 2 || skipTags[strings.ToLower(tag[0])] {
 			continue
 		}
 		m.Tags[tag[0]] = tag[1]
+		if normalized, ok := normalizeTransactionTag(tag); ok {
+			m.TagList = append(m.TagList, normalized)
+		}
 	}
+	m.TagList = normalizeTransactionTags(m.TagList)
 	return m
 }
 
@@ -288,6 +293,7 @@ type TxAnnotation struct {
 	Category     string        `json:"category,omitempty"`
 	Collective   string        `json:"collective,omitempty"`
 	Event        string        `json:"event,omitempty"`
+	Tags         [][]string    `json:"tags,omitempty"`
 	Description  string        `json:"description,omitempty"`
 	Spread       []SpreadEntry `json:"spread,omitempty"`
 	NostrEventID string        `json:"nostrEventId"`
@@ -398,7 +404,14 @@ func parseAnnotation(uri string, ev NostrEvent) *TxAnnotation {
 				a.Spread = append(a.Spread, SpreadEntry{Month: tag[1], Amount: tag[2]})
 			}
 		}
+		if tag[0] == "i" || tag[0] == "I" || tag[0] == "k" || tag[0] == "K" || tag[0] == "e" || tag[0] == "p" {
+			continue
+		}
+		if normalized, ok := normalizeTransactionTag(tag); ok {
+			a.Tags = append(a.Tags, normalized)
+		}
 	}
+	a.Tags = normalizeTransactionTags(a.Tags)
 
 	return a
 }

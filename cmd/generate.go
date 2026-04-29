@@ -210,16 +210,19 @@ type TransactionEntry struct {
 	Currency         string                 `json:"currency"`
 	Value            string                 `json:"value"`
 	Amount           float64                `json:"amount"`
+	NetAmount        float64                `json:"netAmount,omitempty"`
 	GrossAmount      float64                `json:"grossAmount"`
 	NormalizedAmount float64                `json:"normalizedAmount"`
 	Fee              float64                `json:"fee"`
 	Type             string                 `json:"type"`
 	Counterparty     string                 `json:"counterparty"`
 	Timestamp        int64                  `json:"timestamp"`
+	Application      string                 `json:"application,omitempty"`
 	StripeChargeID   string                 `json:"stripeChargeId,omitempty"`
 	Category         string                 `json:"category,omitempty"`
 	Collective       string                 `json:"collective,omitempty"`
 	Event            string                 `json:"event,omitempty"`
+	Tags             [][]string             `json:"tags,omitempty"`
 	Metadata         map[string]interface{} `json:"metadata,omitempty"`
 }
 
@@ -1927,46 +1930,46 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 					}
 				}
 
-				// Fall back to charge enrichment for older data without inline fields
-				if counterparty == "" || metadata["email"] == nil {
-					chID := extractChargeID(tx.Source)
-					if chID == "" && refundToCharge != nil {
-						srcID := extractSourceID(tx.Source)
-						if strings.HasPrefix(srcID, "re_") {
-							chID = refundToCharge[srcID]
-						}
+				// Merge charge/session enrichment for app, payment-link and event
+				// metadata even when the balance transaction already had customer
+				// data. Refunds are mapped back to their original charge.
+				chID := extractChargeID(tx.Source)
+				if chID == "" && refundToCharge != nil {
+					srcID := extractSourceID(tx.Source)
+					if strings.HasPrefix(srcID, "re_") {
+						chID = refundToCharge[srcID]
 					}
-					if stripeCharges != nil && chID != "" {
-						if ch, ok := stripeCharges[chID]; ok {
-							if counterparty == "" {
-								if name := ch.BestName(); name != "" {
-									counterparty = name
-								}
+				}
+				if stripeCharges != nil && chID != "" {
+					if ch, ok := stripeCharges[chID]; ok {
+						if counterparty == "" {
+							if name := ch.BestName(); name != "" {
+								counterparty = name
 							}
-							if metadata["email"] == nil {
-								if email := ch.BestEmail(); email != "" {
-									metadata["email"] = email
-								}
+						}
+						if metadata["email"] == nil {
+							if email := ch.BestEmail(); email != "" {
+								metadata["email"] = email
 							}
-							if ch.ApplicationName != "" {
-								metadata["application"] = ch.ApplicationName
-							} else if ch.Application != "" {
-								metadata["application"] = ch.Application
+						}
+						if ch.ApplicationName != "" {
+							metadata["application"] = ch.ApplicationName
+						} else if ch.Application != "" {
+							metadata["application"] = ch.Application
+						}
+						if ch.PaymentMethod != "" {
+							metadata["paymentMethod"] = ch.PaymentMethod
+						}
+						if ch.PaymentLink != "" {
+							metadata["paymentLink"] = ch.PaymentLink
+						}
+						for k, v := range ch.Metadata {
+							if _, exists := metadata["stripe_"+k]; !exists {
+								metadata["stripe_"+k] = v
 							}
-							if ch.PaymentMethod != "" {
-								metadata["paymentMethod"] = ch.PaymentMethod
-							}
-							if ch.PaymentLink != "" {
-								metadata["paymentLink"] = ch.PaymentLink
-							}
-							for k, v := range ch.Metadata {
-								if _, exists := metadata["stripe_"+k]; !exists {
-									metadata["stripe_"+k] = v
-								}
-							}
-							for k, v := range ch.CustomFields {
-								metadata["custom_"+k] = v
-							}
+						}
+						for k, v := range ch.CustomFields {
+							metadata["custom_"+k] = v
 						}
 					}
 				}
@@ -1986,12 +1989,14 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 					Currency:         currency,
 					Value:            fmt.Sprintf("%.2f", net),
 					Amount:           roundCents(net),
+					NetAmount:        roundCents(net),
 					GrossAmount:      roundCents(math.Abs(amount)),
 					NormalizedAmount: roundCents(net),
 					Fee:              roundCents(fee),
 					Type:             txType,
 					Counterparty:     counterparty,
 					Timestamp:        tx.Created,
+					Application:      stringMetadata(metadata, "application"),
 					StripeChargeID:   tx.ID,
 					Metadata:         metadata,
 				})
@@ -2098,7 +2103,9 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 					isInternal = true
 				}
 
+				internalDirection := ""
 				if isInternal {
+					internalDirection = txType
 					// Only keep one side of internal transfers (skip if we already saw this tx)
 					if seenTxHash[strings.ToLower(tx.Hash)] {
 						continue
@@ -2123,12 +2130,18 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 					Currency:         tokenSymbol,
 					Value:            fmt.Sprintf("%.6f", amount),
 					Amount:           amount,
+					NetAmount:        amount,
 					GrossAmount:      amount,
 					NormalizedAmount: amount,
 					Fee:              0,
 					Type:             txType,
 					Counterparty:     counterparty,
 					Timestamp:        ts,
+				}
+				if internalDirection != "" {
+					entry.Metadata = map[string]interface{}{
+						"direction": internalDirection,
+					}
 				}
 
 				// Enrich with Nostr metadata
@@ -2142,6 +2155,9 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 						}
 						for k, v := range txMeta.Tags {
 							entry.Metadata[k] = v
+						}
+						if len(txMeta.TagList) > 0 {
+							entry.Tags = append(entry.Tags, txMeta.TagList...)
 						}
 					}
 				}
@@ -2324,6 +2340,9 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 					if ann.Event != "" {
 						tx.Event = ann.Event
 					}
+					if len(ann.Tags) > 0 {
+						tx.Tags = append(tx.Tags, ann.Tags...)
+					}
 				}
 			}
 
@@ -2357,6 +2376,13 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 				if evtID, ok := tx.Metadata["stripe_event_api_id"]; ok {
 					if evtStr, ok := evtID.(string); ok && evtStr != "" {
 						tx.Event = evtStr
+					}
+				}
+				if tx.Event == "" {
+					if evtID, ok := tx.Metadata["eventId"]; ok {
+						if evtStr, ok := evtID.(string); ok && evtStr != "" {
+							tx.Event = evtStr
+						}
 					}
 				}
 			}
@@ -2394,6 +2420,12 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 				tx.Collective = categorizer.CollectiveFor(*tx)
 			}
 		}
+	}
+
+	runTransactionPlugins(dataDir, year, month, transactions)
+
+	for i := range transactions {
+		syncTransactionTags(&transactions[i])
 	}
 
 	// Sort by timestamp

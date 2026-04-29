@@ -3,9 +3,11 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -18,7 +20,8 @@ import (
 // Silent when there are no events or no tagged transactions. Safe to run
 // repeatedly — replaces any prior TicketSales field rather than appending.
 func enrichEventsWithTicketSales(dataDir string) {
-	// Step 1 — walk every month's transactions.json and index by tx.Event.
+	// Step 1 — walk every month's transactions.json and index by canonical
+	// event ids from tx.Event and event tags.
 	eventTxs := map[string][]TransactionEntry{}
 	_ = forEachGeneratedMonth(dataDir, "transactions.json", func(path string) {
 		data, err := os.ReadFile(path)
@@ -30,10 +33,9 @@ func enrichEventsWithTicketSales(dataDir string) {
 			return
 		}
 		for _, tx := range f.Transactions {
-			if tx.Event == "" {
-				continue
+			for _, eventID := range transactionEventIDs(tx) {
+				eventTxs[eventID] = append(eventTxs[eventID], tx)
 			}
-			eventTxs[tx.Event] = append(eventTxs[tx.Event], tx)
 		}
 	})
 
@@ -90,6 +92,27 @@ func enrichEventsWithTicketSales(dataDir string) {
 	}
 }
 
+func transactionEventIDs(tx TransactionEntry) []string {
+	seen := map[string]bool{}
+	var ids []string
+	add := func(id string) {
+		id = strings.TrimSpace(id)
+		if id == "" || seen[id] {
+			return
+		}
+		seen[id] = true
+		ids = append(ids, id)
+	}
+	add(tx.Event)
+	for _, raw := range tx.Tags {
+		tag, ok := normalizeTransactionTag(raw)
+		if ok && len(tag) >= 2 && tag[0] == "event" {
+			add(tag[1])
+		}
+	}
+	return ids
+}
+
 // summariseEventTx builds the TicketSales summary for a single event. Returns
 // nil when there are no transactions to attach — callers can then skip
 // serialising the field entirely.
@@ -102,10 +125,7 @@ func summariseEventTx(txs []TransactionEntry) *EventTicketSales {
 		Net:   map[string]float64{},
 	}
 	for _, tx := range txs {
-		amt := tx.NormalizedAmount
-		if amt == 0 {
-			amt = tx.Amount
-		}
+		amt := eventTicketTransactionAmount(tx)
 		currency := tx.Currency
 		if currency == "" {
 			currency = "EUR"
@@ -145,6 +165,20 @@ func summariseEventTx(txs []TransactionEntry) *EventTicketSales {
 		s.Net[c] = round2(v)
 	}
 	return s
+}
+
+func eventTicketTransactionAmount(tx TransactionEntry) float64 {
+	if tx.Provider == "stripe" && tx.GrossAmount != 0 {
+		amt := math.Abs(tx.GrossAmount)
+		if tx.Type == "DEBIT" {
+			return -amt
+		}
+		return amt
+	}
+	if tx.NormalizedAmount != 0 {
+		return tx.NormalizedAmount
+	}
+	return tx.Amount
 }
 
 // eventTicketSalesEqual reports whether two TicketSales summaries would

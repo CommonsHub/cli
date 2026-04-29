@@ -464,7 +464,7 @@ func isAllowedPublicEventURL(raw string) bool {
 	}
 	host := strings.ToLower(u.Hostname())
 	switch host {
-	case "", "mail.google.com", "calendar.google.com":
+	case "", "mail.google.com", "calendar.google.com", "meet.google.com":
 		return false
 	}
 	// Luma host-only admin URLs (https://lu.ma/event/manage/<id> or
@@ -864,6 +864,8 @@ func processMonthFromRooms(dataDir, year, month string, roomEvents []roomEvent, 
 	// Calendar entry alongside the same event imported from Luma). Keep the
 	// record with a cover image and the longest description.
 	fullEvents = dedupeFullEvents(fullEvents)
+
+	runEventPlugins(dataDir, year, month, fullEvents)
 
 	// Track new events from dedup survivors so we don't announce a duplicate
 	// that was discarded.

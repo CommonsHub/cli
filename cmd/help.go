@@ -295,7 +295,8 @@ func PrintEventsHelp() {
 
 %sOPTIONS%s
   %s-n%s <count>           Number of events to show (default: 10)
-  %s--since%s <YYYYMMDD>   Only events starting after this date (default: today)
+  %s--since%s <YYYYMMDD>   Events from this date, sorted oldest first
+  %s--until%s <YYYYMMDD>   Events up to this date, sorted newest first
   %s--skip%s <count>       Skip first N events
   %s--all%s                Show all events (no date filter)
   %s--help, -h%s           Show this help
@@ -304,6 +305,7 @@ func PrintEventsHelp() {
 		f.Bold, f.Reset,
 		f.Cyan, f.Reset,
 		f.Bold, f.Reset,
+		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,

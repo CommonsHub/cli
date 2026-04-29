@@ -53,6 +53,7 @@ func emitAccountsJSON(args []string, configs []AccountConfig) {
 
 		if s != nil {
 			row.TxCount = s.TxCount
+			row.InternalTxCount = s.InternalTxCount
 			if !s.LastTxAt.IsZero() {
 				row.LastTxAt = s.LastTxAt.UTC().Format(time.RFC3339)
 			}
@@ -128,6 +129,7 @@ func emitAccountDetailJSON(acc *AccountConfig, args []string) {
 
 	if s != nil {
 		row.TxCount = s.TxCount
+		row.InternalTxCount = s.InternalTxCount
 		if !s.LastTxAt.IsZero() {
 			row.LastTxAt = s.LastTxAt.UTC().Format(time.RFC3339)
 		}

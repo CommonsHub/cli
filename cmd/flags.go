@@ -47,6 +47,21 @@ func GetOption(args []string, flags ...string) string {
 	return ""
 }
 
+func GetOptions(args []string, flags ...string) []string {
+	var values []string
+	for i, a := range args {
+		for _, flag := range flags {
+			if a == flag && i+1 < len(args) {
+				values = append(values, args[i+1])
+			}
+			if strings.HasPrefix(a, flag+"=") {
+				values = append(values, strings.SplitN(a, "=", 2)[1])
+			}
+		}
+	}
+	return values
+}
+
 func GetNumber(args []string, flags []string, defaultVal int) int {
 	val := GetOption(args, flags...)
 	if val == "" {
@@ -75,7 +90,8 @@ func ParseYearMonthArg(args []string) (year string, month string, found bool) {
 			// Flags that take a value
 			switch a {
 			case "--since", "--until", "--month", "--channel", "--room", "--account",
-				"--currency", "--limit", "--skip", "-n":
+				"--currency", "--limit", "--skip", "--tag", "--tags", "--event",
+				"--application", "--payment-link", "--collective", "--category", "-n":
 				skipNext = true
 			}
 			continue
