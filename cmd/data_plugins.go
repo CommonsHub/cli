@@ -96,7 +96,7 @@ func runTransactionPlugins(dataDir, year, month string, txs []TransactionEntry) 
 		}
 		for i := range txs {
 			if err := plugin.AugmentTransaction(ctx, &txs[i]); err != nil {
-				Warnf("Warning: plugin %s transaction %s failed: %v", plugin.Name(), txs[i].ID, err)
+				LogWarningf("Warning: plugin %s transaction %s failed: %v", plugin.Name(), txs[i].ID, err)
 			}
 		}
 		if err := plugin.Flush(ctx); err != nil {
@@ -118,7 +118,7 @@ func runEventPlugins(dataDir, year, month string, events []FullEvent) {
 		}
 		for i := range events {
 			if err := plugin.AugmentEvent(ctx, &events[i]); err != nil {
-				Warnf("Warning: plugin %s event %s failed: %v", plugin.Name(), events[i].ID, err)
+				LogWarningf("Warning: plugin %s event %s failed: %v", plugin.Name(), events[i].ID, err)
 			}
 		}
 		if err := plugin.Flush(ctx); err != nil {

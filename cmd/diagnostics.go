@@ -20,11 +20,15 @@ var (
 )
 
 func Warnf(format string, args ...interface{}) {
-	writeDiagnostic("warning", format, args...)
+	writeDiagnostic("warning", true, format, args...)
+}
+
+func LogWarningf(format string, args ...interface{}) {
+	writeDiagnostic("warning", false, format, args...)
 }
 
 func Errorf(format string, args ...interface{}) {
-	writeDiagnostic("error", format, args...)
+	writeDiagnostic("error", true, format, args...)
 }
 
 func DiagnosticsSummary() string {
@@ -71,7 +75,7 @@ func CloseDiagnosticsLog() {
 	}
 }
 
-func writeDiagnostic(level, format string, args ...interface{}) {
+func writeDiagnostic(level string, echo bool, format string, args ...interface{}) {
 	message := fmt.Sprintf(format, args...)
 	message = strings.TrimRight(message, "\n")
 
@@ -85,7 +89,9 @@ func writeDiagnostic(level, format string, args ...interface{}) {
 		diagnosticsErrors++
 	}
 
-	fmt.Fprintf(os.Stderr, "%s\n", message)
+	if echo {
+		fmt.Fprintf(os.Stderr, "%s\n", message)
+	}
 
 	if diagnosticsFile == nil {
 		cwd, err := os.Getwd()
