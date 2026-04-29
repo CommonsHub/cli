@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"path/filepath"
 	"strings"
-
-	stripesource "github.com/CommonsHub/chb/sources/stripe"
 )
 
 // Provider owns one external source. A provider syncs source data into the
@@ -98,31 +96,5 @@ func normalizeSourceName(source string) string {
 }
 
 func registeredProviders() []Provider {
-	return []Provider{
-		stripeProvider{},
-	}
-}
-
-type stripeProvider struct{}
-
-func (stripeProvider) Source() string {
-	return stripesource.Source
-}
-
-func (stripeProvider) EnvVars() []ProviderEnvVar {
-	return []ProviderEnvVar{
-		{
-			Name:        "STRIPE_SECRET_KEY",
-			Description: "Stripe secret key used to sync source balance transactions and charge details.",
-			Required:    true,
-		},
-	}
-}
-
-func (stripeProvider) SyncSourceData(*ProviderSyncContext, ProviderSyncScope) error {
 	return nil
-}
-
-func (stripeProvider) GenerateObjects(*ProviderGenerateContext, ProviderGenerateScope) (*ProviderGeneratedObjects, error) {
-	return &ProviderGeneratedObjects{}, nil
 }

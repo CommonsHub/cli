@@ -1848,7 +1848,7 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 				continue
 			}
 
-			// Try StripeCacheFile format
+			// Try Stripe source transaction archive format.
 			var stripeCacheFile struct {
 				Transactions []struct {
 					ID                string                 `json:"id"`
@@ -1879,10 +1879,10 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 			}
 
 			// Load private customer data (PII: names, emails)
-			stripeCustomers := loadStripeCustomerData(dataDir, year, month)
+			stripeCustomers := stripesource.LoadCustomerData(dataDir, year, month)
 
 			// Load private charge data (app info, payment methods)
-			stripeCharges, refundToCharge := LoadStripeChargeData(dataDir, year, month)
+			stripeCharges, refundToCharge := stripesource.LoadChargeData(dataDir, year, month)
 
 			for _, tx := range stripeCacheFile.Transactions {
 				amount := centsToEuros(tx.Amount)
@@ -1937,9 +1937,9 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 				// Merge charge/session enrichment for app, payment-link and event
 				// metadata even when the balance transaction already had customer
 				// data. Refunds are mapped back to their original charge.
-				chID := extractChargeID(tx.Source)
+				chID := stripesource.ExtractChargeID(tx.Source)
 				if chID == "" && refundToCharge != nil {
-					srcID := extractSourceID(tx.Source)
+					srcID := stripesource.ExtractSourceID(tx.Source)
 					if strings.HasPrefix(srcID, "re_") {
 						chID = refundToCharge[srcID]
 					}

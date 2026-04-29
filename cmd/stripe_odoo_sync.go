@@ -308,7 +308,7 @@ func syncStripeChronological(
 }
 
 // btPaymentRef returns a short human-readable description for a BT line.
-func btPaymentRef(bt StripeTransaction) string {
+func btPaymentRef(bt stripesource.Transaction) string {
 	switch bt.Type {
 	case "charge", "payment":
 		if bt.CustomerName != "" {
@@ -347,7 +347,7 @@ func btPaymentRef(bt StripeTransaction) string {
 
 // payoutStatementLabels returns (name, reference) for the closed statement
 // representing this automatic payout.
-func payoutStatementLabels(bt StripeTransaction) (string, string) {
+func payoutStatementLabels(bt stripesource.Transaction) (string, string) {
 	arrival := time.Unix(bt.PayoutArrivalDate, 0).In(BrusselsTZ()).Format("2006-01-02")
 	amount := float64(-bt.Net) / 100.0 // payout BT net is negative
 	currency := strings.ToUpper(bt.Currency)
@@ -364,7 +364,7 @@ func payoutStatementLabels(bt StripeTransaction) (string, string) {
 // line. Customer-facing transactions use the gross amount paid/refunded; Stripe
 // fees are represented by separate rows, so folding the fee into each charge
 // would understate customer revenue and double count fees in the journal view.
-func stripeStatementLineAmount(bt StripeTransaction) float64 {
+func stripeStatementLineAmount(bt stripesource.Transaction) float64 {
 	switch bt.Type {
 	case "charge", "payment", "refund", "payment_refund":
 		return centsToEuros(bt.Amount)
@@ -373,7 +373,7 @@ func stripeStatementLineAmount(bt StripeTransaction) float64 {
 	}
 }
 
-func stripeFeeAdjustmentCents(bt StripeTransaction) (int64, bool) {
+func stripeFeeAdjustmentCents(bt stripesource.Transaction) (int64, bool) {
 	if bt.Fee == 0 {
 		return 0, false
 	}
@@ -390,7 +390,7 @@ func stripeAggregateFeeLineAmount(feeCents int64) float64 {
 }
 
 // updateBTStats tallies stats per BT type.
-func updateBTStats(s *syncStats, bt StripeTransaction, amount float64) {
+func updateBTStats(s *syncStats, bt stripesource.Transaction, amount float64) {
 	switch bt.Type {
 	case "charge", "payment":
 		s.Charges++
@@ -621,8 +621,8 @@ func AccountStripePending(slug string) error {
 		}
 		return err
 	}
-	var lastPayout *StripeTransaction
-	var since []StripeTransaction
+	var lastPayout *stripesource.Transaction
+	var since []stripesource.Transaction
 	for i := len(all) - 1; i >= 0; i-- {
 		if all[i].Type == "payout" {
 			lastPayout = &all[i]

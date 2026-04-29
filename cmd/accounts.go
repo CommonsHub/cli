@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -196,54 +195,6 @@ func saveBalanceCache(cache *balanceCache) {
 	os.WriteFile(balanceCachePath(), data, 0644)
 }
 
-// fetchStripeBalance fetches the live Stripe balance (available + pending).
-func fetchStripeBalance() (float64, error) {
-	apiKey := os.Getenv("STRIPE_SECRET_KEY")
-	if apiKey == "" {
-		return 0, fmt.Errorf("STRIPE_SECRET_KEY not set")
-	}
-
-	req, err := http.NewRequest("GET", "https://api.stripe.com/v1/balance", nil)
-	if err != nil {
-		return 0, err
-	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return 0, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return 0, fmt.Errorf("stripe API returned %d", resp.StatusCode)
-	}
-
-	var result struct {
-		Available []struct {
-			Amount   int64  `json:"amount"`
-			Currency string `json:"currency"`
-		} `json:"available"`
-		Pending []struct {
-			Amount   int64  `json:"amount"`
-			Currency string `json:"currency"`
-		} `json:"pending"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return 0, err
-	}
-
-	var total int64
-	for _, a := range result.Available {
-		total += a.Amount
-	}
-	for _, p := range result.Pending {
-		total += p.Amount
-	}
-
-	return float64(total) / 100, nil
-}
-
 // refreshAccountBalance fetches the live balance for a single account and
 // returns (balance, cacheKey, err). cacheKey is the lowercase key under
 // which this balance should be stored in the shared balance cache.
@@ -257,7 +208,7 @@ func refreshAccountBalance(acc *AccountConfig) (float64, string, error) {
 		return v, strings.ToLower(acc.Address), nil
 	}
 	if acc.Provider == "stripe" {
-		v, err := fetchStripeBalance()
+		v, err := stripesource.FetchBalance(os.Getenv("STRIPE_SECRET_KEY"))
 		if err != nil {
 			return 0, "", err
 		}
@@ -282,7 +233,7 @@ func fetchLiveBalances(configs []AccountConfig) map[string]float64 {
 			}
 			time.Sleep(200 * time.Millisecond)
 		} else if acc.Provider == "stripe" {
-			balance, err := fetchStripeBalance()
+			balance, err := stripesource.FetchBalance(os.Getenv("STRIPE_SECRET_KEY"))
 			if err == nil {
 				key := strings.ToLower(acc.AccountID)
 				if key == "" {
@@ -1840,119 +1791,6 @@ func createOrAdoptStatementLine(creds *OdooCredentials, uid int, lineData map[st
 	return true, nil
 }
 
-// stripePayout represents a Stripe payout object.
-type stripePayout struct {
-	ID                  string `json:"id"`
-	Amount              int64  `json:"amount"`
-	ArrivalDate         int64  `json:"arrival_date"`
-	Created             int64  `json:"created"`
-	Currency            string `json:"currency"`
-	Status              string `json:"status"`
-	Description         string `json:"description,omitempty"`          // e.g. "STRIPE PAYOUT"
-	StatementDescriptor string `json:"statement_descriptor,omitempty"` // custom bank statement text
-	Automatic           bool   `json:"automatic,omitempty"`            // true for scheduled payouts
-	TxCount             int    `json:"txCount,omitempty"`              // cached transaction count
-	BankLast4           string `json:"bankLast4,omitempty"`            // last 4 digits of bank account
-	BankName            string `json:"bankName,omitempty"`             // bank name
-}
-
-// statementName returns a human-readable name for an Odoo bank statement.
-func (p stripePayout) statementName() string {
-	date := time.Unix(p.ArrivalDate, 0).In(BrusselsTZ()).Format("2006-01-02")
-	amount := float64(p.Amount) / 100
-	if p.BankLast4 != "" {
-		return fmt.Sprintf("%s Stripe → ****%s (%.2f %s)", date, p.BankLast4, amount, strings.ToUpper(p.Currency))
-	}
-	return fmt.Sprintf("%s Stripe payout (%.2f %s)", date, amount, strings.ToUpper(p.Currency))
-}
-
-// stripePayoutsCache is the structure saved to disk.
-type stripePayoutsCache struct {
-	FetchedAt string         `json:"fetchedAt"`
-	Payouts   []stripePayout `json:"payouts"`
-}
-
-func stripePayoutsCachePath() string {
-	return stripesource.Path(DataDir(), "latest", "", stripesource.PayoutsFile)
-}
-
-func loadStripePayoutsCache() *stripePayoutsCache {
-	data, err := os.ReadFile(stripePayoutsCachePath())
-	if err != nil {
-		return nil
-	}
-	var cache stripePayoutsCache
-	if json.Unmarshal(data, &cache) != nil {
-		return nil
-	}
-	return &cache
-}
-
-func saveStripePayoutsCache(cache *stripePayoutsCache) {
-	data, _ := json.MarshalIndent(cache, "", "  ")
-	_ = writeDataFile(stripePayoutsCachePath(), data)
-}
-
-func rebuildStripePayoutsCacheFromSources() ([]stripePayout, error) {
-	bts, err := stripesource.LoadTransactions(DataDir(), "")
-	if err != nil {
-		return nil, err
-	}
-
-	var merged []stripePayout
-	for _, bt := range bts {
-		if bt.Type != "payout" {
-			continue
-		}
-		id := firstNonEmptyStr(bt.PayoutID, bt.ID)
-		arrival := bt.PayoutArrivalDate
-		if arrival == 0 {
-			arrival = bt.Created
-		}
-		merged = append(merged, stripePayout{
-			ID:                  id,
-			Amount:              -bt.Net,
-			ArrivalDate:         arrival,
-			Created:             bt.Created,
-			Currency:            bt.Currency,
-			Status:              "paid",
-			Description:         bt.Description,
-			StatementDescriptor: bt.PayoutStatementDescriptor,
-			Automatic:           bt.PayoutAutomatic,
-			BankLast4:           bt.PayoutBankLast4,
-		})
-	}
-
-	// Sort by arrival_date descending (most recent first)
-	sort.Slice(merged, func(i, j int) bool {
-		return merged[i].ArrivalDate > merged[j].ArrivalDate
-	})
-
-	// Save updated cache
-	saveStripePayoutsCache(&stripePayoutsCache{
-		FetchedAt: time.Now().UTC().Format(time.RFC3339),
-		Payouts:   merged,
-	})
-
-	fmt.Printf("  %s%d payout(s) cached from source archives%s\n", Fmt.Dim, len(merged), Fmt.Reset)
-
-	return merged, nil
-}
-
-func filterPayoutsByMonths(payouts []stripePayout, monthsLimit int) []stripePayout {
-	if monthsLimit <= 0 {
-		return payouts
-	}
-	cutoff := time.Now().AddDate(0, -monthsLimit, 0).Unix()
-	var filtered []stripePayout
-	for _, po := range payouts {
-		if po.ArrivalDate >= cutoff {
-			filtered = append(filtered, po)
-		}
-	}
-	return filtered
-}
-
 // emptyOdooJournal deletes all statement lines and statements for a journal after confirmation.
 // In Odoo, each bank statement line auto-creates a journal entry (account.move).
 // To delete: unreconcile → reset move to draft → delete move (which deletes the statement line).
@@ -2496,19 +2334,20 @@ func AccountStripePayouts(slug string, args []string) error {
 
 	if HasFlag(args, "--refresh") {
 		fmt.Printf("\n  %sRebuilding payouts from archived Stripe source data...%s\n", Fmt.Dim, Fmt.Reset)
-		_, err := rebuildStripePayoutsCacheFromSources()
+		payouts, err := stripesource.RebuildPayoutsCacheFromTransactions(DataDir())
 		if err != nil {
 			return fmt.Errorf("failed to rebuild payouts cache: %v", err)
 		}
+		fmt.Printf("  %s%d payout(s) cached from source archives%s\n", Fmt.Dim, len(payouts), Fmt.Reset)
 	}
 
-	cache := loadStripePayoutsCache()
+	cache := stripesource.LoadPayoutsCache(DataDir())
 	if cache == nil || len(cache.Payouts) == 0 {
 		fmt.Printf("\n  %sNo cached payouts. Run 'chb transactions sync --source stripe --reset', then 'chb accounts %s payouts --refresh'.%s\n\n", Fmt.Dim, slug, Fmt.Reset)
 		return nil
 	}
 
-	payouts := filterPayoutsByMonths(cache.Payouts, monthsLimit)
+	payouts := stripesource.FilterPayoutsByMonths(cache.Payouts, monthsLimit, time.Now())
 	if len(payouts) == 0 {
 		fmt.Printf("\n  %sNo payouts in the selected range%s\n\n", Fmt.Dim, Fmt.Reset)
 		return nil
@@ -2595,7 +2434,7 @@ func AccountStripePayouts(slug string, args []string) error {
 		if po.StatementDescriptor != "" {
 			fmt.Printf("    %sDescriptor:%s   %s\n", labelStyle, Fmt.Reset, po.StatementDescriptor)
 		} else {
-			fmt.Printf("    %sStatement:%s    %s\n", labelStyle, Fmt.Reset, po.statementName())
+			fmt.Printf("    %sStatement:%s    %s\n", labelStyle, Fmt.Reset, po.StatementName(BrusselsTZ()))
 		}
 
 		// Tx count

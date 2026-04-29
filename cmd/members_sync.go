@@ -71,53 +71,6 @@ type MembersOutputFile struct {
 	Members     []Member       `json:"members"`
 }
 
-// Stripe types
-type stripeSubscription struct {
-	ID                 string `json:"id"`
-	Status             string `json:"status"`
-	Customer           string `json:"customer"`
-	CurrentPeriodStart int64  `json:"current_period_start"`
-	CurrentPeriodEnd   int64  `json:"current_period_end"`
-	Created            int64  `json:"created"`
-	CanceledAt         *int64 `json:"canceled_at"`
-	EndedAt            *int64 `json:"ended_at"`
-	Items              struct {
-		Data []struct {
-			Price struct {
-				ID         string `json:"id"`
-				UnitAmount int64  `json:"unit_amount"`
-				Currency   string `json:"currency"`
-				Recurring  struct {
-					Interval      string `json:"interval"`
-					IntervalCount int    `json:"interval_count"`
-				} `json:"recurring"`
-				Product string `json:"product"`
-			} `json:"price"`
-		} `json:"data"`
-	} `json:"items"`
-	Metadata      map[string]string `json:"metadata"`
-	LatestInvoice json.RawMessage   `json:"latest_invoice"`
-}
-
-type stripeCustomer struct {
-	ID       string            `json:"id"`
-	Email    string            `json:"email"`
-	Name     *string           `json:"name"`
-	Metadata map[string]string `json:"metadata"`
-}
-
-type stripeInvoice struct {
-	ID                string `json:"id"`
-	Status            string `json:"status"`
-	AmountPaid        int64  `json:"amount_paid"`
-	Currency          string `json:"currency"`
-	Created           int64  `json:"created"`
-	HostedInvoiceURL  string `json:"hosted_invoice_url"`
-	StatusTransitions struct {
-		PaidAt *int64 `json:"paid_at"`
-	} `json:"status_transitions"`
-}
-
 type providerSubscription struct {
 	ID                 string         `json:"id"`
 	Source             string         `json:"source"`
@@ -195,15 +148,15 @@ func MembersSync(args []string) error {
 	}
 
 	// Fetch all Stripe subscriptions (once)
-	var stripeSubscriptions []stripeSubscription
-	customerCache := map[string]*stripeCustomer{}
+	var stripeSubscriptions []stripesource.Subscription
+	customerCache := map[string]*stripesource.Customer{}
 
 	if doStripe && !stripeNeedsFetch {
 		doStripe = false
 	} else if doStripe && stripeKey != "" {
 		fmt.Println("📥 Fetching Stripe subscriptions...")
 		var err error
-		stripeSubscriptions, err = fetchAllStripeMemberSubscriptions(stripeKey, stripeProductID)
+		stripeSubscriptions, err = stripesource.FetchSubscriptions(stripeKey, stripeProductID)
 		if err != nil {
 			fmt.Printf("  %s⚠ Stripe error: %v%s\n", Fmt.Yellow, err, Fmt.Reset)
 			doStripe = false
@@ -235,7 +188,7 @@ func MembersSync(args []string) error {
 		if doStripe && len(stripeSubscriptions) > 0 {
 			snap := buildStripeMonthSnapshot(stripeSubscriptions, year, month, salt, stripeProductID, stripeKey, customerCache)
 			fmt.Printf("  Stripe: %d subscriptions\n", len(snap.Subscriptions))
-			_ = writeProviderSourceJSON(dataDir, yearStr, monthStr, stripesource.Source, snap, stripesource.SubscriptionsFile)
+			_ = stripesource.WriteJSON(dataDir, yearStr, monthStr, snap, stripesource.SubscriptionsFile)
 			snapshots = append(snapshots, snap)
 		} else {
 			// Try loading cached
@@ -305,66 +258,7 @@ func MembersSync(args []string) error {
 
 // ── Stripe helpers ──────────────────────────────────────────────────────────
 
-func fetchAllStripeMemberSubscriptions(apiKey, productID string) ([]stripeSubscription, error) {
-	var all []stripeSubscription
-	startingAfter := ""
-
-	for {
-		url := "https://api.stripe.com/v1/subscriptions?limit=100&status=all&expand[]=data.latest_invoice"
-		if startingAfter != "" {
-			url += "&starting_after=" + startingAfter
-		}
-
-		req, err := http.NewRequest("GET", url, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-
-		resp, err := http.DefaultClient.Do(req)
-		if err != nil {
-			return nil, err
-		}
-
-		if resp.StatusCode == 429 {
-			resp.Body.Close()
-			time.Sleep(2 * time.Second)
-			continue
-		}
-
-		if resp.StatusCode != 200 {
-			resp.Body.Close()
-			return nil, fmt.Errorf("Stripe API %d", resp.StatusCode)
-		}
-
-		var result struct {
-			Data    []stripeSubscription `json:"data"`
-			HasMore bool                 `json:"has_more"`
-		}
-		json.NewDecoder(resp.Body).Decode(&result)
-		resp.Body.Close()
-
-		// Filter by product
-		for _, sub := range result.Data {
-			for _, item := range sub.Items.Data {
-				if item.Price.Product == productID {
-					all = append(all, sub)
-					break
-				}
-			}
-		}
-
-		if !result.HasMore || len(result.Data) == 0 {
-			break
-		}
-		startingAfter = result.Data[len(result.Data)-1].ID
-		time.Sleep(200 * time.Millisecond)
-	}
-
-	return all, nil
-}
-
-func buildStripeMonthSnapshot(subs []stripeSubscription, year, month int, salt, productID, apiKey string, cache map[string]*stripeCustomer) providerSnapshot {
+func buildStripeMonthSnapshot(subs []stripesource.Subscription, year, month int, salt, productID, apiKey string, cache map[string]*stripesource.Customer) providerSnapshot {
 	monthStart := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC).Unix()
 	lastDay := time.Date(year, time.Month(month)+1, 0, 23, 59, 59, 0, time.UTC).Unix()
 
@@ -395,25 +289,14 @@ func buildStripeMonthSnapshot(subs []stripeSubscription, year, month int, salt, 
 		// Fetch customer
 		cust, ok := cache[sub.Customer]
 		if !ok {
-			cust = fetchStripeCustomer(apiKey, sub.Customer)
+			cust = stripesource.FetchCustomer(apiKey, sub.Customer)
 			cache[sub.Customer] = cust
 		}
 		if cust == nil {
 			continue
 		}
 
-		var priceItem *struct {
-			Price struct {
-				ID         string `json:"id"`
-				UnitAmount int64  `json:"unit_amount"`
-				Currency   string `json:"currency"`
-				Recurring  struct {
-					Interval      string `json:"interval"`
-					IntervalCount int    `json:"interval_count"`
-				} `json:"recurring"`
-				Product string `json:"product"`
-			} `json:"price"`
-		}
+		var priceItem *stripesource.SubscriptionItem
 		for i := range sub.Items.Data {
 			if sub.Items.Data[i].Price.Product == productID {
 				priceItem = &sub.Items.Data[i]
@@ -440,7 +323,7 @@ func buildStripeMonthSnapshot(subs []stripeSubscription, year, month int, salt, 
 
 		// Parse latest invoice
 		var payment *MemberPayment
-		var inv stripeInvoice
+		var inv stripesource.Invoice
 		if json.Unmarshal(sub.LatestInvoice, &inv) == nil && inv.Status == "paid" {
 			paidAt := inv.Created
 			if inv.StatusTransitions.PaidAt != nil {
@@ -494,29 +377,6 @@ func buildStripeMonthSnapshot(subs []stripeSubscription, year, month int, salt, 
 		FetchedAt:     time.Now().UTC().Format(time.RFC3339),
 		Subscriptions: result,
 	}
-}
-
-func fetchStripeCustomer(apiKey, customerID string) *stripeCustomer {
-	url := "https://api.stripe.com/v1/customers/" + customerID
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil
-	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return nil
-	}
-
-	var cust stripeCustomer
-	json.NewDecoder(resp.Body).Decode(&cust)
-	return &cust
 }
 
 func generateAndSaveSalt() string {

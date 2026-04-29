@@ -16,8 +16,6 @@ import (
 	stripesource "github.com/CommonsHub/chb/sources/stripe"
 )
 
-var stripeHTTPClient = &http.Client{Timeout: 20 * time.Second}
-
 // EtherscanResponse represents the Etherscan V2 API response
 type EtherscanResponse struct {
 	Status  string            `json:"status"`
@@ -354,8 +352,8 @@ func TransactionsSync(args []string) (int, error) {
 								fmt.Printf("    %s✓ Cached source data for past month range%s\n", Fmt.Green, Fmt.Reset)
 								continue
 							}
-							if cachedLatest := latestCachedStripeTxID(currentMonthCacheFile(DataDir(), relPathFn)); cachedLatest != "" {
-								peekID, peekErr := peekStripeLatest(stripeKey, acc.AccountID, startMonth, endMonth)
+							if cachedLatest := stripesource.LatestCachedTransactionID(currentMonthCacheFile(DataDir(), relPathFn)); cachedLatest != "" {
+								peekID, peekErr := stripesource.PeekLatest(stripeKey, acc.AccountID, startMonth, endMonth, BrusselsTZ())
 								if peekErr == nil && peekID == cachedLatest {
 									fmt.Printf("    %s✓ Up to date%s\n", Fmt.Green, Fmt.Reset)
 									continue
@@ -371,7 +369,35 @@ func TransactionsSync(args []string) (int, error) {
 					}
 
 					stopAtMonthBoundary := !force && !isSince && !posFound && monthFilter == "" && stripeCreatedAfter == nil
-					stripeTxs, err := fetchStripeTransactions(stripeKey, acc.AccountID, startMonth, endMonth, fetchLimit, stripeCreatedAfter, stopAtMonthBoundary, DataDir())
+					stripeTxs, err := stripesource.FetchTransactions(stripesource.FetchOptions{
+						APIKey:              stripeKey,
+						AccountID:           acc.AccountID,
+						StartMonth:          startMonth,
+						EndMonth:            endMonth,
+						Limit:               fetchLimit,
+						CreatedAfter:        stripeCreatedAfter,
+						StopAtMonthBoundary: stopAtMonthBoundary,
+						DataDir:             DataDir(),
+						Location:            BrusselsTZ(),
+						Logf: func(format string, args ...interface{}) {
+							msg := fmt.Sprintf(format, args...)
+							switch {
+							case strings.HasPrefix(msg, "page="):
+								var page, count, total int
+								if _, err := fmt.Sscanf(msg, "page=%d count=%d total=%d", &page, &count, &total); err == nil {
+									fmt.Printf("    %sStripe page %d: +%d tx (total %d)%s\n", Fmt.Dim, page, count, total, Fmt.Reset)
+								}
+							case strings.HasPrefix(msg, "rate_limited"):
+								fmt.Printf("    %sStripe rate limited, waiting 2s...%s\n", Fmt.Dim, Fmt.Reset)
+							case strings.HasPrefix(msg, "stop_at_cached_month"):
+								var month string
+								var count int
+								if _, err := fmt.Sscanf(msg, "stop_at_cached_month month=%s count=%d", &month, &count); err == nil {
+									fmt.Printf("    %sStripe stop heuristic: %s count matches local cache (%d)%s\n", Fmt.Dim, month, count, Fmt.Reset)
+								}
+							}
+						},
+					})
 					if err != nil {
 						fmt.Printf("    %s✗ Error: %v%s\n", Fmt.Red, err, Fmt.Reset)
 						continue
@@ -380,7 +406,7 @@ func TransactionsSync(args []string) (int, error) {
 					fmt.Printf("    %sFetched %d transactions%s\n", Fmt.Dim, len(stripeTxs), Fmt.Reset)
 
 					// Group by month and determine which months actually changed.
-					byMonth := groupStripeByMonth(stripeTxs)
+					byMonth := stripesource.GroupTransactionsByMonth(stripeTxs, BrusselsTZ())
 					monthsToUpdate := map[string]bool{}
 					for ym, monthTxs := range byMonth {
 						if ym < startMonth || ym > endMonth {
@@ -398,7 +424,7 @@ func TransactionsSync(args []string) (int, error) {
 							monthsToUpdate[ym] = true
 							continue
 						}
-						if localStripeTransactionCount(filePath) != len(monthTxs) {
+						if stripesource.LocalTransactionCount(filePath) != len(monthTxs) {
 							monthsToUpdate[ym] = true
 						}
 					}
@@ -423,14 +449,14 @@ func TransactionsSync(args []string) (int, error) {
 
 						dataDir := DataDir()
 
-						cache := StripeCacheFile{
+						cache := stripesource.CacheFile{
 							Transactions: monthTxs,
 							CachedAt:     time.Now().UTC().Format(time.RFC3339),
 							AccountID:    acc.AccountID,
 							Currency:     acc.Currency,
 						}
 
-						if err := writeProviderSourceJSON(dataDir, year, month, stripesource.Source, cache, stripesource.BalanceTransactionsFile); err != nil {
+						if err := stripesource.WriteJSON(dataDir, year, month, cache, stripesource.BalanceTransactionsFile); err != nil {
 							fmt.Printf("    %s✗ Failed to write Stripe source data: %v%s\n", Fmt.Red, err, Fmt.Reset)
 							continue
 						}
@@ -499,19 +525,19 @@ func TransactionsSync(args []string) (int, error) {
 						if !monthsToUpdate[txMonth] {
 							continue
 						}
-						chID := extractChargeID(tx.Source)
+						chID := stripesource.ExtractChargeID(tx.Source)
 						if chID != "" {
 							chargeIDs = append(chargeIDs, chID)
 							chargeByTxn[tx.ID] = chID
 						} else {
 							// For refunds, resolve to original charge
-							srcID := extractSourceID(tx.Source)
+							srcID := stripesource.ExtractSourceID(tx.Source)
 							if strings.HasPrefix(srcID, "re_") {
 								refundLookups++
 								if refundLookups == 1 || refundLookups%10 == 0 {
 									fmt.Printf(" %srefunds:%d%s", Fmt.Dim, refundLookups, Fmt.Reset)
 								}
-								origCharge := fetchRefundChargeID(stripeKey, acc.AccountID, srcID)
+								origCharge := stripesource.FetchRefundChargeID(stripeKey, acc.AccountID, srcID)
 								if origCharge != "" {
 									chargeIDs = append(chargeIDs, origCharge)
 									chargeByTxn[tx.ID] = origCharge
@@ -526,7 +552,7 @@ func TransactionsSync(args []string) (int, error) {
 						// Find the source ID for this txn to check if it's a refund
 						for _, tx := range stripeTxs {
 							if tx.ID == txnID {
-								srcID := extractSourceID(tx.Source)
+								srcID := stripesource.ExtractSourceID(tx.Source)
 								if strings.HasPrefix(srcID, "re_") {
 									refundToCharge[srcID] = chID
 								}
@@ -536,7 +562,9 @@ func TransactionsSync(args []string) (int, error) {
 					}
 
 					fmt.Printf(" %s(%d charge ids)%s", Fmt.Dim, len(chargeIDs), Fmt.Reset)
-					charges, err := fetchStripeCharges(stripeKey, acc.AccountID, chargeIDs)
+					charges, err := stripesource.FetchChargesWithProgress(stripeKey, acc.AccountID, chargeIDs, func(current, total int) {
+						fmt.Printf(" %s%d/%d%s", Fmt.Dim, current, total, Fmt.Reset)
+					})
 					if err != nil {
 						fmt.Printf(" %s✗ %v%s\n", Fmt.Red, err, Fmt.Reset)
 					} else {
@@ -553,7 +581,7 @@ func TransactionsSync(args []string) (int, error) {
 							fmt.Printf("    %sApplications:%s", Fmt.Dim, Fmt.Reset)
 							for app, count := range appNames {
 								name := app
-								if n, ok := knownStripeApps[app]; ok {
+								if n, ok := stripesource.KnownApps[app]; ok {
 									name = n
 								}
 								fmt.Printf(" %s(%d)", name, count)
@@ -566,7 +594,7 @@ func TransactionsSync(args []string) (int, error) {
 							if ym < startMonth || ym > endMonth || !monthsToUpdate[ym] {
 								continue
 							}
-							monthCharges := map[string]*StripeCharge{}
+							monthCharges := map[string]*stripesource.Charge{}
 							for _, tx := range monthTxs {
 								chID := chargeByTxn[tx.ID]
 								if ch, ok := charges[chID]; ok {
@@ -576,7 +604,7 @@ func TransactionsSync(args []string) (int, error) {
 							if len(monthCharges) > 0 {
 								parts := strings.Split(ym, "-")
 								if len(parts) == 2 {
-									SaveStripeChargeData(DataDir(), parts[0], parts[1], monthCharges, refundToCharge)
+									_ = stripesource.SaveChargeData(DataDir(), parts[0], parts[1], monthCharges, refundToCharge)
 								}
 							}
 						}
@@ -586,9 +614,9 @@ func TransactionsSync(args []string) (int, error) {
 							if ym < startMonth || ym > endMonth || !monthsToUpdate[ym] {
 								continue
 							}
-							customers := &StripeCustomerData{
+							customers := &stripesource.CustomerData{
 								FetchedAt: time.Now().UTC().Format(time.RFC3339),
-								Customers: map[string]*StripeCustomerPII{},
+								Customers: map[string]*stripesource.CustomerPII{},
 							}
 							for _, tx := range monthTxs {
 								chID := chargeByTxn[tx.ID]
@@ -596,14 +624,14 @@ func TransactionsSync(args []string) (int, error) {
 									name := ch.BestName()
 									email := ch.BestEmail()
 									if name != "" || email != "" {
-										customers.Customers[tx.ID] = &StripeCustomerPII{Name: name, Email: email}
+										customers.Customers[tx.ID] = &stripesource.CustomerPII{Name: name, Email: email}
 									}
 								}
 							}
 							if len(customers.Customers) > 0 {
 								parts := strings.Split(ym, "-")
 								if len(parts) == 2 {
-									_ = writeProviderSourceJSON(DataDir(), parts[0], parts[1], stripesource.Source, customers, stripesource.CustomersFile)
+									_ = stripesource.WriteJSON(DataDir(), parts[0], parts[1], customers, stripesource.CustomersFile)
 								}
 							}
 						}
@@ -894,245 +922,6 @@ func parseTokenValue(rawValue string, decimals int) float64 {
 	return f
 }
 
-func fetchStripeTransactions(apiKey, accountID, startMonth, endMonth string, limit int, createdAfter *time.Time, stopAtMonthBoundary bool, dataDir string) ([]StripeTransaction, error) {
-	tz := BrusselsTZ()
-	var allTxs []StripeTransaction
-
-	// Parse month range to timestamps
-	startParts := strings.Split(startMonth, "-")
-	if len(startParts) != 2 {
-		return nil, fmt.Errorf("invalid start month: %s", startMonth)
-	}
-	startYear, _ := strconv.Atoi(startParts[0])
-	startMon, _ := strconv.Atoi(startParts[1])
-	rangeStart := time.Date(startYear, time.Month(startMon), 1, 0, 0, 0, 0, tz)
-
-	endParts := strings.Split(endMonth, "-")
-	if len(endParts) != 2 {
-		return nil, fmt.Errorf("invalid end month: %s", endMonth)
-	}
-	endYear, _ := strconv.Atoi(endParts[0])
-	endMon, _ := strconv.Atoi(endParts[1])
-	rangeEnd := time.Date(endYear, time.Month(endMon)+1, 1, 0, 0, 0, 0, tz) // first day of month after end
-
-	createdGte := rangeStart.Unix()
-	if createdAfter != nil && !createdAfter.IsZero() {
-		after := createdAfter.Unix()
-		if after > createdGte {
-			createdGte = after
-		}
-	}
-	createdLt := rangeEnd.Unix()
-
-	pageSize := 100
-	if limit > 0 && limit < pageSize {
-		pageSize = limit
-	}
-
-	var startingAfter string
-	page := 0
-	for {
-		page++
-		url := fmt.Sprintf("https://api.stripe.com/v1/balance_transactions?limit=%d&created[gte]=%d&created[lt]=%d",
-			pageSize, createdGte, createdLt)
-		if startingAfter != "" {
-			url += "&starting_after=" + startingAfter
-		}
-
-		req, err := http.NewRequest("GET", url, nil)
-		if err != nil {
-			return nil, err
-		}
-		req.Header.Set("Authorization", "Bearer "+apiKey)
-		if accountID != "" {
-			req.Header.Set("Stripe-Account", accountID)
-		}
-
-		resp, err := stripeHTTPClient.Do(req)
-		if err != nil {
-			return nil, fmt.Errorf("stripe API error: %w", err)
-		}
-		defer resp.Body.Close()
-
-		if resp.StatusCode == 429 {
-			// Rate limited — wait and retry
-			fmt.Printf("    %sStripe rate limited on page %d, waiting 2s...%s\n", Fmt.Dim, page, Fmt.Reset)
-			time.Sleep(2 * time.Second)
-			continue
-		}
-
-		if resp.StatusCode != 200 {
-			return nil, fmt.Errorf("stripe API returned %d", resp.StatusCode)
-		}
-
-		var listResp StripeListResponse
-		if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
-			return nil, fmt.Errorf("failed to decode stripe response: %w", err)
-		}
-
-		allTxs = append(allTxs, listResp.Data...)
-		fmt.Printf("    %sStripe page %d: +%d tx (total %d)%s\n", Fmt.Dim, page, len(listResp.Data), len(allTxs), Fmt.Reset)
-
-		if stopAtMonthBoundary && dataDir != "" && len(allTxs) > 0 {
-			oldestMonth := time.Unix(allTxs[len(allTxs)-1].Created, 0).In(tz).Format("2006-01")
-			countSeen := 0
-			for _, tx := range allTxs {
-				if time.Unix(tx.Created, 0).In(tz).Format("2006-01") == oldestMonth {
-					countSeen++
-				}
-			}
-			localCount := 0
-			parts := strings.Split(oldestMonth, "-")
-			if len(parts) == 2 {
-				localCount = localStripeTransactionCount(stripesource.TransactionCachePath(dataDir, parts[0], parts[1]))
-			}
-			if localCount > 0 && countSeen == localCount {
-				fmt.Printf("    %sStripe stop heuristic: %s count matches local cache (%d)%s\n", Fmt.Dim, oldestMonth, localCount, Fmt.Reset)
-				break
-			}
-		}
-
-		if limit > 0 && len(allTxs) >= limit {
-			allTxs = allTxs[:limit]
-			break
-		}
-
-		if !listResp.HasMore || len(listResp.Data) == 0 {
-			break
-		}
-		startingAfter = listResp.Data[len(listResp.Data)-1].ID
-
-		// Small delay between pages to be polite
-		time.Sleep(200 * time.Millisecond)
-	}
-
-	return allTxs, nil
-}
-
-func localStripeTransactionCount(filePath string) int {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return 0
-	}
-	var cache StripeCacheFile
-	if json.Unmarshal(data, &cache) != nil {
-		return 0
-	}
-	return len(cache.Transactions)
-}
-
-// stripSourceToID reduces an expanded source object back to just the ID string for public storage.
-func stripSourceToID(source json.RawMessage) json.RawMessage {
-	if source == nil {
-		return nil
-	}
-	var obj struct {
-		ID string `json:"id"`
-	}
-	if json.Unmarshal(source, &obj) == nil && obj.ID != "" {
-		quoted, _ := json.Marshal(obj.ID)
-		return quoted
-	}
-	return source // already a string or unparseable, keep as-is
-}
-
-// enrichStripeTransaction extracts customer name, email, and charge ID from the expanded source.
-func enrichStripeTransaction(tx *StripeTransaction) {
-	if tx.Source == nil {
-		return
-	}
-
-	var source struct {
-		Object         string `json:"object"`
-		ID             string `json:"id"`
-		Description    string `json:"description"`
-		BillingDetails struct {
-			Name  string `json:"name"`
-			Email string `json:"email"`
-		} `json:"billing_details"`
-		Customer interface{}            `json:"customer"`
-		Metadata map[string]interface{} `json:"metadata"`
-	}
-	if json.Unmarshal(tx.Source, &source) != nil {
-		return
-	}
-
-	if source.Object == "charge" || source.Object == "payment_intent" {
-		tx.ChargeID = source.ID
-
-		// Customer name: prefer customer object, fall back to billing_details
-		if custObj, ok := source.Customer.(map[string]interface{}); ok {
-			if name, ok := custObj["name"].(string); ok && name != "" {
-				tx.CustomerName = name
-			}
-			if email, ok := custObj["email"].(string); ok && email != "" {
-				tx.CustomerEmail = email
-			}
-		}
-		if tx.CustomerName == "" {
-			tx.CustomerName = source.BillingDetails.Name
-		}
-		if tx.CustomerEmail == "" {
-			tx.CustomerEmail = source.BillingDetails.Email
-		}
-
-		// Use charge description if balance tx description is empty
-		if tx.Description == "" && source.Description != "" {
-			tx.Description = source.Description
-		}
-
-		// Merge charge metadata into tx metadata
-		if len(source.Metadata) > 0 && tx.Metadata == nil {
-			tx.Metadata = map[string]interface{}{}
-		}
-		for k, v := range source.Metadata {
-			tx.Metadata[k] = v
-		}
-	}
-
-	if source.Object == "payout" {
-		var po struct {
-			ID                  string `json:"id"`
-			Automatic           bool   `json:"automatic"`
-			StatementDescriptor string `json:"statement_descriptor"`
-			Description         string `json:"description"`
-			ArrivalDate         int64  `json:"arrival_date"`
-			Destination         *struct {
-				Last4 string `json:"last4"`
-			} `json:"destination"`
-		}
-		if json.Unmarshal(tx.Source, &po) == nil {
-			tx.PayoutID = po.ID
-			tx.PayoutAutomatic = po.Automatic
-			tx.PayoutStatementDescriptor = po.StatementDescriptor
-			tx.PayoutArrivalDate = po.ArrivalDate
-			if po.Destination != nil {
-				tx.PayoutBankLast4 = po.Destination.Last4
-			}
-			if tx.Description == "" {
-				if po.StatementDescriptor != "" {
-					tx.Description = po.StatementDescriptor
-				} else if po.Description != "" {
-					tx.Description = po.Description
-				}
-			}
-		}
-	}
-}
-
-func groupStripeByMonth(txs []StripeTransaction) map[string][]StripeTransaction {
-	byMonth := make(map[string][]StripeTransaction)
-	tz := BrusselsTZ()
-
-	for _, tx := range txs {
-		t := time.Unix(tx.Created, 0).In(tz)
-		ym := fmt.Sprintf("%d-%02d", t.Year(), t.Month())
-		byMonth[ym] = append(byMonth[ym], tx)
-	}
-
-	return byMonth
-}
-
 // ── Monerium ────────────────────────────────────────────────────────────────
 
 // MoneriumOrder represents a single Monerium order (redeem = outgoing SEPA, issue = incoming mint)
@@ -1276,62 +1065,6 @@ func groupMoneriumByMonth(orders []MoneriumOrder) map[string][]MoneriumOrder {
 	}
 
 	return byMonth
-}
-
-// latestCachedStripeTxID reads a Stripe cache file and returns the ID of the first (most recent) transaction.
-func latestCachedStripeTxID(filePath string) string {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return ""
-	}
-	var cache StripeCacheFile
-	if json.Unmarshal(data, &cache) != nil || len(cache.Transactions) == 0 {
-		return ""
-	}
-	return cache.Transactions[0].ID
-}
-
-// peekStripeLatest fetches the single most recent balance transaction from Stripe for the given month range.
-func peekStripeLatest(apiKey, accountID, startMonth, endMonth string) (string, error) {
-	tz := BrusselsTZ()
-	startParts := strings.Split(startMonth, "-")
-	endParts := strings.Split(endMonth, "-")
-	if len(startParts) != 2 || len(endParts) != 2 {
-		return "", fmt.Errorf("invalid month range")
-	}
-	startYear, _ := strconv.Atoi(startParts[0])
-	startMon, _ := strconv.Atoi(startParts[1])
-	endYear, _ := strconv.Atoi(endParts[0])
-	endMon, _ := strconv.Atoi(endParts[1])
-	rangeStart := time.Date(startYear, time.Month(startMon), 1, 0, 0, 0, 0, tz)
-	rangeEnd := time.Date(endYear, time.Month(endMon)+1, 1, 0, 0, 0, 0, tz)
-
-	url := fmt.Sprintf("https://api.stripe.com/v1/balance_transactions?limit=1&created[gte]=%d&created[lt]=%d",
-		rangeStart.Unix(), rangeEnd.Unix())
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return "", err
-	}
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-	if accountID != "" {
-		req.Header.Set("Stripe-Account", accountID)
-	}
-	resp, err := stripeHTTPClient.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("stripe API returned %d", resp.StatusCode)
-	}
-	var listResp StripeListResponse
-	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
-		return "", err
-	}
-	if len(listResp.Data) == 0 {
-		return "", nil
-	}
-	return listResp.Data[0].ID, nil
 }
 
 // latestCachedEtherscanTxHashGlobal finds the most recent cached etherscan tx hash across all months.

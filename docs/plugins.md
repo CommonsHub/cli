@@ -4,8 +4,8 @@ Data plugins enrich generated records without mixing provider-specific logic int
 the core transaction or event builders. A plugin can warm a cache once per month,
 augment every transaction and/or event, then flush public and private cache files.
 
-Plugin-specific code should live under `plugins/<plugin>/` with generic file
-names such as `cache.go`, `types.go`, or `client.go`. The CLI adapter still
+Plugin-specific code should live under `plugins/<plugin>/` with `plugin.go` as
+the entry point, plus generic supporting files such as `types.go` or `client.go`. The CLI adapter still
 implements the `DataPlugin` interface from `cmd/data_plugins.go`; keep only the
 thin command wiring in `cmd/`.
 
