@@ -17,6 +17,8 @@ func TestSplitNameStripsEmailTokens(t *testing.T) {
 		{"judithsaragossi@gmail.com", "Member", ""},
 		{"Judith judithsaragossi@gmail.com", "Judith", ""},
 		{"   judithsaragossi@gmail.com   ", "Member", ""},
+		{"@Commons Hub", "@Commons", "Hub"},
+		{"no@t allowed", "no@t", "allowed"},
 		{"", "Member", ""},
 		{"Jean-Luc Picard", "Jean-Luc", "Picard"},
 	}
@@ -38,12 +40,12 @@ func TestScrubNameFieldsRewritesAtInNameValues(t *testing.T) {
   "firstName": "alice@example.com",
   "lastName":  "bob.jones@example.com",
   "name":      "Alice Wonderland",
-  "nested":    {"firstName": "no@t allowed"},
+  "nested":    {"firstName": "@Commons Hub"},
   "list":      [{"firstName": "only@email.com", "amount": 10}]
 }`)
 	out, scrubbed := scrubNameFields(in)
-	if len(scrubbed) != 4 {
-		t.Fatalf("expected 4 scrubs, got %d: %+v", len(scrubbed), scrubbed)
+	if len(scrubbed) != 3 {
+		t.Fatalf("expected 3 scrubs, got %d: %+v", len(scrubbed), scrubbed)
 	}
 	var parsed map[string]interface{}
 	if err := json.Unmarshal(out, &parsed); err != nil {
@@ -58,19 +60,30 @@ func TestScrubNameFieldsRewritesAtInNameValues(t *testing.T) {
 	if parsed["name"] != "Alice Wonderland" {
 		t.Errorf("expected name unchanged, got %v", parsed["name"])
 	}
-	if s := string(out); strings.Contains(s, "@") {
-		t.Errorf("output still contains '@': %s", s)
+	if s := string(out); strings.Contains(s, "alice@example.com") || strings.Contains(s, "bob.jones@example.com") || strings.Contains(s, "only@email.com") {
+		t.Errorf("output still contains email: %s", s)
+	}
+	if parsed["nested"].(map[string]interface{})["firstName"] != "@Commons Hub" {
+		t.Errorf("expected non-email handle unchanged, got %v", parsed["nested"])
 	}
 }
 
 func TestValidatePublicJSONDetectsNameAtAndEmail(t *testing.T) {
-	in := []byte(`{"firstName":"x@y.com","contact":"mail me at bob@example.com","event":"evt@events.lu.ma"}`)
+	in := []byte(`{"firstName":"x@y.com","name":"@Commons Hub","contact":"mail me at bob@example.com","event":"evt@events.lu.ma"}`)
 	hard, soft := validatePublicJSON(in)
 	if len(hard) == 0 {
 		t.Fatalf("expected hard violation for firstName with @")
 	}
 	if len(soft) == 0 {
 		t.Fatalf("expected soft violation for email in contact")
+	}
+}
+
+func TestValidatePublicJSONDoesNotTreatAtMentionsAsEmail(t *testing.T) {
+	in := []byte(`{"name":"@Commons Hub","firstName":"no@t allowed","contact":"tag @Commons Hub"}`)
+	hard, soft := validatePublicJSON(in)
+	if len(hard) != 0 || len(soft) != 0 {
+		t.Fatalf("expected no PII findings for non-email @ strings, got hard=%+v soft=%+v", hard, soft)
 	}
 }
 

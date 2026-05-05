@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	odoosource "github.com/CommonsHub/chb/sources/odoo"
 )
 
 type attachmentSyncResult struct {
@@ -29,7 +31,7 @@ func AttachmentsSync(args []string) (int, error) {
 
 	dataDir := DataDir()
 	force := HasFlag(args, "--force")
-	startMonth, isHistory := ResolveSinceMonth(args, filepath.Join("finance", "odoo"))
+	startMonth, isHistory := ResolveSinceMonth(args, odoosource.RelPath())
 	posYear, posMonth, posFound := ParseYearMonthArg(args)
 
 	years := getAvailableYears(dataDir)
@@ -129,7 +131,7 @@ func collectAttachmentSyncScopes(dataDir string, years []string, posYear, posMon
 }
 
 func syncInvoiceAttachmentMonth(dataDir, year, month string, force bool, creds *OdooCredentials, uid int) (attachmentSyncResult, error) {
-	path := filepath.Join(dataDir, year, month, "finance", "odoo", "private", "invoices.json")
+	path := odoosource.PrivatePath(dataDir, year, month, odoosource.InvoicesFile)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return attachmentSyncResult{}, nil
@@ -166,7 +168,7 @@ func syncInvoiceAttachmentMonth(dataDir, year, month string, force bool, creds *
 }
 
 func syncBillAttachmentMonth(dataDir, year, month string, force bool, creds *OdooCredentials, uid int) (attachmentSyncResult, error) {
-	path := filepath.Join(dataDir, year, month, "finance", "odoo", "private", "bills.json")
+	path := odoosource.PrivatePath(dataDir, year, month, odoosource.BillsFile)
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return attachmentSyncResult{}, nil
@@ -287,7 +289,7 @@ func buildAttachmentLocalPath(year, month, docKind string, docID int, att OdooDo
 	if att.ID > 0 {
 		base = fmt.Sprintf("%d", att.ID)
 	}
-	return filepath.ToSlash(filepath.Join(year, month, "finance", "odoo", "private", "attachments", docKind, fmt.Sprintf("%d", docID), base+ext))
+	return filepath.ToSlash(filepath.Join(year, month, odoosource.PrivateRelPath("attachments", docKind, fmt.Sprintf("%d", docID), base+ext)))
 }
 
 func mimeDefaultExt(mimeType string) string {
@@ -319,14 +321,14 @@ func printAttachmentsSyncHelp() {
 
 %sDESCRIPTION%s
   By default, processes the current month and previous month.
-  With %s--history%s, processes all historical months with Odoo finance data.
+  With %s--history%s, processes all historical months with Odoo source data.
 
   Reads:
-    data/YYYY/MM/finance/odoo/private/invoices.json
-    data/YYYY/MM/finance/odoo/private/bills.json
+    data/YYYY/MM/sources/odoo/private/invoices.json
+    data/YYYY/MM/sources/odoo/private/bills.json
 
   Downloads listed attachment binaries or URL attachments and stores them under:
-    data/YYYY/MM/finance/odoo/private/attachments/{invoices|bills}/{documentId}/{attachmentId}.{ext}
+    data/YYYY/MM/sources/odoo/private/attachments/{invoices|bills}/{documentId}/{attachmentId}.{ext}
 
   Existing files are skipped unless --force is used.
 

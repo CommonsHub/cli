@@ -5,12 +5,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	odoosource "github.com/CommonsHub/chb/sources/odoo"
 )
 
 const odooDocumentsSchemaVersion = 4
@@ -278,7 +279,7 @@ func InvoicesSync(args []string) (int, error) {
 	now := time.Now().In(BrusselsTZ())
 
 	var startMonth, endMonth string
-	sinceMonth, isSince := ResolveSinceMonth(args, filepath.Join("finance", "odoo", "invoices.json"))
+	sinceMonth, isSince := ResolveSinceMonth(args, odoosource.RelPath(odoosource.InvoicesFile))
 	isFullSync := isSince
 	lastSyncTime := LastSyncTime("invoices")
 
@@ -422,12 +423,12 @@ func InvoicesSync(args []string) (int, error) {
 		}
 
 		data, _ := marshalIndentedNoHTMLEscape(publicOut)
-		if err := writeMonthFile(DataDir(), year, month, filepath.Join("finance", "odoo", "invoices.json"), data); err != nil {
+		if err := writeMonthFile(DataDir(), year, month, odoosource.RelPath(odoosource.InvoicesFile), data); err != nil {
 			fmt.Printf("  %s✗ Failed to write %s public invoices: %v%s\n", Fmt.Red, ym, err, Fmt.Reset)
 			continue
 		}
 		privateData, _ := marshalIndentedNoHTMLEscape(privateOut)
-		if err := writeMonthFile(DataDir(), year, month, filepath.Join("finance", "odoo", "private", "invoices.json"), privateData); err != nil {
+		if err := writeMonthFile(DataDir(), year, month, odoosource.PrivateRelPath(odoosource.InvoicesFile), privateData); err != nil {
 			fmt.Printf("  %s✗ Failed to write %s: %v%s\n", Fmt.Red, ym, err, Fmt.Reset)
 			continue
 		}
@@ -508,6 +509,8 @@ func odooSearchReadAllMaps(creds *OdooCredentials, uid int, model string, domain
 	const pageSize = 200
 	var all []map[string]interface{}
 	offset := 0
+	status := newStatusLine()
+	defer status.Clear()
 	for {
 		result, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
 			model, "search_read",
@@ -534,7 +537,7 @@ func odooSearchReadAllMaps(creds *OdooCredentials, uid int, model string, domain
 			break
 		}
 		offset += pageSize
-		fmt.Printf("    %s%s: %d fetched%s\n", Fmt.Dim, model, len(all), Fmt.Reset)
+		status.Update("%s: %d fetched", model, len(all))
 	}
 	return all, nil
 }
@@ -1306,8 +1309,8 @@ func loadCachedInvoiceMonths(dataDir, startMonth, endMonth string) map[string]ma
 }
 
 func isInvoiceMonthCacheUnchanged(dataDir, year, month string, nextPublic OdooOutgoingInvoicesFile, nextPrivate OdooOutgoingInvoicesPrivateFile) bool {
-	currentPublicPath := filepath.Join(dataDir, year, month, "finance", "odoo", "invoices.json")
-	currentPrivatePath := filepath.Join(dataDir, year, month, "finance", "odoo", "private", "invoices.json")
+	currentPublicPath := odoosource.Path(dataDir, year, month, odoosource.InvoicesFile)
+	currentPrivatePath := odoosource.PrivatePath(dataDir, year, month, odoosource.InvoicesFile)
 
 	publicData, err := os.ReadFile(currentPublicPath)
 	if err != nil {
@@ -1438,8 +1441,8 @@ func privateInvoiceToInternal(inv *OdooOutgoingInvoicePrivate) *OdooOutgoingInvo
 }
 
 func loadCachedInvoiceMonth(dataDir, year, month string) []OdooOutgoingInvoice {
-	publicPath := filepath.Join(dataDir, year, month, "finance", "odoo", "invoices.json")
-	privatePath := filepath.Join(dataDir, year, month, "finance", "odoo", "private", "invoices.json")
+	publicPath := odoosource.Path(dataDir, year, month, odoosource.InvoicesFile)
+	privatePath := odoosource.PrivatePath(dataDir, year, month, odoosource.InvoicesFile)
 
 	publicByID := map[int]OdooOutgoingInvoice{}
 	privateByID := map[int]OdooOutgoingInvoice{}
@@ -1813,8 +1816,8 @@ func printInvoicesSyncHelp() {
 
 %sDATA%s
   Saves monthly invoice snapshots to:
-    DATA_DIR/YYYY/MM/finance/odoo/invoices.json
-    DATA_DIR/YYYY/MM/finance/odoo/private/invoices.json
+    DATA_DIR/YYYY/MM/sources/odoo/invoices.json
+    DATA_DIR/YYYY/MM/sources/odoo/private/invoices.json
 
   Each invoice includes:
   • public: date, status, payment status, amounts, title, line items, VAT, categories, tags, journal, reconciled transaction
