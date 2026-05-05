@@ -3,9 +3,6 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
-	"math"
-	"math/big"
-	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
@@ -14,6 +11,9 @@ import (
 	"time"
 
 	"github.com/CommonsHub/chb/sources"
+	etherscansource "github.com/CommonsHub/chb/sources/etherscan"
+	moneriumsource "github.com/CommonsHub/chb/sources/monerium"
+	nostrsource "github.com/CommonsHub/chb/sources/nostr"
 	stripesource "github.com/CommonsHub/chb/sources/stripe"
 )
 
@@ -24,27 +24,8 @@ type EtherscanResponse struct {
 	Result  []json.RawMessage `json:"result"`
 }
 
-// TokenTransfer represents a single ERC20 token transfer
-type TokenTransfer struct {
-	BlockNumber  string `json:"blockNumber"`
-	TimeStamp    string `json:"timeStamp"`
-	Hash         string `json:"hash"`
-	From         string `json:"from"`
-	To           string `json:"to"`
-	Value        string `json:"value"`
-	TokenName    string `json:"tokenName"`
-	TokenSymbol  string `json:"tokenSymbol"`
-	TokenDecimal string `json:"tokenDecimal"`
-}
-
-// TransactionsCacheFile is the structure saved to disk
-type TransactionsCacheFile struct {
-	Transactions []TokenTransfer `json:"transactions"`
-	CachedAt     string          `json:"cachedAt"`
-	Account      string          `json:"account"`
-	Chain        string          `json:"chain"`
-	Token        string          `json:"token"`
-}
+type TokenTransfer = etherscansource.TokenTransfer
+type TransactionsCacheFile = etherscansource.CacheFile
 
 func TransactionsSync(args []string) (int, error) {
 	startedAt := time.Now()
@@ -79,7 +60,7 @@ func TransactionsSync(args []string) (int, error) {
 	var startMonth, endMonth string
 
 	// Check --since / --history first
-	sinceMonth, isSince := ResolveSinceMonth(args, "finance")
+	sinceMonth, isSince := ResolveSinceMonth(args, etherscansource.RelPath(""))
 	isFullSync := isSince
 	lastSyncTime := LastSyncTime("transactions")
 
@@ -177,10 +158,10 @@ func TransactionsSync(args []string) (int, error) {
 
 					// Check if we can skip the full fetch by peeking at the latest tx
 					if !force {
-						filename := fmt.Sprintf("%s.%s.json", acc.Slug, acc.Token.Symbol)
-						peekHash, peekErr := peekEtherscanLatest(acc, apiKey)
+						filename := etherscansource.FileName(acc.Slug, acc.Token.Symbol)
+						peekHash, peekErr := etherscansource.PeekLatest(etherscanAccount(acc), apiKey)
 						if peekErr == nil {
-							cachedLatest := latestCachedEtherscanTxHashGlobal(DataDir(), acc.Chain, filename)
+							cachedLatest := etherscansource.LatestCachedTxHashGlobal(DataDir(), acc.Chain, filename)
 							if cachedLatest == "" {
 								cachedLatest = readLastPeekHash(DataDir(), acc.Chain, acc.Slug+"."+acc.Token.Symbol)
 							}
@@ -188,7 +169,7 @@ func TransactionsSync(args []string) (int, error) {
 								// Peek matches, but only skip if we're not missing data for months in range.
 								// Etherscan accounts may have data in months we haven't cached yet.
 								relPathFn := func(year, month string) string {
-									return filepath.Join("finance", acc.Chain, filename)
+									return etherscansource.RelPath(acc.Chain, filename)
 								}
 								if peekHash == "" || allMonthsCached(DataDir(), startMonth, endMonth, relPathFn) {
 									fmt.Printf("    %s✓ Up to date%s\n", Fmt.Green, Fmt.Reset)
@@ -199,7 +180,7 @@ func TransactionsSync(args []string) (int, error) {
 						}
 					}
 
-					transfers, err := fetchTokenTransfers(acc, apiKey)
+					transfers, err := etherscansource.FetchTokenTransfers(etherscanAccount(acc), apiKey)
 					if err != nil {
 						Errorf("    %s✗ Error: %v%s", Fmt.Red, err, Fmt.Reset)
 						continue
@@ -208,7 +189,7 @@ func TransactionsSync(args []string) (int, error) {
 					fmt.Printf("    %sFetched %d total transfers%s\n", Fmt.Dim, len(transfers), Fmt.Reset)
 
 					// Group by month
-					byMonth := groupTransfersByMonth(transfers)
+					byMonth := etherscansource.GroupByMonth(transfers, BrusselsTZ())
 
 					saved := 0
 					for ym, monthTxs := range byMonth {
@@ -222,10 +203,10 @@ func TransactionsSync(args []string) (int, error) {
 						}
 						year, month := parts[0], parts[1]
 
-						// Save to data/YYYY/MM/finance/{chain}/{slug}.{token}.json
+						// Save to data/YYYY/MM/sources/etherscan/{chain}/{slug}.{token}.json
 						dataDir := DataDir()
-						filename := fmt.Sprintf("%s.%s.json", acc.Slug, acc.Token.Symbol)
-						relPath := filepath.Join("finance", acc.Chain, filename)
+						filename := etherscansource.FileName(acc.Slug, acc.Token.Symbol)
+						relPath := etherscansource.RelPath(acc.Chain, filename)
 						filePath := filepath.Join(dataDir, year, month, relPath)
 
 						// Skip if exists and not force
@@ -244,8 +225,7 @@ func TransactionsSync(args []string) (int, error) {
 							Token:        acc.Token.Symbol,
 						}
 
-						data, _ := json.MarshalIndent(cache, "", "  ")
-						if err := writeMonthFile(dataDir, year, month, relPath, data); err != nil {
+						if err := etherscansource.WriteJSON(dataDir, year, month, acc.Chain, cache, filename); err != nil {
 							Errorf("    %s✗ Failed to write: %v%s", Fmt.Red, err, Fmt.Reset)
 							continue
 						}
@@ -258,7 +238,9 @@ func TransactionsSync(args []string) (int, error) {
 						fmt.Printf("    %s✓ Saved %d months%s\n", Fmt.Green, saved, Fmt.Reset)
 					}
 
-					// Fetch Nostr metadata for all transfers
+					// Fetch Nostr metadata for all transfers.
+					// Tx annotations are append-only → safe to filter by `since`.
+					// Address profiles mutate → always pull the full set.
 					if !noNostr && acc.ChainID != 0 && len(transfers) > 0 {
 						fmt.Printf("    %sFetching Nostr metadata...%s", Fmt.Dim, Fmt.Reset)
 						var nostrSince *time.Time
@@ -277,36 +259,14 @@ func TransactionsSync(args []string) (int, error) {
 						for a := range addressSet {
 							addresses = append(addresses, a)
 						}
-						txMeta, addrMeta, nostrErr := FetchNostrMetadata(acc.ChainID, txHashes, addresses, nostrSince)
-						if nostrErr != nil {
-							Errorf(" %s✗ %v%s", Fmt.Red, nostrErr, Fmt.Reset)
+
+						txMeta, txErr := FetchNostrTxMetadata(acc.ChainID, txHashes, nostrSince)
+						addrMeta, addrErr := FetchNostrAddressMetadata(acc.ChainID, addresses)
+						if txErr != nil || addrErr != nil {
+							Errorf(" %s✗ tx=%v addr=%v%s", Fmt.Red, txErr, addrErr, Fmt.Reset)
 						} else {
 							fmt.Printf(" %s✓ %d tx, %d address annotations%s\n", Fmt.Green, len(txMeta), len(addrMeta), Fmt.Reset)
-							// Collect affected months to write per-month nostr-metadata.json
-							type monthKey struct{ year, month string }
-							byMonth := map[monthKey][]TokenTransfer{}
-							for ym, monthTxs := range groupTransfersByMonth(transfers) {
-								if ym < startMonth || ym > endMonth {
-									continue
-								}
-								parts := strings.Split(ym, "-")
-								if len(parts) != 2 {
-									continue
-								}
-								byMonth[monthKey{parts[0], parts[1]}] = monthTxs
-							}
-							dataDir := DataDir()
-							for mk := range byMonth {
-								nostrCache := NostrMetadataCache{
-									FetchedAt:    time.Now().UTC().Format(time.RFC3339),
-									ChainID:      acc.ChainID,
-									Transactions: txMeta,
-									Addresses:    addrMeta,
-								}
-								nostrData, _ := json.MarshalIndent(nostrCache, "", "  ")
-								nostrRelPath := filepath.Join("finance", acc.Chain, "nostr-metadata.json")
-								writeMonthFile(dataDir, mk.year, mk.month, nostrRelPath, nostrData)
-							}
+							saveNostrMetadataLayers(acc.ChainID, transfers, startMonth, endMonth, txMeta, addrMeta)
 						}
 					}
 
@@ -343,7 +303,11 @@ func TransactionsSync(args []string) (int, error) {
 					printSyncVariablesIfNeeded(sourceFilter, slugFilter, "stripe", acc)
 					status := newStatusLine()
 
-					// Check if we can skip the full fetch
+					// Check if we can skip the full fetch. For ranges that include
+					// the current month, do not trust a latest-ID peek alone: the
+					// cache can have Stripe's newest BT while still missing earlier
+					// same-month BTs from a partial incremental run. Let the normal
+					// backward fetch below compare/merge month contents instead.
 					if !force {
 						relPathFn := func(year, month string) string {
 							return stripesource.RelPath(stripesource.BalanceTransactionsFile)
@@ -353,22 +317,16 @@ func TransactionsSync(args []string) (int, error) {
 								fmt.Printf("  %sAll requested Stripe source files are already cached%s\n", Fmt.Dim, Fmt.Reset)
 								continue
 							}
-							if cachedLatest := stripesource.LatestCachedTransactionID(currentMonthCacheFile(DataDir(), relPathFn)); cachedLatest != "" {
-								peekID, peekErr := stripesource.PeekLatest(stripeKey, acc.AccountID, startMonth, endMonth, BrusselsTZ())
-								if peekErr == nil && peekID == cachedLatest {
-									fmt.Printf("  %sStripe source files are up to date%s\n", Fmt.Dim, Fmt.Reset)
-									continue
-								}
-							}
 						}
 					}
 
-					var stripeCreatedAfter *time.Time
-					if !force && !isSince && !posFound && monthFilter == "" && !lastSyncTime.IsZero() {
-						stripeCreatedAfter = &lastSyncTime
-					}
-
-					stopAtMonthBoundary := !force && !isSince && !posFound && monthFilter == "" && stripeCreatedAfter == nil
+					// Stripe balance transactions must be reconciled against the
+					// local archive, not against a wall-clock "last sync" timestamp.
+					// That timestamp is shared with other transaction sources and can
+					// advance even when this Stripe account did not get a complete
+					// archive update. Fetch from the requested recent range and stop
+					// once we reach a cached month whose transaction count matches.
+					stopAtMonthBoundary := !force && !isSince && !posFound && monthFilter == ""
 					status.Update("Fetching transactions from Stripe...")
 					stripeTxs, err := stripesource.FetchTransactions(stripesource.FetchOptions{
 						APIKey:              stripeKey,
@@ -376,7 +334,6 @@ func TransactionsSync(args []string) (int, error) {
 						StartMonth:          startMonth,
 						EndMonth:            endMonth,
 						Limit:               fetchLimit,
-						CreatedAfter:        stripeCreatedAfter,
 						StopAtMonthBoundary: stopAtMonthBoundary,
 						DataDir:             DataDir(),
 						Location:            BrusselsTZ(),
@@ -430,6 +387,11 @@ func TransactionsSync(args []string) (int, error) {
 						year, month := parts[0], parts[1]
 
 						dataDir := DataDir()
+						if !force {
+							if existing, ok := stripesource.LoadCache(stripesource.TransactionCachePath(dataDir, year, month)); ok {
+								monthTxs = stripesource.MergeTransactions(existing.Transactions, monthTxs)
+							}
+						}
 
 						cache := stripesource.CacheFile{
 							Transactions: monthTxs,
@@ -601,14 +563,14 @@ func TransactionsSync(args []string) (int, error) {
 			} else {
 				fmt.Printf("\n%s🏦 Syncing Monerium orders%s\n\n", Fmt.Bold, Fmt.Reset)
 
-				token, err := authenticateMonerium(clientID, clientSecret, moneriumEnv)
+				token, err := moneriumsource.Authenticate(clientID, clientSecret, moneriumEnv)
 				if err != nil {
 					Errorf("  %s✗ Auth failed: %v%s", Fmt.Red, err, Fmt.Reset)
 				} else {
 					for _, acc := range moneriumAccounts {
 						fmt.Printf("  %s%s%s (%s)\n", Fmt.Bold, acc.Name, Fmt.Reset, acc.Address)
 
-						orders, err := fetchMoneriumOrders(token, acc.Address, moneriumEnv)
+						orders, err := moneriumsource.FetchOrders(token, acc.Address, moneriumEnv)
 						if err != nil {
 							Errorf("    %s✗ Error: %v%s", Fmt.Red, err, Fmt.Reset)
 							continue
@@ -621,13 +583,14 @@ func TransactionsSync(args []string) (int, error) {
 						if slug == "" {
 							slug = acc.Address[:8]
 						}
+						filename := moneriumsource.FileName(slug)
 						if !force && len(orders) > 0 {
 							relPathFn := func(year, month string) string {
-								return filepath.Join("finance", "monerium", "private", slug+".json")
+								return moneriumsource.RelPath(filename)
 							}
 							if allMonthsCached(DataDir(), startMonth, endMonth, relPathFn) {
 								cachedPath := currentMonthCacheFile(DataDir(), relPathFn)
-								if orders[0].ID == latestCachedMoneriumOrderID(cachedPath) {
+								if orders[0].ID == moneriumsource.LatestCachedOrderID(cachedPath) {
 									fmt.Printf("    %s✓ Up to date%s\n", Fmt.Green, Fmt.Reset)
 									continue
 								}
@@ -635,7 +598,7 @@ func TransactionsSync(args []string) (int, error) {
 						}
 
 						// Group by month
-						byMonth := groupMoneriumByMonth(orders)
+						byMonth := moneriumsource.GroupByMonth(orders, BrusselsTZ())
 						saved := 0
 
 						for ym, monthOrders := range byMonth {
@@ -650,7 +613,7 @@ func TransactionsSync(args []string) (int, error) {
 							year, month := parts[0], parts[1]
 
 							dataDir := DataDir()
-							relPath := filepath.Join("finance", "monerium", "private", slug+".json")
+							relPath := moneriumsource.RelPath(filename)
 							filePath := filepath.Join(dataDir, year, month, relPath)
 
 							if !force && fileExists(filePath) {
@@ -659,14 +622,13 @@ func TransactionsSync(args []string) (int, error) {
 								}
 							}
 
-							cache := MoneriumCacheFile{
+							cache := moneriumsource.CacheFile{
 								Orders:   monthOrders,
 								CachedAt: time.Now().UTC().Format(time.RFC3339),
 								Address:  acc.Address,
 							}
 
-							data, _ := json.MarshalIndent(cache, "", "  ")
-							if err := writeMonthFile(dataDir, year, month, relPath, data); err != nil {
+							if err := moneriumsource.WriteJSON(dataDir, year, month, cache, filename); err != nil {
 								Errorf("    %s✗ Failed to write: %v%s", Fmt.Red, err, Fmt.Reset)
 								continue
 							}
@@ -692,78 +654,79 @@ func TransactionsSync(args []string) (int, error) {
 }
 
 func fetchTokenTransfers(acc FinanceAccount, apiKey string) ([]TokenTransfer, error) {
-	baseURL := fmt.Sprintf("https://api.etherscan.io/v2/api?chainid=%d", acc.ChainID)
+	return etherscansource.FetchTokenTransfers(etherscanAccount(acc), apiKey)
+}
 
-	// If address is empty or equals the token contract, fetch ALL transfers for the token
-	// (contribution token mode — no specific wallet to filter on)
-	var url string
-	if acc.Address == "" || strings.EqualFold(acc.Address, acc.Token.Address) {
-		url = fmt.Sprintf("%s&module=account&action=tokentx&contractaddress=%s&startblock=0&endblock=99999999&sort=desc&apikey=%s",
-			baseURL, acc.Token.Address, apiKey)
-	} else {
-		url = fmt.Sprintf("%s&module=account&action=tokentx&contractaddress=%s&address=%s&startblock=0&endblock=99999999&sort=desc&apikey=%s",
-			baseURL, acc.Token.Address, acc.Address, apiKey)
-	}
+// saveNostrMetadataLayers writes Nostr metadata to two layers:
+//   - per-month files (filtered to txs/addresses involved in that month) — frozen
+//     snapshots so re-reading any month gives what was known at sync time.
+//   - data/latest/sources/nostr/<chainID>/metadata.json — timeless union across
+//     every chain ever synced.
+//
+// Both writes merge into existing entries by createdAt so concurrent accounts
+// on the same chain don't clobber each other.
+func saveNostrMetadataLayers(chainID int, transfers []TokenTransfer, startMonth, endMonth string,
+	txMeta map[string]*TxMetadata, addrMeta map[string]*AddressMetadata) {
+	dataDir := DataDir()
+	chainStr := strconv.Itoa(chainID)
+	now := time.Now().UTC().Format(time.RFC3339)
+	zeroAddr := "0x0000000000000000000000000000000000000000"
 
-	var lastErr error
-	for attempt := 0; attempt < 3; attempt++ {
-		if attempt > 0 {
-			time.Sleep(time.Duration(attempt) * time.Second)
-		}
-
-		resp, err := http.Get(url)
-		if err != nil {
-			lastErr = err
+	for ym, monthTxs := range etherscansource.GroupByMonth(transfers, BrusselsTZ()) {
+		if ym < startMonth || ym > endMonth {
 			continue
 		}
-		defer resp.Body.Close()
-
-		var result struct {
-			Status  string          `json:"status"`
-			Message string          `json:"message"`
-			Result  json.RawMessage `json:"result"`
-		}
-		if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-			lastErr = err
+		parts := strings.Split(ym, "-")
+		if len(parts) != 2 {
 			continue
 		}
+		year, month := parts[0], parts[1]
 
-		if result.Status == "0" && result.Message != "No transactions found" {
-			if strings.Contains(strings.ToLower(result.Message), "rate limit") {
-				lastErr = fmt.Errorf("rate limited: %s", result.Message)
-				time.Sleep(2 * time.Second)
-				continue
+		monthTxMeta := map[string]*TxMetadata{}
+		monthAddrSet := map[string]struct{}{}
+		for _, tx := range monthTxs {
+			if m, ok := txMeta[strings.ToLower(tx.Hash)]; ok {
+				monthTxMeta[strings.ToLower(tx.Hash)] = m
 			}
-			return nil, fmt.Errorf("API error: %s", result.Message)
+			if from := strings.ToLower(tx.From); from != "" && from != zeroAddr {
+				monthAddrSet[from] = struct{}{}
+			}
+			if to := strings.ToLower(tx.To); to != "" && to != zeroAddr {
+				monthAddrSet[to] = struct{}{}
+			}
+		}
+		monthAddrMeta := map[string]*AddressMetadata{}
+		for a := range monthAddrSet {
+			if m, ok := addrMeta[a]; ok {
+				monthAddrMeta[a] = m
+			}
 		}
 
-		var transfers []TokenTransfer
-		if err := json.Unmarshal(result.Result, &transfers); err != nil {
-			// Could be "No transactions found" which returns a string
-			return []TokenTransfer{}, nil
+		incoming := NostrMetadataCache{
+			FetchedAt:    now,
+			ChainID:      chainID,
+			Transactions: monthTxMeta,
+			Addresses:    monthAddrMeta,
 		}
-
-		return transfers, nil
+		monthPath := nostrsource.ChainMetadataPath(dataDir, year, month, chainID)
+		merged := MergeNostrMetadata(LoadNostrMetadataCache(monthPath), incoming)
+		_ = WriteNostrMetadataCache(monthPath, merged)
 	}
 
-	return nil, fmt.Errorf("failed after 3 attempts: %v", lastErr)
+	// Latest registry: union of every annotation we just learned about.
+	latestPath := filepath.Join(dataDir, "latest", nostrsource.RelPath(chainStr, nostrsource.MetadataFile))
+	incoming := NostrMetadataCache{
+		FetchedAt:    now,
+		ChainID:      chainID,
+		Transactions: txMeta,
+		Addresses:    addrMeta,
+	}
+	merged := MergeNostrMetadata(LoadNostrMetadataCache(latestPath), incoming)
+	_ = WriteNostrMetadataCache(latestPath, merged)
 }
 
 func groupTransfersByMonth(transfers []TokenTransfer) map[string][]TokenTransfer {
-	byMonth := make(map[string][]TokenTransfer)
-	tz := BrusselsTZ()
-
-	for _, tx := range transfers {
-		ts, err := strconv.ParseInt(tx.TimeStamp, 10, 64)
-		if err != nil {
-			continue
-		}
-		t := time.Unix(ts, 0).In(tz)
-		ym := fmt.Sprintf("%d-%02d", t.Year(), t.Month())
-		byMonth[ym] = append(byMonth[ym], tx)
-	}
-
-	return byMonth
+	return etherscansource.GroupByMonth(transfers, BrusselsTZ())
 }
 
 // findFirstIncompleteMonth walks backwards from current month to find the
@@ -809,10 +772,11 @@ func findFirstIncompleteMonth(settings *Settings, sourceFilter string) string {
 
 		allPresent := true
 		for _, source := range expectedSources {
-			// Check if any file exists in transactions/<source>/
-			sourceDir := filepath.Join(dataDir, year, month, "finance", source)
+			sourceDir := filepath.Join(dataDir, year, month, "sources", source)
 			if source == "monerium" {
-				sourceDir = filepath.Join(dataDir, year, month, "finance", "monerium", "private")
+				sourceDir = moneriumsource.Path(dataDir, year, month)
+			} else if source == "celo" || source == "gnosis" || source == "ethereum" || source == "etherscan" {
+				sourceDir = etherscansource.Path(dataDir, year, month, source)
 			}
 			entries, err := os.ReadDir(sourceDir)
 			if err != nil || len(entries) == 0 {
@@ -836,250 +800,23 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
-// parseTokenValue converts raw token value string to float using decimals
 func parseTokenValue(rawValue string, decimals int) float64 {
-	val := new(big.Float)
-	val.SetString(rawValue)
-	divisor := new(big.Float).SetFloat64(math.Pow10(decimals))
-	result := new(big.Float).Quo(val, divisor)
-	f, _ := result.Float64()
-	return f
+	return etherscansource.ParseTokenValue(rawValue, decimals)
 }
 
-// ── Monerium ────────────────────────────────────────────────────────────────
-
-// MoneriumOrder represents a single Monerium order (redeem = outgoing SEPA, issue = incoming mint)
-type MoneriumOrder struct {
-	ID          string `json:"id"`
-	Kind        string `json:"kind"` // "redeem" or "issue"
-	Profile     string `json:"profile"`
-	Address     string `json:"address"`
-	Chain       string `json:"chain"`
-	Currency    string `json:"currency"`
-	Amount      string `json:"amount"`
-	Counterpart struct {
-		Identifier struct {
-			Standard string `json:"standard"`
-			IBAN     string `json:"iban,omitempty"`
-		} `json:"identifier"`
-		Details struct {
-			Name        string `json:"name,omitempty"`
-			CompanyName string `json:"companyName,omitempty"`
-			FirstName   string `json:"firstName,omitempty"`
-			LastName    string `json:"lastName,omitempty"`
-			Country     string `json:"country,omitempty"`
-		} `json:"details"`
-	} `json:"counterpart"`
-	Memo  string `json:"memo,omitempty"`
-	State string `json:"state"`
-	Meta  struct {
-		PlacedAt    string   `json:"placedAt"`
-		ProcessedAt string   `json:"processedAt,omitempty"`
-		TxHashes    []string `json:"txHashes,omitempty"`
-	} `json:"meta"`
-}
-
-type MoneriumCacheFile struct {
-	Orders   []MoneriumOrder `json:"orders"`
-	CachedAt string          `json:"cachedAt"`
-	Address  string          `json:"address"`
-}
-
-func authenticateMonerium(clientID, clientSecret, environment string) (string, error) {
-	baseURL := "https://api.monerium.app"
-	if environment == "sandbox" {
-		baseURL = "https://api.monerium.dev"
+func etherscanAccount(acc FinanceAccount) etherscansource.Account {
+	out := etherscansource.Account{
+		Slug:    acc.Slug,
+		Chain:   acc.Chain,
+		ChainID: acc.ChainID,
+		Address: acc.Address,
 	}
-
-	data := fmt.Sprintf("grant_type=client_credentials&client_id=%s&client_secret=%s", clientID, clientSecret)
-	req, err := http.NewRequest("POST", baseURL+"/auth/token", strings.NewReader(data))
-	if err != nil {
-		return "", err
+	if acc.Token != nil {
+		out.TokenAddress = acc.Token.Address
+		out.TokenSymbol = acc.Token.Symbol
+		out.TokenDecimals = acc.Token.Decimals
 	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return "", fmt.Errorf("auth request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		var errResp struct {
-			Error string `json:"error"`
-		}
-		json.NewDecoder(resp.Body).Decode(&errResp)
-		return "", fmt.Errorf("auth failed (%d): %s", resp.StatusCode, errResp.Error)
-	}
-
-	var tokenResp struct {
-		AccessToken string `json:"access_token"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
-		return "", fmt.Errorf("failed to decode token: %w", err)
-	}
-
-	return tokenResp.AccessToken, nil
-}
-
-func fetchMoneriumOrders(accessToken, address, environment string) ([]MoneriumOrder, error) {
-	baseURL := "https://api.monerium.app"
-	if environment == "sandbox" {
-		baseURL = "https://api.monerium.dev"
-	}
-
-	url := fmt.Sprintf("%s/orders?address=%s", baseURL, address)
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Authorization", "Bearer "+accessToken)
-	req.Header.Set("Accept", "application/vnd.monerium.api-v2+json")
-
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != 200 {
-		return nil, fmt.Errorf("API error: %d", resp.StatusCode)
-	}
-
-	// API may return array directly or { orders: [...] }
-	var raw json.RawMessage
-	if err := json.NewDecoder(resp.Body).Decode(&raw); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
-	}
-
-	var orders []MoneriumOrder
-	if err := json.Unmarshal(raw, &orders); err != nil {
-		// Try wrapped format
-		var wrapped struct {
-			Orders []MoneriumOrder `json:"orders"`
-		}
-		if err := json.Unmarshal(raw, &wrapped); err != nil {
-			return nil, fmt.Errorf("failed to parse orders: %w", err)
-		}
-		orders = wrapped.Orders
-	}
-
-	return orders, nil
-}
-
-func groupMoneriumByMonth(orders []MoneriumOrder) map[string][]MoneriumOrder {
-	byMonth := make(map[string][]MoneriumOrder)
-	tz := BrusselsTZ()
-
-	for _, order := range orders {
-		dateStr := order.Meta.PlacedAt
-		if dateStr == "" {
-			continue
-		}
-		t, err := time.Parse(time.RFC3339, dateStr)
-		if err != nil {
-			t, err = time.Parse(time.RFC3339Nano, dateStr)
-			if err != nil {
-				continue
-			}
-		}
-		t = t.In(tz)
-		ym := fmt.Sprintf("%d-%02d", t.Year(), t.Month())
-		byMonth[ym] = append(byMonth[ym], order)
-	}
-
-	return byMonth
-}
-
-// latestCachedEtherscanTxHashGlobal finds the most recent cached etherscan tx hash across all months.
-// Since etherscan returns transfers sorted desc, the first tx in the most recent month's cache
-// is the latest transaction overall.
-func latestCachedEtherscanTxHashGlobal(dataDir, chain, filename string) string {
-	yearDirs, err := os.ReadDir(dataDir)
-	if err != nil {
-		return ""
-	}
-	// Walk year/month dirs in reverse order to find most recent cache file
-	var latestYM string
-	var latestPath string
-	for _, yd := range yearDirs {
-		if !yd.IsDir() || len(yd.Name()) != 4 {
-			continue
-		}
-		monthDirs, _ := os.ReadDir(filepath.Join(dataDir, yd.Name()))
-		for _, md := range monthDirs {
-			if !md.IsDir() || len(md.Name()) != 2 {
-				continue
-			}
-			ym := yd.Name() + "-" + md.Name()
-			fp := filepath.Join(dataDir, yd.Name(), md.Name(), "finance", chain, filename)
-			if fileExists(fp) && ym > latestYM {
-				latestYM = ym
-				latestPath = fp
-			}
-		}
-	}
-	if latestPath == "" {
-		return ""
-	}
-	return latestCachedEtherscanTxHash(latestPath)
-}
-
-// latestCachedEtherscanTxHash reads an etherscan cache file and returns the hash of the first (most recent) transaction.
-func latestCachedEtherscanTxHash(filePath string) string {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return ""
-	}
-	var cache TransactionsCacheFile
-	if json.Unmarshal(data, &cache) != nil || len(cache.Transactions) == 0 {
-		return ""
-	}
-	return cache.Transactions[0].Hash
-}
-
-// peekEtherscanLatest fetches the single most recent token transfer from etherscan.
-func peekEtherscanLatest(acc FinanceAccount, apiKey string) (string, error) {
-	baseURL := fmt.Sprintf("https://api.etherscan.io/v2/api?chainid=%d", acc.ChainID)
-	var url string
-	if acc.Address == "" || strings.EqualFold(acc.Address, acc.Token.Address) {
-		url = fmt.Sprintf("%s&module=account&action=tokentx&contractaddress=%s&startblock=0&endblock=99999999&page=1&offset=1&sort=desc&apikey=%s",
-			baseURL, acc.Token.Address, apiKey)
-	} else {
-		url = fmt.Sprintf("%s&module=account&action=tokentx&contractaddress=%s&address=%s&startblock=0&endblock=99999999&page=1&offset=1&sort=desc&apikey=%s",
-			baseURL, acc.Token.Address, acc.Address, apiKey)
-	}
-	resp, err := http.Get(url)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	var result struct {
-		Status  string          `json:"status"`
-		Message string          `json:"message"`
-		Result  json.RawMessage `json:"result"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return "", err
-	}
-	var transfers []TokenTransfer
-	if err := json.Unmarshal(result.Result, &transfers); err != nil || len(transfers) == 0 {
-		return "", nil
-	}
-	return transfers[0].Hash, nil
-}
-
-// latestCachedMoneriumOrderID reads a Monerium cache file and returns the ID of the first order.
-func latestCachedMoneriumOrderID(filePath string) string {
-	data, err := os.ReadFile(filePath)
-	if err != nil {
-		return ""
-	}
-	var cache MoneriumCacheFile
-	if json.Unmarshal(data, &cache) != nil || len(cache.Orders) == 0 {
-		return ""
-	}
-	return cache.Orders[0].ID
+	return out
 }
 
 // allMonthsCached checks if every month in the range [startMonth, endMonth] has a cached file.
@@ -1202,7 +939,7 @@ func currentMonthCacheFile(dataDir string, relPathFn func(year, month string) st
 
 // readLastPeekHash reads the stored latest tx hash from a previous sync.
 func readLastPeekHash(dataDir, chain, slug string) string {
-	fp := filepath.Join(dataDir, "latest", "finance", chain, ".peek-"+slug)
+	fp := etherscansource.Path(dataDir, "latest", "", chain, ".peek-"+slug)
 	data, err := os.ReadFile(fp)
 	if err != nil {
 		return ""
@@ -1212,7 +949,7 @@ func readLastPeekHash(dataDir, chain, slug string) string {
 
 // writeLastPeekHash stores the latest tx hash so we can compare on next sync.
 func writeLastPeekHash(dataDir, chain, slug, hash string) {
-	fp := filepath.Join(dataDir, "latest", "finance", chain, ".peek-"+slug)
+	fp := etherscansource.Path(dataDir, "latest", "", chain, ".peek-"+slug)
 	_ = writeDataFile(fp, []byte(hash+"\n"))
 }
 
@@ -1237,7 +974,7 @@ func printTransactionsSyncHelp() {
   %sgnosis%s      ERC20 token transfers via Etherscan V2 API (Gnosis Chain)
   %scelo%s        ERC20 token transfers via Etherscan V2 API (Celo)
   %sstripe%s      Balance transactions from Stripe
-  %smonerium%s    SEPA orders from Monerium (stored in finance/monerium/private/)
+  %smonerium%s    SEPA orders from Monerium (stored in sources/monerium/)
 
 %sENVIRONMENT%s
   %sETHERSCAN_API_KEY%s         Etherscan/Gnosisscan API key

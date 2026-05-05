@@ -8,7 +8,7 @@ import (
 
 // Provider owns one external source. A provider syncs source data into the
 // monthly sources/<source>/ archive, then maps that archived data into standard
-// generated objects. Cross-source enrichment belongs in DataPlugin.
+// generated objects. Cross-source enrichment belongs in DataProcessor.
 type Provider interface {
 	Source() string
 	EnvVars() []ProviderEnvVar
@@ -70,22 +70,22 @@ func writeProviderSourceJSON(dataDir, year, month, source string, v interface{},
 	return writeMonthFile(dataDir, year, month, providerSourceRelPath(source, elems...), data)
 }
 
-func pluginDataRelPath(plugin string, elems ...string) string {
-	parts := append([]string{"plugins", normalizeSourceName(plugin)}, elems...)
+func processorDataRelPath(processor string, elems ...string) string {
+	parts := append([]string{"processors", normalizeSourceName(processor)}, elems...)
 	return filepath.Join(parts...)
 }
 
-func pluginDataPath(dataDir, year, month, plugin string, elems ...string) string {
-	parts := []string{dataDir, year, month, pluginDataRelPath(plugin, elems...)}
+func processorDataPath(dataDir, year, month, processor string, elems ...string) string {
+	parts := []string{dataDir, year, month, processorDataRelPath(processor, elems...)}
 	return filepath.Join(parts...)
 }
 
-func writePluginDataJSON(dataDir, year, month, plugin string, v interface{}, elems ...string) error {
+func writeProcessorDataJSON(dataDir, year, month, processor string, v interface{}, elems ...string) error {
 	data, err := json.MarshalIndent(v, "", "  ")
 	if err != nil {
 		return err
 	}
-	return writeMonthFile(dataDir, year, month, pluginDataRelPath(plugin, elems...), data)
+	return writeMonthFile(dataDir, year, month, processorDataRelPath(processor, elems...), data)
 }
 
 func normalizeSourceName(source string) string {

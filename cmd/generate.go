@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"math/big"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,7 +12,11 @@ import (
 	"strings"
 	"time"
 
-	nostrstripeplugin "github.com/CommonsHub/chb/plugins/nostr-stripe"
+	discordsource "github.com/CommonsHub/chb/sources/discord"
+	etherscansource "github.com/CommonsHub/chb/sources/etherscan"
+	moneriumsource "github.com/CommonsHub/chb/sources/monerium"
+	nostrsource "github.com/CommonsHub/chb/sources/nostr"
+	odoosource "github.com/CommonsHub/chb/sources/odoo"
 	stripesource "github.com/CommonsHub/chb/sources/stripe"
 )
 
@@ -227,6 +230,7 @@ type TransactionEntry struct {
 	Event            string                 `json:"event,omitempty"`
 	Tags             [][]string             `json:"tags,omitempty"`
 	Metadata         map[string]interface{} `json:"metadata,omitempty"`
+	Spread           []SpreadEntry          `json:"spread,omitempty"`
 }
 
 type TransactionsFile struct {
@@ -394,7 +398,7 @@ func parseMessage(raw json.RawMessage) messageBasic {
 
 // readMessages reads all discord messages for a given year/month across all channels
 func readMessages(dataDir, year, month string) []json.RawMessage {
-	discordDir := filepath.Join(dataDir, year, month, "messages", "discord")
+	discordDir := discordsource.Path(dataDir, year, month)
 	entries, err := os.ReadDir(discordDir)
 	if err != nil {
 		return nil
@@ -405,7 +409,7 @@ func readMessages(dataDir, year, month string) []json.RawMessage {
 		if !e.IsDir() {
 			continue
 		}
-		msgPath := filepath.Join(discordDir, e.Name(), "messages.json")
+		msgPath := filepath.Join(discordDir, e.Name(), discordsource.MessagesFile)
 		data, err := os.ReadFile(msgPath)
 		if err != nil {
 			continue
@@ -420,7 +424,7 @@ func readMessages(dataDir, year, month string) []json.RawMessage {
 
 // readChannelMessages reads messages from a specific channel
 func readChannelMessages(dataDir, year, month, channelID string) []json.RawMessage {
-	msgPath := filepath.Join(dataDir, year, month, "messages", "discord", channelID, "messages.json")
+	msgPath := discordsource.ChannelPath(dataDir, year, month, channelID)
 	data, err := os.ReadFile(msgPath)
 	if err != nil {
 		return nil
@@ -539,7 +543,7 @@ func Generate(args []string) error {
 		}
 	}
 
-	// Generate latest images (from latest/messages/discord/)
+	// Generate latest images (from latest/sources/discord/)
 	latestDir := filepath.Join(dataDir, "latest")
 	if _, err := os.Stat(latestDir); err == nil {
 		n := generateMonthImagesGo(dataDir, "latest", "")
@@ -639,6 +643,27 @@ func Generate(args []string) error {
 	}
 	fmt.Println()
 
+	// 11. Rebuild inbound-spread indexes (global; rebuilds even when the user
+	// only generated a single month, since spreads can target any month).
+	fmt.Printf("🔁 Rebuilding inbound-spread indexes...\n")
+	if err := rebuildInboundSpreads(dataDir); err != nil {
+		Warnf("  %s⚠ %v%s\n", Fmt.Yellow, err, Fmt.Reset)
+	} else {
+		fmt.Printf("  %sdone%s\n", Fmt.Dim, Fmt.Reset)
+	}
+	fmt.Println()
+
+	// 12. Generate monthly reports
+	fmt.Printf("📄 Generating monthly reports...\n")
+	totalReports := 0
+	for _, scope := range scopes {
+		if generateMonthlyReportGo(dataDir, scope.Year, scope.Month, settings) {
+			fmt.Printf("  ✓ %s-%s: generated/report.json\n", scope.Year, scope.Month)
+			totalReports++
+		}
+	}
+	fmt.Printf("  %s%d report(s)%s\n\n", Fmt.Dim, totalReports, Fmt.Reset)
+
 	fmt.Printf("\n%s✅ All data generation complete!%s\n\n", Fmt.Green, Fmt.Reset)
 	return nil
 }
@@ -671,7 +696,7 @@ func GenerateTransactions(args []string) error {
 	fmt.Printf("  Date range: %s -> %s\n", firstGenerateScopeLabel(scopes), lastGenerateScopeLabel(scopes))
 	fmt.Printf("  Data dir: %s\n\n", dataDir)
 	totalTx := 0
-	pluginNames := registeredDataPluginNames()
+	processorNames := registeredDataProcessorNames()
 	for _, scope := range scopes {
 		fmt.Printf("%s/%s\n", scope.Year, scope.Month)
 		status := newStatusLine()
@@ -680,8 +705,8 @@ func GenerateTransactions(args []string) error {
 		status.Clear()
 		if n > 0 {
 			fmt.Printf("  %s✓%s generated/transactions.json (%d transactions)\n", Fmt.Green, Fmt.Reset, n)
-			if len(pluginNames) > 0 {
-				fmt.Printf("  %s✓%s plugins: %s\n", Fmt.Green, Fmt.Reset, strings.Join(pluginNames, ", "))
+			if len(processorNames) > 0 {
+				fmt.Printf("  %s✓%s processors: %s\n", Fmt.Green, Fmt.Reset, strings.Join(processorNames, ", "))
 			}
 			totalTx += n
 		}
@@ -690,6 +715,12 @@ func GenerateTransactions(args []string) error {
 		status.Clear()
 		if cpCount > 0 {
 			fmt.Printf("  %s✓%s generated/counterparties.json (%d counterparties)\n", Fmt.Green, Fmt.Reset, cpCount)
+		}
+		status.Update("Generating %s...", displayMonthRelPath(scope.Year, scope.Month, filepath.Join("generated", "report.json")))
+		reportWritten := generateMonthlyReportGo(dataDir, scope.Year, scope.Month, settings)
+		status.Clear()
+		if reportWritten {
+			fmt.Printf("  %s✓%s generated/report.json\n", Fmt.Green, Fmt.Reset)
 		}
 	}
 	if _, err := os.Stat(latestDir); err == nil {
@@ -700,8 +731,8 @@ func GenerateTransactions(args []string) error {
 		status.Clear()
 		if n > 0 {
 			fmt.Printf("  %s✓%s generated/transactions.json (%d transactions)\n", Fmt.Green, Fmt.Reset, n)
-			if len(pluginNames) > 0 {
-				fmt.Printf("  %s✓%s plugins: %s\n", Fmt.Green, Fmt.Reset, strings.Join(pluginNames, ", "))
+			if len(processorNames) > 0 {
+				fmt.Printf("  %s✓%s processors: %s\n", Fmt.Green, Fmt.Reset, strings.Join(processorNames, ", "))
 			}
 			totalTx += n
 		}
@@ -857,59 +888,15 @@ func lastGenerateScopeLabel(scopes []generateScope) string {
 // ── Image generation ────────────────────────────────────────────────────────
 
 func generateMonthImagesGo(dataDir, year, month string) int {
-	rawMessages := readMessages(dataDir, year, month)
-	if len(rawMessages) == 0 {
-		return 0
-	}
-
 	var images []ImageEntry
-	for _, raw := range rawMessages {
-		m := parseMessage(raw)
-		for _, att := range m.Attachments {
-			isImage := strings.HasPrefix(att.ContentType, "image/")
-			if !isImage {
-				// Check URL extension
-				urlClean := strings.Split(att.URL, "?")[0]
-				ext := strings.ToLower(filepath.Ext(urlClean))
-				isImage = ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".gif" || ext == ".webp"
-			}
-			if !isImage {
-				continue
-			}
-
-			totalReactions := 0
-			for _, r := range m.Reactions {
-				totalReactions += r.Count
-			}
-
-			reactionsJSON, _ := json.Marshal(convertReactions(m.Reactions))
-			ext := extFromURL(att.URL, ".jpg")
-			filePath := relativeDiscordImagePathFromTimestamp(m.Timestamp, att.ID, ext)
-
-			images = append(images, ImageEntry{
-				URL:            att.URL,
-				ID:             att.ID,
-				Author:         ImageAuthor{ID: m.AuthorID, Username: m.AuthorUser, DisplayName: m.AuthorName, Avatar: m.AuthorAvat},
-				Reactions:      reactionsJSON,
-				TotalReactions: totalReactions,
-				Message:        m.Content,
-				Timestamp:      m.Timestamp,
-				ChannelID:      "", // filled below from directory scan
-				MessageID:      m.ID,
-				FilePath:       filePath,
-			})
-		}
-	}
-
-	// Also scan per-channel to get channelID
-	discordDir := filepath.Join(dataDir, year, month, "messages", "discord")
+	discordDir := discordsource.Path(dataDir, year, month)
 	entries, _ := os.ReadDir(discordDir)
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		channelID := e.Name()
-		msgPath := filepath.Join(discordDir, channelID, "messages.json")
+		msgPath := filepath.Join(discordDir, channelID, discordsource.MessagesFile)
 		data, err := os.ReadFile(msgPath)
 		if err != nil {
 			continue
@@ -922,23 +909,31 @@ func generateMonthImagesGo(dataDir, year, month string) int {
 		for _, raw := range f.Messages {
 			m := parseMessage(raw)
 			for _, att := range m.Attachments {
-				isImage := strings.HasPrefix(att.ContentType, "image/")
-				if !isImage {
-					urlClean := strings.Split(att.URL, "?")[0]
-					ext := strings.ToLower(filepath.Ext(urlClean))
-					isImage = ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".gif" || ext == ".webp"
-				}
-				if !isImage {
+				if !isDiscordImageAttachment(att.ContentType, att.URL) {
 					continue
 				}
 
-				// Update channelID for any image we already have
-				for i := range images {
-					if images[i].ID == att.ID {
-						images[i].ChannelID = channelID
-						images[i].URL = att.URL
-					}
+				totalReactions := 0
+				for _, r := range m.Reactions {
+					totalReactions += r.Count
 				}
+
+				reactionsJSON, _ := json.Marshal(convertReactions(m.Reactions))
+				ext := extFromURL(att.URL, ".jpg")
+				filePath := relativeDiscordImagePathFromTimestamp(m.Timestamp, att.ID, ext)
+
+				images = append(images, ImageEntry{
+					URL:            att.URL,
+					ID:             att.ID,
+					Author:         ImageAuthor{ID: m.AuthorID, Username: m.AuthorUser, DisplayName: m.AuthorName, Avatar: m.AuthorAvat},
+					Reactions:      reactionsJSON,
+					TotalReactions: totalReactions,
+					Message:        m.Content,
+					Timestamp:      m.Timestamp,
+					ChannelID:      channelID,
+					MessageID:      m.ID,
+					FilePath:       filePath,
+				})
 			}
 		}
 	}
@@ -968,6 +963,15 @@ func generateMonthImagesGo(dataDir, year, month string) int {
 	writeMonthFile(dataDir, year, month, filepath.Join("generated", "images.json"), imgData)
 
 	return len(images)
+}
+
+func isDiscordImageAttachment(contentType, rawURL string) bool {
+	if strings.HasPrefix(contentType, "image/") {
+		return true
+	}
+	urlClean := strings.Split(rawURL, "?")[0]
+	ext := strings.ToLower(filepath.Ext(urlClean))
+	return ext == ".jpg" || ext == ".jpeg" || ext == ".png" || ext == ".gif" || ext == ".webp"
 }
 
 // ── Activity grid ───────────────────────────────────────────────────────────
@@ -1080,23 +1084,23 @@ func contributorInputPaths(dataDir, year, month string) []string {
 		inputs = append(inputs, imagesPath)
 	}
 
-	discordDir := filepath.Join(dataDir, year, month, "messages", "discord")
+	discordDir := discordsource.Path(dataDir, year, month)
 	if entries, err := os.ReadDir(discordDir); err == nil {
 		for _, e := range entries {
 			if e.IsDir() {
-				inputs = append(inputs, filepath.Join(discordDir, e.Name(), "messages.json"))
+				inputs = append(inputs, filepath.Join(discordDir, e.Name(), discordsource.MessagesFile))
 			}
 		}
 	}
 
-	financeDir := filepath.Join(dataDir, year, month, "finance", "celo")
-	if entries, err := os.ReadDir(financeDir); err == nil {
+	etherscanCeloDir := etherscansource.Path(dataDir, year, month, "celo")
+	if entries, err := os.ReadDir(etherscanCeloDir); err == nil {
 		for _, e := range entries {
 			if e.IsDir() {
 				continue
 			}
 			if e.Name() == "CHT.json" || strings.HasSuffix(e.Name(), ".CHT.json") {
-				inputs = append(inputs, filepath.Join(financeDir, e.Name()))
+				inputs = append(inputs, filepath.Join(etherscanCeloDir, e.Name()))
 			}
 		}
 	}
@@ -1167,7 +1171,7 @@ func parseMessageTimestamp(s string) time.Time {
 // cutoff is non-zero, messages, token transfers, and images older than cutoff
 // are excluded (used for the rolling latest/ window).
 func generateMonthContributorsGo(dataDir, year, month string, settings *Settings, runCache *contributorsRunCache, cutoff time.Time) int {
-	discordDir := filepath.Join(dataDir, year, month, "messages", "discord")
+	discordDir := discordsource.Path(dataDir, year, month)
 	if _, err := os.Stat(discordDir); os.IsNotExist(err) {
 		return 0
 	}
@@ -1238,8 +1242,6 @@ func generateMonthContributorsGo(dataDir, year, month string, settings *Settings
 		return 0
 	}
 
-	// Read CHT transactions
-	chtPath := filepath.Join(dataDir, year, month, "finance", "celo", "CHT.json")
 	type chtTx struct {
 		From      string `json:"from"`
 		To        string `json:"to"`
@@ -1247,22 +1249,14 @@ func generateMonthContributorsGo(dataDir, year, month string, settings *Settings
 		TimeStamp string `json:"timeStamp"`
 	}
 	var chtTxs []chtTx
-	if data, err := os.ReadFile(chtPath); err == nil {
-		var chtFile struct {
-			Transactions []chtTx `json:"transactions"`
-		}
-		json.Unmarshal(data, &chtFile)
-		chtTxs = chtFile.Transactions
-	}
 
-	// Also try the new file format (slug.token.json)
-	financeDir := filepath.Join(dataDir, year, month, "finance", "celo")
-	if entries, err := os.ReadDir(financeDir); err == nil {
+	etherscanCeloDir := etherscansource.Path(dataDir, year, month, "celo")
+	if entries, err := os.ReadDir(etherscanCeloDir); err == nil {
 		for _, e := range entries {
 			if e.IsDir() || !strings.HasSuffix(e.Name(), ".CHT.json") {
 				continue
 			}
-			if data, err := os.ReadFile(filepath.Join(financeDir, e.Name())); err == nil {
+			if data, err := os.ReadFile(filepath.Join(etherscanCeloDir, e.Name())); err == nil {
 				var txFile struct {
 					Transactions []chtTx `json:"transactions"`
 				}
@@ -1855,13 +1849,18 @@ func generateYearlyUsersGo(dataDir, year string, settings *Settings) {
 // ── Transactions ────────────────────────────────────────────────────────────
 
 func generateTransactionsGo(dataDir, year, month string, settings *Settings) int {
-	financeDir := filepath.Join(dataDir, year, month, "finance")
-	financeExists := true
-	if _, err := os.Stat(financeDir); os.IsNotExist(err) {
-		financeExists = false
-	}
 	stripePaths := stripesource.TransactionCachePaths(dataDir, year, month)
-	if !financeExists && len(stripePaths) == 0 {
+	etherscanDir := filepath.Join(dataDir, year, month, "sources", "etherscan")
+	etherscanExists := true
+	if _, err := os.Stat(etherscanDir); os.IsNotExist(err) {
+		etherscanExists = false
+	}
+	moneriumDir := filepath.Join(dataDir, year, month, moneriumsource.RelPath())
+	moneriumExists := true
+	if _, err := os.Stat(moneriumDir); os.IsNotExist(err) {
+		moneriumExists = false
+	}
+	if len(stripePaths) == 0 && !etherscanExists && !moneriumExists {
 		return 0
 	}
 
@@ -2048,17 +2047,20 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 
 	// Process blockchain transactions (e.g. celo/CHT)
 	processChainDir := func(chain string) {
-		chainDir := filepath.Join(financeDir, chain)
+		chainDir := etherscansource.Path(dataDir, year, month, chain)
 		entries, err := os.ReadDir(chainDir)
 		if err != nil {
 			return
 		}
 
-		// Load Nostr metadata if available
+		// Load Nostr metadata: per-month snapshot first, then merge with the
+		// timeless `latest/` registry so addresses labeled after this month
+		// was synced still get a name.
 		var nostrMeta NostrMetadataCache
-		nostrPath := filepath.Join(chainDir, "nostr-metadata.json")
-		if data, err := os.ReadFile(nostrPath); err == nil {
-			json.Unmarshal(data, &nostrMeta)
+		if chainID := chainIDForSourceChain(settings, chain); chainID != 0 {
+			monthCache := LoadNostrMetadataCache(nostrsource.ChainMetadataPath(dataDir, year, month, chainID))
+			latestCache := LoadNostrMetadataCache(filepath.Join(dataDir, "latest", nostrsource.RelPath(strconv.Itoa(chainID), nostrsource.MetadataFile)))
+			nostrMeta = MergeNostrMetadata(latestCache, monthCache)
 		}
 
 		for _, e := range entries {
@@ -2070,20 +2072,7 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 				continue
 			}
 
-			var txFile struct {
-				Transactions []struct {
-					Hash         string `json:"hash"`
-					From         string `json:"from"`
-					To           string `json:"to"`
-					Value        string `json:"value"`
-					TimeStamp    string `json:"timeStamp"`
-					TokenDecimal string `json:"tokenDecimal"`
-					TokenSymbol  string `json:"tokenSymbol"`
-				} `json:"transactions"`
-				Account string `json:"account"`
-				Chain   string `json:"chain"`
-				Token   string `json:"token"`
-			}
+			var txFile etherscansource.CacheFile
 			if json.Unmarshal(data, &txFile) != nil || len(txFile.Transactions) == 0 {
 				continue
 			}
@@ -2108,11 +2097,7 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 					fmt.Sscanf(tx.TokenDecimal, "%d", &dec)
 				}
 
-				val := new(big.Float)
-				val.SetString(tx.Value)
-				divisor := new(big.Float).SetFloat64(math.Pow10(dec))
-				result := new(big.Float).Quo(val, divisor)
-				amount, _ := result.Float64()
+				amount := etherscansource.ParseTokenValue(tx.Value, dec)
 
 				zeroAddr := "0x0000000000000000000000000000000000000000"
 				txType := "CREDIT"
@@ -2211,6 +2196,32 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 					}
 				}
 
+				// Token-wide tracking (account=="") loses the recipient because
+				// counterparty is forced to From. Stash both endpoints (and any
+				// known names) so downstream consumers — top receivers/spenders
+				// in the report — can resolve recipients too.
+				if accountAddr == "" {
+					if entry.Metadata == nil {
+						entry.Metadata = map[string]interface{}{}
+					}
+					fromAddr := strings.ToLower(tx.From)
+					toAddr := strings.ToLower(tx.To)
+					entry.Metadata["from"] = fromAddr
+					entry.Metadata["to"] = toAddr
+					if nostrMeta.Addresses != nil {
+						if fromAddr != "" && fromAddr != zeroAddr {
+							if m, ok := nostrMeta.Addresses[fromAddr]; ok && m.Name != "" {
+								entry.Metadata["fromName"] = m.Name
+							}
+						}
+						if toAddr != "" && toAddr != zeroAddr {
+							if m, ok := nostrMeta.Addresses[toAddr]; ok && m.Name != "" {
+								entry.Metadata["toName"] = m.Name
+							}
+						}
+					}
+				}
+
 				transactions = append(transactions, entry)
 			}
 		}
@@ -2221,92 +2232,6 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 		processChainDir(chain)
 	}
 
-	// Enrich blockchain transactions with Monerium counterparty data
-	// Monerium orders have txHashes that match on-chain EURe transactions
-	moneriumEnrichDir := filepath.Join(financeDir, "monerium", "private")
-	if entries, err := os.ReadDir(moneriumEnrichDir); err == nil {
-		// Build map: txHash → Monerium order counterparty + memo
-		type moneriumInfo struct {
-			Counterparty string
-			Memo         string
-		}
-		moneriumByHash := map[string]*moneriumInfo{}
-
-		for _, e := range entries {
-			if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
-				continue
-			}
-			data, err := os.ReadFile(filepath.Join(moneriumEnrichDir, e.Name()))
-			if err != nil {
-				continue
-			}
-			var cacheFile struct {
-				Orders []struct {
-					Kind        string `json:"kind"`
-					Memo        string `json:"memo"`
-					State       string `json:"state"`
-					Counterpart struct {
-						Details struct {
-							Name        string `json:"name"`
-							CompanyName string `json:"companyName"`
-							FirstName   string `json:"firstName"`
-							LastName    string `json:"lastName"`
-						} `json:"details"`
-					} `json:"counterpart"`
-					Meta struct {
-						TxHashes []string `json:"txHashes"`
-					} `json:"meta"`
-				} `json:"orders"`
-			}
-			if json.Unmarshal(data, &cacheFile) != nil {
-				continue
-			}
-			for _, order := range cacheFile.Orders {
-				name := order.Counterpart.Details.CompanyName
-				if name == "" {
-					name = order.Counterpart.Details.Name
-				}
-				if name == "" && order.Counterpart.Details.FirstName != "" {
-					name = order.Counterpart.Details.FirstName + " " + order.Counterpart.Details.LastName
-				}
-				if name == "" {
-					continue
-				}
-				for _, hash := range order.Meta.TxHashes {
-					moneriumByHash[strings.ToLower(hash)] = &moneriumInfo{
-						Counterparty: name,
-						Memo:         order.Memo,
-					}
-				}
-			}
-		}
-
-		// Enrich blockchain transactions
-		if len(moneriumByHash) > 0 {
-			for i := range transactions {
-				tx := &transactions[i]
-				if tx.Provider != "etherscan" || tx.TxHash == "" {
-					continue
-				}
-				if info, ok := moneriumByHash[strings.ToLower(tx.TxHash)]; ok {
-					// Only enrich if counterparty is a raw address (not already named)
-					if strings.HasPrefix(tx.Counterparty, "0x") {
-						tx.Counterparty = info.Counterparty
-					}
-					if info.Memo != "" {
-						if tx.Metadata == nil {
-							tx.Metadata = map[string]interface{}{}
-						}
-						tx.Metadata["memo"] = info.Memo
-						if tx.Metadata["description"] == nil || tx.Metadata["description"] == "" {
-							tx.Metadata["description"] = info.Memo
-						}
-					}
-				}
-			}
-		}
-	}
-
 	if len(transactions) == 0 {
 		return 0
 	}
@@ -2314,7 +2239,7 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 	// Load Nostr annotations (highest priority for categorization)
 	nostrAnnotations := map[string]*TxAnnotation{}
 	// Stripe annotations
-	stripeAnnotPath := nostrstripeplugin.Path(dataDir, year, month, nostrstripeplugin.AnnotationsFile)
+	stripeAnnotPath := nostrsource.Path(dataDir, year, month, nostrsource.StripeAnnotationsFile)
 	if data, err := os.ReadFile(stripeAnnotPath); err == nil {
 		var cache NostrAnnotationCache
 		if json.Unmarshal(data, &cache) == nil {
@@ -2323,12 +2248,21 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 			}
 		}
 	}
-	// Blockchain annotations (from existing nostr-metadata.json tags)
+	annotationsPath := nostrsource.Path(dataDir, year, month, nostrsource.AnnotationsFile)
+	if data, err := os.ReadFile(annotationsPath); err == nil {
+		var cache NostrAnnotationCache
+		if json.Unmarshal(data, &cache) == nil {
+			for k, v := range cache.Annotations {
+				nostrAnnotations[k] = v
+			}
+		}
+	}
+	// Blockchain annotations from Nostr source metadata are applied while building chain transactions.
 	// These are already applied during transaction building above via TxMetadata.Tags
 
 	// Load Odoo enrichment (second priority)
 	odooCategories := map[string]string{} // stripeRef -> category
-	odooPath := filepath.Join(dataDir, year, month, "finance", "odoo", "analytic-enrichment.json")
+	odooPath := odoosource.Path(dataDir, year, month, odoosource.AnalyticEnrichmentFile)
 	if data, err := os.ReadFile(odooPath); err == nil {
 		var odooEnrich struct {
 			Mappings []struct {
@@ -2368,6 +2302,15 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 						tx.Collective = colStr
 					}
 				}
+				// Also build the URI so blockchain txs get their accounting
+				// annotations (category/collective/event/spread) applied below.
+				chainID := 0
+				if tx.Chain != nil {
+					chainID = chainIDForSourceChain(settings, *tx.Chain)
+				}
+				if chainID > 0 {
+					uri = BuildBlockchainURI(chainID, tx.TxHash)
+				}
 			}
 
 			// 1. Nostr annotations (highest priority)
@@ -2384,6 +2327,9 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 					}
 					if len(ann.Tags) > 0 {
 						tx.Tags = append(tx.Tags, ann.Tags...)
+					}
+					if len(ann.Spread) > 0 {
+						tx.Spread = ann.Spread
 					}
 				}
 			}
@@ -2464,7 +2410,7 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 		}
 	}
 
-	runTransactionPlugins(dataDir, year, month, transactions)
+	runTransactionProcessors(dataDir, year, month, transactions)
 
 	for i := range transactions {
 		syncTransactionTags(&transactions[i])
@@ -2555,6 +2501,21 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 	}
 
 	return len(transactions)
+}
+
+func chainIDForSourceChain(settings *Settings, chain string) int {
+	if settings == nil {
+		return 0
+	}
+	for _, acc := range settings.Finance.Accounts {
+		if strings.EqualFold(acc.Chain, chain) && acc.ChainID != 0 {
+			return acc.ChainID
+		}
+	}
+	if settings.ContributionToken != nil && strings.EqualFold(settings.ContributionToken.Chain, chain) {
+		return settings.ContributionToken.ChainID
+	}
+	return 0
 }
 
 // ── Counterparties ──────────────────────────────────────────────────────────
@@ -2759,16 +2720,13 @@ func relativeDiscordImagePathFromTimestamp(timestamp, attachmentID, ext string) 
 		t, err = time.Parse("2006-01-02T15:04:05+00:00", timestamp)
 	}
 	if err != nil {
-		return filepath.ToSlash(filepath.Join("messages", "discord", "images", attachmentID+ext))
+		return filepath.ToSlash(discordsource.ImageRelPath(attachmentID + ext))
 	}
 	t = t.In(BrusselsTZ())
 	return filepath.ToSlash(filepath.Join(
 		fmt.Sprintf("%d", t.Year()),
 		fmt.Sprintf("%02d", t.Month()),
-		"messages",
-		"discord",
-		"images",
-		attachmentID+ext,
+		discordsource.ImageRelPath(attachmentID+ext),
 	))
 }
 
@@ -2908,11 +2866,12 @@ func generateMembersGo(dataDir string, scopes []generateScope) {
 // for a given year/month.
 func loadCachedProviderSnapshots(dataDir, year, month string) []providerSnapshot {
 	var snapshots []providerSnapshot
-	monthPath := filepath.Join(dataDir, year, month)
 
-	providers := []string{"stripe", "odoo"}
-	for _, p := range providers {
-		snapPath := filepath.Join(monthPath, "finance", p, "subscriptions.json")
+	paths := []string{
+		stripesource.Path(dataDir, year, month, stripesource.SubscriptionsFile),
+		odoosource.Path(dataDir, year, month, odoosource.SubscriptionsFile),
+	}
+	for _, snapPath := range paths {
 		data, err := os.ReadFile(snapPath)
 		if err != nil {
 			continue
@@ -2922,7 +2881,6 @@ func loadCachedProviderSnapshots(dataDir, year, month string) []providerSnapshot
 			snapshots = append(snapshots, snap)
 		}
 	}
-
 	return snapshots
 }
 

@@ -250,6 +250,34 @@ func LocalTransactionCount(filePath string) int {
 	return len(cache.Transactions)
 }
 
+func MergeTransactions(existing, incoming []Transaction) []Transaction {
+	byID := make(map[string]Transaction, len(existing)+len(incoming))
+	for _, tx := range existing {
+		if tx.ID == "" {
+			continue
+		}
+		byID[tx.ID] = tx
+	}
+	for _, tx := range incoming {
+		if tx.ID == "" {
+			continue
+		}
+		byID[tx.ID] = tx
+	}
+
+	merged := make([]Transaction, 0, len(byID))
+	for _, tx := range byID {
+		merged = append(merged, tx)
+	}
+	sort.Slice(merged, func(i, j int) bool {
+		if merged[i].Created == merged[j].Created {
+			return merged[i].ID > merged[j].ID
+		}
+		return merged[i].Created > merged[j].Created
+	})
+	return merged
+}
+
 func StripSourceToID(source json.RawMessage) json.RawMessage {
 	if source == nil {
 		return nil
