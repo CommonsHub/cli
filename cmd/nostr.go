@@ -431,9 +431,15 @@ func parseAnnotation(uri string, ev NostrEvent) *TxAnnotation {
 	return a
 }
 
-// BuildStripeURI creates a NIP-73 URI for a Stripe balance transaction.
-func BuildStripeURI(txnID string) string {
-	return fmt.Sprintf("stripe:txn:%s", txnID)
+// BuildStripeURI returns a NIP-73-style URI for a Stripe object. The Stripe
+// id itself carries the type prefix (txn_…, cus_…, acct_…, ch_…), so we
+// don't repeat it as a URI segment.
+func BuildStripeURI(stripeID string) string {
+	v := strings.TrimSpace(stripeID)
+	if v == "" {
+		return ""
+	}
+	return "stripe:" + v
 }
 
 // BuildBlockchainURI creates a NIP-73 URI for a blockchain transaction.
@@ -456,17 +462,39 @@ func BuildBlockchainAddressURI(chainID int, chain, address string) string {
 	return "address:" + addr
 }
 
-// BuildStripeCustomerURI creates a NIP-73 style URI for a Stripe customer.
-// `customerID` should be the Stripe customer identifier (cus_…).
+// BuildStripeCustomerURI returns the URI for a Stripe customer (cus_…).
+// Same scheme as BuildStripeURI — the Stripe id prefix is self-describing.
 func BuildStripeCustomerURI(customerID string) string {
-	v := strings.TrimSpace(customerID)
-	if v == "" {
-		return ""
-	}
-	return "stripe:customer:" + v
+	return BuildStripeURI(customerID)
 }
 
-// parseAddressMetadata builds an AddressMetadata from a Nostr event.
+// BuildStripeAccountURI returns the URI for a Stripe connected account
+// (acct_…). Same scheme as BuildStripeURI.
+func BuildStripeAccountURI(accountID string) string {
+	return BuildStripeURI(accountID)
+}
+
+// BuildBlockchainTokenURI creates an `<chain>:<chainId>:token:<contract>` URI
+// for a token contract. Used as the counterparty when one side of a transfer
+// is the zero address (mint/burn) — receiving from 0x0 EURb vs 0x0 CHT are
+// semantically different and should resolve to the issuing contract.
+func BuildBlockchainTokenURI(chainID int, chain, contract string) string {
+	c := strings.ToLower(strings.TrimSpace(contract))
+	if c == "" {
+		return ""
+	}
+	if chainID > 0 {
+		return fmt.Sprintf("ethereum:%d:token:%s", chainID, c)
+	}
+	if chain != "" {
+		return fmt.Sprintf("%s:token:%s", strings.ToLower(chain), c)
+	}
+	return "token:" + c
+}
+
+// parseAddressMetadata builds an AddressMetadata from a Nostr event. Tags
+// take precedence (kind 1111 / NIP-73 style); when content holds a kind-0
+// style JSON profile, we fill in any fields the tags didn't set.
 func parseAddressMetadata(addr string, ev NostrEvent) *AddressMetadata {
 	m := &AddressMetadata{
 		Address:      addr,
@@ -474,7 +502,6 @@ func parseAddressMetadata(addr string, ev NostrEvent) *AddressMetadata {
 		NostrEventID: ev.ID,
 		Author:       ev.PubKey,
 		CreatedAt:    ev.CreatedAt,
-		About:        ev.Content,
 	}
 	skipTags := map[string]bool{"i": true, "k": true, "e": true, "p": true}
 	for _, tag := range ev.Tags {
@@ -492,7 +519,55 @@ func parseAddressMetadata(addr string, ev NostrEvent) *AddressMetadata {
 			m.Tags[tag[0]] = tag[1]
 		}
 	}
+	applyKind0Content(m, ev.Content)
 	return m
+}
+
+// applyKind0Content fills empty fields on m from a kind-0-style JSON profile
+// (`{"name":"…","display_name":"…","about":"…","picture":"…","website":"…","nip05":"…"}`).
+// When the content isn't JSON, it's used as an About fallback only when no
+// explicit about exists and it isn't just a copy of the name (so a publisher
+// that put the name in `content` doesn't end up duplicating it into `about`).
+func applyKind0Content(m *AddressMetadata, content string) {
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return
+	}
+	if strings.HasPrefix(content, "{") {
+		var profile struct {
+			Name        string `json:"name"`
+			DisplayName string `json:"display_name"`
+			About       string `json:"about"`
+			Picture     string `json:"picture"`
+			Website     string `json:"website"`
+			Nip05       string `json:"nip05"`
+		}
+		if err := json.Unmarshal([]byte(content), &profile); err == nil {
+			if m.Name == "" {
+				if profile.Name != "" {
+					m.Name = profile.Name
+				} else if profile.DisplayName != "" {
+					m.Name = profile.DisplayName
+				}
+			}
+			if m.About == "" {
+				m.About = profile.About
+			}
+			if m.Picture == "" {
+				m.Picture = profile.Picture
+			}
+			if profile.Website != "" && m.Tags["website"] == "" {
+				m.Tags["website"] = profile.Website
+			}
+			if profile.Nip05 != "" && m.Tags["nip05"] == "" {
+				m.Tags["nip05"] = profile.Nip05
+			}
+			return
+		}
+	}
+	if m.About == "" && content != m.Name {
+		m.About = content
+	}
 }
 
 // LoadNostrMetadataCache reads a metadata.json file. Returns an empty (but
@@ -513,7 +588,65 @@ func LoadNostrMetadataCache(path string) NostrMetadataCache {
 	if cache.Addresses == nil {
 		cache.Addresses = map[string]*AddressMetadata{}
 	}
+	// Sanitize on load so cache files written by an older code path (which
+	// dumped ev.Content into About, sometimes a kind-0 JSON profile and
+	// sometimes a copy of the name) are normalized in memory.
+	for _, md := range cache.Addresses {
+		sanitizeAddressMetadata(md)
+	}
 	return cache
+}
+
+// sanitizeAddressMetadata cleans up cached metadata: promotes JSON-content
+// `about` into Name/About/Picture, then drops About when it duplicates Name.
+func sanitizeAddressMetadata(m *AddressMetadata) {
+	if m == nil {
+		return
+	}
+	if strings.HasPrefix(strings.TrimSpace(m.About), "{") {
+		var profile struct {
+			Name        string `json:"name"`
+			DisplayName string `json:"display_name"`
+			About       string `json:"about"`
+			Picture     string `json:"picture"`
+			Website     string `json:"website"`
+			Nip05       string `json:"nip05"`
+		}
+		if err := json.Unmarshal([]byte(m.About), &profile); err == nil {
+			if m.Name == "" {
+				if profile.Name != "" {
+					m.Name = profile.Name
+				} else if profile.DisplayName != "" {
+					m.Name = profile.DisplayName
+				}
+			}
+			m.About = profile.About
+			if m.Picture == "" {
+				m.Picture = profile.Picture
+			}
+			if m.Tags == nil {
+				m.Tags = map[string]string{}
+			}
+			if profile.Website != "" && m.Tags["website"] == "" {
+				m.Tags["website"] = profile.Website
+			}
+			if profile.Nip05 != "" && m.Tags["nip05"] == "" {
+				m.Tags["nip05"] = profile.Nip05
+			}
+		}
+	}
+	if m.About == m.Name {
+		m.About = ""
+	}
+	// Legacy: when only `content` was set (no `name` tag), the old parser
+	// dumped it into About. Publishers typically meant that as the label —
+	// promote it to Name when Name is otherwise empty. We deliberately don't
+	// also keep it in About: a future re-sync (`chb nostr sync`) will
+	// populate both fields correctly from the actual tags.
+	if m.Name == "" && m.About != "" {
+		m.Name = m.About
+		m.About = ""
+	}
 }
 
 // MergeNostrMetadata merges incoming entries into base, keeping the entry with

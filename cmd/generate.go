@@ -206,13 +206,14 @@ func roundCents(v float64) float64 {
 }
 
 type TransactionEntry struct {
-	ID               string                 `json:"id"`
-	TxHash           string                 `json:"txHash"`
+	ID               string                 `json:"id"` // NIP-73 URI (matches the `i` tag used by Nostr annotations)
 	Provider         string                 `json:"provider"`
-	Chain            *string                `json:"chain"`
-	Account          string                 `json:"account"`
-	AccountSlug      string                 `json:"accountSlug"`
-	AccountName      string                 `json:"accountName"`
+	ProviderID       string                 `json:"providerId,omitempty"`
+	AccountID        string                 `json:"accountId,omitempty"`
+	CounterpartyID   string                 `json:"counterpartyId,omitempty"`
+	Chain            *string                `json:"chain,omitempty"`
+	AccountSlug      string                 `json:"accountSlug,omitempty"`
+	AccountName      string                 `json:"accountName,omitempty"`
 	Currency         string                 `json:"currency"`
 	Value            string                 `json:"value"`
 	Amount           float64                `json:"amount"`
@@ -221,10 +222,8 @@ type TransactionEntry struct {
 	NormalizedAmount float64                `json:"normalizedAmount"`
 	Fee              float64                `json:"fee"`
 	Type             string                 `json:"type"`
-	Counterparty     string                 `json:"counterparty"`
 	Timestamp        int64                  `json:"timestamp"`
 	Application      string                 `json:"application,omitempty"`
-	StripeChargeID   string                 `json:"stripeChargeId,omitempty"`
 	StripeCustomerID string                 `json:"stripeCustomerId,omitempty"`
 	Category         string                 `json:"category,omitempty"`
 	Collective       string                 `json:"collective,omitempty"`
@@ -232,6 +231,25 @@ type TransactionEntry struct {
 	Tags             [][]string             `json:"tags,omitempty"`
 	Metadata         map[string]interface{} `json:"metadata,omitempty"`
 	Spread           []SpreadEntry          `json:"spread,omitempty"`
+
+	// Internal-only (omitempty + cleared when building publicTxs). Kept on
+	// the struct so categorizer/rules/reconciliation logic and JSON fixtures
+	// keep working — but the canonical public handles are
+	// AccountID/CounterpartyID/ID/ProviderID.
+	TxHash         string `json:"txHash,omitempty"`
+	Account        string `json:"account,omitempty"`
+	Counterparty   string `json:"counterparty,omitempty"`
+	StripeChargeID string `json:"stripeChargeId,omitempty"`
+}
+
+// IsIncoming returns true for credits (CREDIT, MINT).
+func (tx TransactionEntry) IsIncoming() bool {
+	return tx.Type == "CREDIT" || tx.Type == "MINT"
+}
+
+// IsOutgoing returns true for debits (DEBIT, BURN).
+func (tx TransactionEntry) IsOutgoing() bool {
+	return tx.Type == "DEBIT" || tx.Type == "BURN"
 }
 
 type TransactionsFile struct {
@@ -2008,10 +2026,13 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 						}
 					}
 				}
-				// Merge inline metadata from expanded source
+				// Merge inline metadata from expanded source. See
+				// foldStripeMetadataValue: semantic keys (`name`,
+				// `display_name`, `collective`) are promoted; the rest get a
+				// `stripe_` prefix to avoid colliding with our own keys.
 				for k, v := range tx.Metadata {
 					if s, ok := v.(string); ok && s != "" {
-						metadata["stripe_"+k] = s
+						foldStripeMetadataValue(metadata, k, s)
 					}
 				}
 
@@ -2050,9 +2071,7 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 							metadata["paymentLink"] = ch.PaymentLink
 						}
 						for k, v := range ch.Metadata {
-							if _, exists := metadata["stripe_"+k]; !exists {
-								metadata["stripe_"+k] = v
-							}
+							foldStripeMetadataValue(metadata, k, v)
 						}
 						for k, v := range ch.CustomFields {
 							metadata["custom_"+k] = v
@@ -2066,7 +2085,10 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 				}
 
 				transactions = append(transactions, TransactionEntry{
-					ID:               fmt.Sprintf("stripe:%s", tx.ID),
+					ID:               BuildStripeURI(tx.ID),
+					ProviderID:       tx.ID,
+					AccountID:        BuildStripeAccountURI(stripeCacheFile.AccountID),
+					CounterpartyID:   BuildStripeCustomerURI(customerID),
 					TxHash:           tx.ID,
 					Provider:         "stripe",
 					Account:          "stripe",
@@ -2091,6 +2113,11 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 		}
 	}
 
+	// (chain, SYMBOL) → token contract address, used to build the
+	// `ethereum:<chainId>:token:<contract>` URI when one side of a transfer
+	// is the zero address (mint/burn).
+	tokenContracts := buildTokenContractIndex(settings)
+
 	// Process blockchain transactions (e.g. celo/CHT)
 	processChainDir := func(chain string) {
 		chainDir := etherscansource.Path(dataDir, year, month, chain)
@@ -2099,12 +2126,13 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 			return
 		}
 		internalHashes := internalTransferHashesFromChainDir(chainDir)
+		chainID := chainIDForSourceChain(settings, chain)
 
 		// Load Nostr metadata: per-month snapshot first, then merge with the
 		// timeless `latest/` registry so addresses labeled after this month
 		// was synced still get a name.
 		var nostrMeta NostrMetadataCache
-		if chainID := chainIDForSourceChain(settings, chain); chainID != 0 {
+		if chainID != 0 {
 			monthCache := LoadNostrMetadataCache(nostrsource.ChainMetadataPath(dataDir, year, month, chainID))
 			latestCache := LoadNostrMetadataCache(filepath.Join(dataDir, "latest", nostrsource.RelPath(strconv.Itoa(chainID), nostrsource.MetadataFile)))
 			nostrMeta = MergeNostrMetadata(latestCache, monthCache)
@@ -2138,6 +2166,8 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 				tokenSymbol = chain
 			}
 
+			tokenContract := tokenContracts[strings.ToLower(chain)+":"+strings.ToUpper(tokenSymbol)]
+
 			for _, tx := range txFile.Transactions {
 				dec := 18
 				if tx.TokenDecimal != "" {
@@ -2147,24 +2177,40 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 				amount := etherscansource.ParseTokenValue(tx.Value, dec)
 
 				zeroAddr := "0x0000000000000000000000000000000000000000"
+				fromZero := strings.EqualFold(tx.From, zeroAddr)
+				toZero := strings.EqualFold(tx.To, zeroAddr)
 				txType := "CREDIT"
+				accountSide := tx.To // address of "our" side
 				counterparty := tx.From
 				if accountAddr != "" {
-					// Wallet-specific tracking: outgoing = DEBIT
-					if strings.EqualFold(tx.From, accountAddr) {
+					// Wallet-specific tracking: outgoing = DEBIT, mints/burns
+					// touching this wallet are still classified as MINT/BURN.
+					accountSide = accountAddr
+					if fromZero {
+						txType = "MINT"
+						counterparty = tx.From
+					} else if toZero {
+						txType = "BURN"
+						counterparty = tx.To
+					} else if strings.EqualFold(tx.From, accountAddr) {
 						txType = "DEBIT"
 						counterparty = tx.To
 					}
 				} else {
 					// Token-wide tracking (e.g. CHT): classify by mint/burn/transfer
-					if strings.EqualFold(tx.From, zeroAddr) {
-						txType = "CREDIT" // mint
-					} else if strings.EqualFold(tx.To, zeroAddr) {
-						txType = "DEBIT" // burn
+					if fromZero {
+						txType = "MINT"
+						accountSide = tx.To
+						counterparty = tx.From
+					} else if toZero {
+						txType = "BURN"
+						accountSide = tx.From
+						counterparty = tx.To
 					} else {
 						txType = "TRANSFER" // regular transfer between addresses
+						accountSide = tx.From
+						counterparty = tx.To
 					}
-					counterparty = tx.From
 				}
 
 				// Detect internal transfers: both from and to are tracked accounts
@@ -2193,8 +2239,20 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 				fmt.Sscanf(tx.TimeStamp, "%d", &ts)
 
 				chainStr := chain
+				// counterpartyURI: when the other side is the zero address, the
+				// canonical counterparty is the token contract (otherwise EURb
+				// vs EURe vs CHT mints all collide on 0x0).
+				var counterpartyURI string
+				if strings.EqualFold(counterparty, zeroAddr) && tokenContract != "" {
+					counterpartyURI = BuildBlockchainTokenURI(chainID, chain, tokenContract)
+				} else {
+					counterpartyURI = BuildBlockchainAddressURI(chainID, chain, counterparty)
+				}
 				entry := TransactionEntry{
-					ID:               fmt.Sprintf("%s:%s", chain, tx.Hash[:Min(len(tx.Hash), 16)]),
+					ID:               BuildBlockchainURI(chainID, tx.Hash),
+					ProviderID:       tx.Hash,
+					AccountID:        BuildBlockchainAddressURI(chainID, chain, accountSide),
+					CounterpartyID:   counterpartyURI,
 					TxHash:           tx.Hash,
 					Provider:         "etherscan",
 					Chain:            &chainStr,
@@ -2216,16 +2274,6 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 					entry.Metadata = map[string]interface{}{
 						"direction": internalDirection,
 					}
-				}
-
-				// Preserve the raw counterparty address before Nostr name
-				// resolution so downstream consumers (e.g. counterparties.json)
-				// can build a stable NIP-73 address URI.
-				if counterparty != "" {
-					if entry.Metadata == nil {
-						entry.Metadata = map[string]interface{}{}
-					}
-					entry.Metadata["counterpartyAddress"] = strings.ToLower(counterparty)
 				}
 
 				// Enrich with Nostr metadata
@@ -2393,8 +2441,8 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 
 			// 1b. Auto-assign collective from Stripe metadata
 			if tx.Collective == "" {
-				// From payment link metadata: stripe_collective = "openletter"
-				if col, ok := tx.Metadata["stripe_collective"]; ok {
+				// From payment link metadata: collective = "openletter"
+				if col, ok := tx.Metadata["collective"]; ok {
 					if colStr, ok := col.(string); ok && colStr != "" {
 						tx.Collective = colStr
 					}
@@ -2487,6 +2535,12 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 	publicTxs := make([]TransactionEntry, len(transactions))
 	for i, tx := range transactions {
 		publicTxs[i] = tx
+		// Drop internal-only fields from public output. Canonical handles
+		// (id/providerId/accountId/counterpartyId) replace them.
+		publicTxs[i].TxHash = ""
+		publicTxs[i].Account = ""
+		publicTxs[i].Counterparty = ""
+		publicTxs[i].StripeChargeID = ""
 
 		// Extract PII: customer name (for Stripe) and email.
 		var piiName, piiEmail string
@@ -2495,19 +2549,16 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 		}
 
 		// For Stripe/Monerium, counterparty may be a person's name (PII).
-		// Blockchain 0x addresses are public, not PII.
-		if tx.Provider == "stripe" || tx.Provider == "monerium" {
+		// Blockchain 0x addresses are public, not PII. Monerium runs on
+		// etherscan but its plugin adds a `source:monerium` tag we can match.
+		isMonerium := transactionHasTag(tx, []string{"source", "monerium"})
+		if tx.Provider == "stripe" || isMonerium {
 			if tx.Counterparty != "" && !strings.HasPrefix(tx.Counterparty, "0x") {
 				piiName = tx.Counterparty
-				// Replace with description or generic label in public version.
-				if desc, ok := tx.Metadata["description"].(string); ok && desc != "" {
-					publicTxs[i].Counterparty = desc
-				} else if cat, ok := tx.Metadata["category"].(string); ok && cat != "" {
-					publicTxs[i].Counterparty = tx.Provider + " " + cat
-				} else {
-					publicTxs[i].Counterparty = tx.Provider + " " + strings.ToLower(tx.Type)
-				}
 			}
+			// Drop the display counterparty entirely — counterpartyId is the
+			// canonical handle and counterparties.json owns any safe metadata.
+			publicTxs[i].Counterparty = ""
 		}
 
 		// Strip ANY email-looking value from public metadata. Merchant-side
@@ -2518,7 +2569,7 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 		if len(tx.Metadata) > 0 {
 			publicMeta := make(map[string]interface{}, len(tx.Metadata))
 			for k, v := range tx.Metadata {
-				if s, ok := v.(string); ok && emailPattern.MatchString(s) {
+				if s, ok := v.(string); ok && containsEmail(s) {
 					if piiEmail == "" {
 						piiEmail = s
 					}
@@ -2601,6 +2652,90 @@ func internalTransferHashesFromChainDir(chainDir string) map[string]bool {
 		}
 	}
 	return internal
+}
+
+// foldStripeMetadataValue writes a single Stripe metadata pair into the
+// canonical tx metadata map. Semantic keys (`name`/`display_name`/`displayName`
+// → bare `name`, filtered through safeFirstName; `collective` → bare
+// `collective`) are promoted out of the `stripe_*` namespace so frontends can
+// read them uniformly. The filter on `name` guards against a merchant
+// labelling a field "name" and the customer pasting a full name or email.
+func foldStripeMetadataValue(metadata map[string]interface{}, k, v string) {
+	if v == "" {
+		return
+	}
+	switch k {
+	case "name", "display_name", "displayName":
+		safe := safeFirstName(v)
+		if safe == "" {
+			return
+		}
+		if _, exists := metadata["name"]; !exists {
+			metadata["name"] = safe
+		}
+	case "collective":
+		if _, exists := metadata["collective"]; !exists {
+			metadata["collective"] = v
+		}
+	default:
+		key := "stripe_" + k
+		if _, exists := metadata[key]; !exists {
+			metadata[key] = v
+		}
+	}
+}
+
+// safeFirstName returns a privacy-safe first token from a free-text input.
+// Returns "" when the value looks like an email or exceeds a sane length.
+func safeFirstName(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" || strings.Contains(s, "@") {
+		return ""
+	}
+	parts := strings.Fields(s)
+	if len(parts) == 0 {
+		return ""
+	}
+	first := parts[0]
+	if strings.Contains(first, "@") || len(first) > 30 {
+		return ""
+	}
+	return first
+}
+
+// buildTokenContractIndex returns a (lowercase chain) + (uppercase symbol) →
+// contract-address map drawn from FinanceAccount.Token and tokens.json. Used
+// to resolve mint/burn counterparties (the zero address) to the token's
+// contract.
+func buildTokenContractIndex(settings *Settings) map[string]string {
+	out := map[string]string{}
+	if settings != nil {
+		for _, acc := range settings.Finance.Accounts {
+			if acc.Token == nil || acc.Token.Address == "" || acc.Chain == "" || acc.Token.Symbol == "" {
+				continue
+			}
+			key := strings.ToLower(acc.Chain) + ":" + strings.ToUpper(acc.Token.Symbol)
+			if _, exists := out[key]; !exists {
+				out[key] = strings.ToLower(acc.Token.Address)
+			}
+		}
+		if t := settings.ContributionToken; t != nil && t.Address != "" && t.Chain != "" && t.Symbol != "" {
+			key := strings.ToLower(t.Chain) + ":" + strings.ToUpper(t.Symbol)
+			if _, exists := out[key]; !exists {
+				out[key] = strings.ToLower(t.Address)
+			}
+		}
+	}
+	for _, t := range LoadTokenConfigs() {
+		if t.Address == "" || t.Chain == "" || t.Symbol == "" {
+			continue
+		}
+		key := strings.ToLower(t.Chain) + ":" + strings.ToUpper(t.Symbol)
+		if _, exists := out[key]; !exists {
+			out[key] = strings.ToLower(t.Address)
+		}
+	}
+	return out
 }
 
 func chainIDForSourceChain(settings *Settings, chain string) int {
@@ -2730,11 +2865,12 @@ func counterpartyIdentity(tx TransactionEntry, settings *Settings) (id, address,
 			// object — there's no canonical id to dedup against, so skip.
 			return "", "", "", 0
 		}
-		// Don't carry the Stripe customer name into counterparties.json — it's
-		// PII, and tx.Counterparty often falls back to the tx description
-		// ("Subscription update", "Financial contribution to …") rather than
-		// the actual person. The URI is enough to anonymously group txs.
-		return BuildStripeCustomerURI(tx.StripeCustomerID), "", "", 0
+		// We only carry a name when the Stripe metadata explicitly contained
+		// `name` or `display_name` (already filtered through safeFirstName
+		// at metadata-fold time, sitting in metadata["name"]). Anything else
+		// — billing names, description fallbacks — is treated as PII.
+		name := stringMetadata(tx.Metadata, "name")
+		return BuildStripeCustomerURI(tx.StripeCustomerID), "", name, 0
 
 	default:
 		if display == "" {

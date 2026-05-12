@@ -129,8 +129,9 @@ func TransactionsStats(args []string) {
 				}
 
 				absAmount := math.Abs(amount)
+				incoming := tx.IsIncoming() || (!tx.IsOutgoing() && amount > 0)
 				if isEURCurrency(currency) {
-					if tx.Type == "CREDIT" || amount > 0 {
+					if incoming {
 						ss.In += absAmount
 						ms.In += absAmount
 						totalIn += absAmount
@@ -141,7 +142,7 @@ func TransactionsStats(args []string) {
 					}
 				} else {
 					// Non-EUR token: track in/out without adding to EUR totals
-					if tx.Type == "CREDIT" || amount > 0 {
+					if incoming {
 						ss.In += absAmount
 					} else {
 						ss.Out += absAmount

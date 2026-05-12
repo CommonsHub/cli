@@ -245,8 +245,14 @@ func TransactionsPublish(args []string) error {
 
 // uriKind returns the "K" tag value for a URI.
 func uriKind(uri string) string {
-	if strings.HasPrefix(uri, "stripe:txn:") {
-		return "stripe:txn"
+	if strings.HasPrefix(uri, "stripe:") {
+		// Stripe IDs carry the type as a prefix (txn_, cus_, acct_, ch_, …),
+		// so we promote that prefix to the K tag (e.g. stripe:txn_123 → stripe:txn).
+		rest := strings.TrimPrefix(uri, "stripe:")
+		if idx := strings.Index(rest, "_"); idx > 0 {
+			return "stripe:" + rest[:idx]
+		}
+		return "stripe"
 	}
 	if strings.HasPrefix(uri, "ethereum:") {
 		parts := strings.SplitN(uri, ":", 4)

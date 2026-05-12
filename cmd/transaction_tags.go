@@ -98,7 +98,7 @@ func normalizeTransactionTagSlug(value string) string {
 }
 
 func transactionTagValueLooksPrivate(value string) bool {
-	return emailPattern.MatchString(value) || ibanLikePattern.MatchString(value)
+	return containsEmail(value) || ibanLikePattern.MatchString(value)
 }
 
 func normalizeTransactionTags(tags [][]string) [][]string {

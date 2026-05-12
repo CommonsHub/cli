@@ -139,21 +139,47 @@ func TestGenerateTransactionsGoUsesStripeEtherscanAndMoneriumSources(t *testing.
 	for _, tx := range out.Transactions {
 		byProvider[tx.Provider] = tx
 	}
-	if byProvider["stripe"].ID != "stripe:txn_stripe" {
-		t.Fatalf("stripe transaction missing: %#v", out.Transactions)
+	if got := byProvider["stripe"].ID; got != "stripe:txn_stripe" {
+		t.Fatalf("stripe id = %q, want stripe:txn_stripe (txs=%#v)", got, out.Transactions)
+	}
+	if got := byProvider["stripe"].AccountID; got != "stripe:acct_test" {
+		t.Fatalf("stripe accountId = %q, want stripe:acct_test", got)
 	}
 	chainTx := byProvider["etherscan"]
-	if chainTx.TxHash != hash {
+	if chainTx.ProviderID != hash {
 		t.Fatalf("etherscan transaction missing: %#v", out.Transactions)
 	}
-	if chainTx.Counterparty != "Bank Sender" {
-		t.Fatalf("monerium counterparty = %q, want Bank Sender", chainTx.Counterparty)
+	if want := "ethereum:100:tx:" + hash; chainTx.ID != want {
+		t.Fatalf("etherscan id = %q, want %q", chainTx.ID, want)
+	}
+	if want := "ethereum:100:address:0xabc0000000000000000000000000000000000000"; chainTx.AccountID != want {
+		t.Fatalf("etherscan accountId = %q, want %q", chainTx.AccountID, want)
+	}
+	if want := "ethereum:100:address:0xdead000000000000000000000000000000000000"; chainTx.CounterpartyID != want {
+		t.Fatalf("etherscan counterpartyId = %q, want %q", chainTx.CounterpartyID, want)
+	}
+	// Monerium counterparty name is PII and must not appear in the public tx.
+	if chainTx.Counterparty != "" {
+		t.Fatalf("monerium counterparty leaked into public output: %q", chainTx.Counterparty)
 	}
 	if got := stringMetadata(chainTx.Metadata, "memo"); got != "SEPA topup" {
 		t.Fatalf("monerium memo = %q, want SEPA topup", got)
 	}
 	if !transactionHasTag(chainTx, []string{"source", "monerium"}) || !transactionHasTag(chainTx, []string{"status", "processed"}) {
 		t.Fatalf("missing monerium tags: %#v", chainTx.Tags)
+	}
+
+	// PII (the bank-counterparty name) must be captured in the private file.
+	piiData, err := os.ReadFile(filepath.Join(dataDir, "2026", "04", "generated", "private", "enrichment.json"))
+	if err != nil {
+		t.Fatalf("read enrichment.json: %v", err)
+	}
+	var piiFile TransactionsPIIFile
+	if err := json.Unmarshal(piiData, &piiFile); err != nil {
+		t.Fatalf("unmarshal enrichment.json: %v", err)
+	}
+	if got := piiFile.Enrichments[chainTx.ID]; got == nil || got.Name != "Bank Sender" {
+		t.Fatalf("expected PII name 'Bank Sender' for %q, got %#v", chainTx.ID, got)
 	}
 }
 

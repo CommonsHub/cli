@@ -90,10 +90,10 @@ func (r *Rule) MatchesTransaction(tx TransactionEntry) bool {
 	}
 
 	if m.Direction != "" {
-		if m.Direction == "in" && tx.Type != "CREDIT" {
+		if m.Direction == "in" && !tx.IsIncoming() {
 			return false
 		}
-		if m.Direction == "out" && tx.Type != "DEBIT" {
+		if m.Direction == "out" && !tx.IsOutgoing() {
 			return false
 		}
 	}
@@ -111,7 +111,7 @@ func (r *Rule) MatchesTransaction(tx TransactionEntry) bool {
 	}
 
 	if m.Sender != "" {
-		if tx.Type != "CREDIT" {
+		if !tx.IsIncoming() {
 			return false
 		}
 		target := strings.ToLower(tx.Counterparty)
@@ -121,7 +121,7 @@ func (r *Rule) MatchesTransaction(tx TransactionEntry) bool {
 	}
 
 	if m.Recipient != "" {
-		if tx.Type != "DEBIT" {
+		if !tx.IsOutgoing() {
 			return false
 		}
 		target := strings.ToLower(tx.Counterparty)

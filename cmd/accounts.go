@@ -415,9 +415,9 @@ func computeAccountSummaries() map[string]*accountSummary {
 				}
 
 				switch tx.Type {
-				case "CREDIT":
+				case "CREDIT", "MINT":
 					s.Balance += math.Abs(amount)
-				case "DEBIT":
+				case "DEBIT", "BURN":
 					s.Balance -= math.Abs(amount)
 				}
 
@@ -531,10 +531,10 @@ func accountTotalsFromGeneratedTransactions(acc *AccountConfig, txs []Transactio
 			case "CREDIT":
 				totals.InternalTransfers += math.Abs(amount)
 			}
-		case "CREDIT":
+		case "CREDIT", "MINT":
 			totals.GrossIncome += math.Abs(gross)
 			totals.TxFees += tx.Fee
-		case "DEBIT":
+		case "DEBIT", "BURN":
 			if accountTransactionLooksLikeFee(tx) {
 				totals.OtherFees += math.Abs(amount)
 			} else {
@@ -573,9 +573,9 @@ func signedAccountTransactionAmount(acc *AccountConfig, tx TransactionEntry) flo
 			return -math.Abs(amount)
 		}
 		return math.Abs(amount)
-	case "DEBIT":
+	case "DEBIT", "BURN":
 		return -math.Abs(amount)
-	case "CREDIT":
+	case "CREDIT", "MINT":
 		return math.Abs(amount)
 	default:
 		return amount
@@ -2459,7 +2459,7 @@ func accountLocalTransactionDirection(acc *AccountConfig, tx TransactionEntry) s
 	if tx.Type == "INTERNAL" {
 		return internalTransactionDirection(acc, tx)
 	}
-	if strings.EqualFold(tx.Type, "DEBIT") {
+	if tx.IsOutgoing() {
 		return "DEBIT"
 	}
 	return "CREDIT"
@@ -3429,7 +3429,7 @@ func signedOdooAmountForTransaction(acc *AccountConfig, tx TransactionEntry) flo
 		}
 		return math.Abs(amt)
 	}
-	if tx.Type == "DEBIT" {
+	if tx.IsOutgoing() {
 		return -math.Abs(amt)
 	}
 	return math.Abs(amt)

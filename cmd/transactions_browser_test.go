@@ -228,11 +228,11 @@ func TestBulkCategoryAssignmentUpdatesSelectedTransactions(t *testing.T) {
 	if err := json.Unmarshal(annData, &cache); err != nil {
 		t.Fatalf("unmarshal annotations: %v", err)
 	}
-	if cache.Annotations["stripe:txn:txn_1"].Category != "accounting" || cache.Annotations["stripe:txn:txn_2"].Category != "accounting" {
+	if cache.Annotations["stripe:txn_1"].Category != "accounting" || cache.Annotations["stripe:txn_2"].Category != "accounting" {
 		t.Fatalf("annotations = %#v", cache.Annotations)
 	}
-	if cache.Annotations["stripe:txn:txn_3"] != nil {
-		t.Fatalf("unselected tx should not have annotation: %#v", cache.Annotations["stripe:txn:txn_3"])
+	if cache.Annotations["stripe:txn_3"] != nil {
+		t.Fatalf("unselected tx should not have annotation: %#v", cache.Annotations["stripe:txn_3"])
 	}
 }
 
@@ -363,9 +363,9 @@ func TestBuildTransactionAnnotationEventUsesNIP73Tags(t *testing.T) {
 	}
 
 	for _, want := range [][]string{
-		{"I", "stripe:txn:txn_123"},
+		{"I", "stripe:txn_123"},
 		{"K", "stripe:txn"},
-		{"i", "stripe:txn:txn_123"},
+		{"i", "stripe:txn_123"},
 		{"k", "stripe:txn"},
 		{"category", "bookkeeping"},
 		{"collective", "new-collective"},
@@ -401,7 +401,7 @@ func TestPersistTransactionAnnotationToNostrSource(t *testing.T) {
 	if err := json.Unmarshal(data, &cache); err != nil {
 		t.Fatalf("unmarshal annotations file: %v", err)
 	}
-	ann := cache.Annotations["stripe:txn:txn_123"]
+	ann := cache.Annotations["stripe:txn_123"]
 	if ann == nil {
 		t.Fatalf("missing annotation in %#v", cache.Annotations)
 	}
@@ -477,7 +477,7 @@ func TestEditAssignmentUpdatesCategoryAndCollectiveWithOnePublishCommand(t *test
 	if err := json.Unmarshal(annData, &cache); err != nil {
 		t.Fatalf("unmarshal annotations: %v", err)
 	}
-	ann := cache.Annotations["stripe:txn:txn_1"]
+	ann := cache.Annotations["stripe:txn_1"]
 	if ann == nil || ann.Category != "accounting" || ann.Collective != "commons-hub" {
 		t.Fatalf("annotation = %#v", ann)
 	}

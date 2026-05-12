@@ -74,19 +74,24 @@ var nameFieldKeys = map[string]struct{}{
 }
 
 // piiSoftAllowlist suppresses the "email in <field>" soft warning for known
-// non-PII identifiers: Luma event IDs and Google Calendar UIDs, which embed
-// an "@" in their ID but aren't actually mailboxes. Keyed by the JSON leaf
-// key (lowercased). Each pattern is matched against the whole value.
+// non-PII identifiers that embed an "@" in their ID but aren't actually
+// mailboxes. Keyed by the JSON leaf key (lowercased). Each pattern is matched
+// against the whole value.
+//
+// Luma event IDs (@events.lu.ma) are handled globally in containsEmail and
+// don't need a field entry here.
 //
 // The /hard/ check on name fields is unaffected — only these specific fields
 // get the soft-warning exemption.
 var piiSoftAllowlist = map[string][]*regexp.Regexp{
 	"id": {
-		regexp.MustCompile(`@events\.lu\.ma$`),
+		regexp.MustCompile(`@google\.com$`),
+	},
+	"event": {
+		// Google Calendar event UIDs (e.g. 4lk13p4bfk66fhaj4humbbthvu@google.com)
 		regexp.MustCompile(`@google\.com$`),
 	},
 	"coverimagelocal": {
-		regexp.MustCompile(`@events\.lu\.ma\.(jpg|jpeg|png|webp)$`),
 		regexp.MustCompile(`@google\.com\.(jpg|jpeg|png|webp)$`),
 	},
 }
@@ -194,8 +199,28 @@ func redactEmail(s string) string {
 	})
 }
 
+// containsEmail reports whether s contains an email-shaped value that should
+// be treated as PII. Luma event IDs (foo@events.lu.ma) and similar opaque
+// identifiers that happen to be syntactically valid emails are not PII and
+// are excluded here, so callers don't need to special-case them.
 func containsEmail(s string) bool {
-	return emailPattern.MatchString(s)
+	for _, match := range emailPattern.FindAllString(s, -1) {
+		if !isNonMailboxIdentifier(match) {
+			return true
+		}
+	}
+	return false
+}
+
+// nonMailboxIdentifierPattern matches Luma event IDs whether they appear bare
+// (`abc@events.lu.ma`) or with a trailing extension (`abc@events.lu.ma.jpg`,
+// used for cover-image filenames).
+var nonMailboxIdentifierPattern = regexp.MustCompile(`(?i)@events\.lu\.ma(\.[a-z0-9]+)?$`)
+
+// isNonMailboxIdentifier reports whether an email-shaped string is actually
+// an opaque identifier rather than a mailbox (e.g. Luma event IDs).
+func isNonMailboxIdentifier(addr string) bool {
+	return nonMailboxIdentifierPattern.MatchString(addr)
 }
 
 // scrubNameFields rewrites firstName/lastName/name values that contain an email

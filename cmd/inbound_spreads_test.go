@@ -34,8 +34,8 @@ func TestRebuildInboundSpreadsAndAccrualAggregation(t *testing.T) {
 	}`)
 	writeJSONFixture(t, filepath.Join(dataDir, "2025", "12", "sources", "nostr", "transaction-annotations.json"), `{
 	  "annotations": {
-	    "stripe:txn:ch_aaa": {
-	      "uri": "stripe:txn:ch_aaa",
+	    "stripe:ch_aaa": {
+	      "uri": "stripe:ch_aaa",
 	      "category": "insurance",
 	      "collective": "commonshub",
 	      "spread": [
@@ -116,7 +116,7 @@ func TestRebuildInboundSpreadsAndAccrualAggregation(t *testing.T) {
 func TestRebuildInboundSpreadsClearsOrphans(t *testing.T) {
 	dataDir := t.TempDir()
 	// Pretend a previous rebuild left an orphan.
-	writeJSONFixture(t, filepath.Join(dataDir, "2026", "06", "generated", "inbound_spreads.json"), `{"inbound":[{"uri":"stripe:txn:old","naturalYM":"2024-01","amount":"-100"}]}`)
+	writeJSONFixture(t, filepath.Join(dataDir, "2026", "06", "generated", "inbound_spreads.json"), `{"inbound":[{"uri":"stripe:old","naturalYM":"2024-01","amount":"-100"}]}`)
 	// No annotations at all → rebuild should remove the orphan.
 	if err := rebuildInboundSpreads(dataDir); err != nil {
 		t.Fatalf("rebuildInboundSpreads: %v", err)

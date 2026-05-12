@@ -38,7 +38,7 @@ func txAmount(tx TransactionEntry) float64 {
 func txAmountCell(tx TransactionEntry, styled bool) string {
 	amt := txAmount(tx)
 	absAmt := math.Abs(amt)
-	positive := tx.Type == "CREDIT"
+	positive := tx.IsIncoming()
 	if !isEURCurrency(tx.Currency) && tx.Type == "TRANSFER" {
 		positive = true
 	}
@@ -1413,7 +1413,7 @@ func txSpreadTotal(tx TransactionEntry) float64 {
 	if total < 0 {
 		total = -total
 	}
-	if strings.EqualFold(tx.Type, "DEBIT") {
+	if tx.IsOutgoing() {
 		total = -total
 	}
 	return total
@@ -1971,9 +1971,9 @@ func (m txBrowserModel) renderTable() string {
 	for _, tx := range filteredTxs {
 		amt := math.Abs(txAmount(tx))
 		if isEURCurrency(tx.Currency) {
-			if tx.Type == "CREDIT" {
+			if tx.IsIncoming() {
 				totalIn += amt
-			} else if tx.Type == "DEBIT" {
+			} else if tx.IsOutgoing() {
 				totalOut += amt
 			}
 		}
