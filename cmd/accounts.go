@@ -2793,8 +2793,10 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 
 	var missing []TransactionEntry
 	partnerUpdates := 0
+	localByImportID := map[string][]TransactionEntry{}
 	for _, tx := range localTxs {
 		importID := buildUniqueImportID(acc, tx)
+		localByImportID[importID] = append(localByImportID[importID], tx)
 		if existingIDs[importID] {
 			if !dryRun {
 				if updated, err := ensureOdooStatementLinePartnerBank(creds, uid, acc.OdooJournalID, importID, tx); err == nil && updated {
@@ -2806,6 +2808,10 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 			continue
 		}
 		missing = append(missing, tx)
+	}
+
+	if useHistory && len(localTxs) > len(existingIDs) && len(missing) == 0 {
+		reportLocalImportIDCollisions(creds, uid, acc, localByImportID, existingIDs)
 	}
 
 	if len(missing) == 0 {
@@ -3403,7 +3409,10 @@ func buildOdooPaymentRef(tx TransactionEntry) string {
 		paymentRef = txDisplayDescription(tx)
 	}
 	if paymentRef == "" {
-		paymentRef = tx.Provider + " " + strings.ToLower(tx.Type)
+		paymentRef = strings.ToLower(tx.Type)
+		if tx.Currency != "" {
+			paymentRef += " " + tx.Currency
+		}
 	}
 	return paymentRef
 }
@@ -3743,6 +3752,177 @@ func buildUniqueImportID(acc *AccountConfig, tx TransactionEntry) string {
 		txHash = tx.ID
 	}
 	return fmt.Sprintf("%s:%s:%s:%d", chain, strings.ToLower(address), strings.ToLower(txHash), tx.LogIndex)
+}
+
+// reportLocalImportIDCollisions explains why the dedup pass reported "0
+// missing" even though local has more txs than Odoo. Two scenarios:
+//
+//   - Local collision: two local txs build the same unique_import_id and
+//     therefore share a single Odoo line.
+//   - Cross-journal collision: the local import_id exists in Odoo, but on
+//     a different journal — the sync's per-journal existingIDs lookup
+//     misses it, and Odoo's global uniqueness constraint blocks insertion.
+//
+// Both are listed so the operator can see exactly which rows are off.
+func reportLocalImportIDCollisions(creds *OdooCredentials, uid int, acc *AccountConfig, localByImportID map[string][]TransactionEntry, existingIDs map[string]bool) {
+	type collision struct {
+		ImportID string
+		Txs      []TransactionEntry
+	}
+	var collisions []collision
+	uniqueLocal := 0
+	for id, txs := range localByImportID {
+		uniqueLocal++
+		if len(txs) > 1 {
+			collisions = append(collisions, collision{ImportID: id, Txs: txs})
+		}
+	}
+
+	// Cross-journal check: for every local import_id, find the journal(s)
+	// that already hold a line under it. Anything not on acc.OdooJournalID
+	// is a cross-journal collision and explains drift the per-journal
+	// existingIDs lookup can't see.
+	localIDs := make([]string, 0, len(localByImportID))
+	for id := range localByImportID {
+		localIDs = append(localIDs, id)
+	}
+	odooLineLocations, locErr := fetchImportIDJournals(creds, uid, localIDs)
+	type crossJournal struct {
+		ImportID  string
+		JournalID int
+		Tx        TransactionEntry
+	}
+	var crossJournals []crossJournal
+	if locErr == nil {
+		for id, journalID := range odooLineLocations {
+			if journalID == acc.OdooJournalID {
+				continue
+			}
+			for _, tx := range localByImportID[id] {
+				crossJournals = append(crossJournals, crossJournal{ImportID: id, JournalID: journalID, Tx: tx})
+			}
+		}
+	}
+
+	if len(collisions) == 0 && len(crossJournals) == 0 {
+		Warnf("  %s⚠ Drift unexplained: %d unique local import_ids all match Odoo journal #%d, but the journal has %d lines.%s",
+			Fmt.Yellow, uniqueLocal, acc.OdooJournalID, len(existingIDs), Fmt.Reset)
+		Warnf("  %s  Some Odoo lines may have no local counterpart. Run: chb odoo journals %d (detail view lists missing-on-Odoo / missing-locally).%s",
+			Fmt.Yellow, acc.OdooJournalID, Fmt.Reset)
+		return
+	}
+
+	if len(crossJournals) > 0 {
+		// Cache journal names we don't already know about.
+		journalsSeen := map[int]bool{}
+		for _, c := range crossJournals {
+			if !journalsSeen[c.JournalID] {
+				journalsSeen[c.JournalID] = true
+				if OdooJournalName(c.JournalID) == "" {
+					_, _ = FetchAndCacheOdooJournalName(creds, uid, c.JournalID)
+				}
+			}
+		}
+		sort.Slice(crossJournals, func(i, j int) bool {
+			if crossJournals[i].JournalID != crossJournals[j].JournalID {
+				return crossJournals[i].JournalID < crossJournals[j].JournalID
+			}
+			return crossJournals[i].ImportID < crossJournals[j].ImportID
+		})
+		Warnf("  %s⚠ %s of journal #%d live on a different Odoo journal — unique_import_id is globally unique, so these can't be inserted on #%d until the wrong-journal line is moved or deleted.%s",
+			Fmt.Yellow, Pluralize(len(crossJournals), "local tx", ""), acc.OdooJournalID, acc.OdooJournalID, Fmt.Reset)
+		for _, c := range crossJournals {
+			t := time.Unix(c.Tx.Timestamp, 0).In(BrusselsTZ())
+			amt := signedOdooAmountForTransaction(acc, c.Tx)
+			name := OdooJournalName(c.JournalID)
+			if name != "" {
+				name = " (" + name + ")"
+			}
+			fmt.Printf("    %s%s  %12s  logIndex=%d  %s%s\n      %sin journal #%d%s  import_id=%s%s\n",
+				Fmt.Dim, t.Format("2006-01-02 15:04"), fmtEURSigned(amt), c.Tx.LogIndex, c.Tx.TxHash, Fmt.Reset,
+				Fmt.Dim, c.JournalID, name, c.ImportID, Fmt.Reset)
+		}
+		fmt.Println()
+	} else if locErr != nil {
+		Warnf("  %s⚠ Could not check cross-journal collisions: %v%s", Fmt.Yellow, locErr, Fmt.Reset)
+	}
+
+	if len(collisions) > 0 {
+		sort.Slice(collisions, func(i, j int) bool { return collisions[i].ImportID < collisions[j].ImportID })
+		Warnf("  %s⚠ %s share an import_id with another local tx — Odoo can only hold one line per import_id, so the extras are silently treated as duplicates.%s",
+			Fmt.Yellow, Pluralize(len(collisions), "local tx group", ""), Fmt.Reset)
+		Warnf("  %s  Likely cause: LogIndex collision on the local side (two transfers in the same tx with logIndex=0, or the same tx loaded twice from different source files).%s",
+			Fmt.Yellow, Fmt.Reset)
+		for _, c := range collisions {
+			fmt.Printf("    %simport_id=%s  (%d local txs):%s\n", Fmt.Dim, c.ImportID, len(c.Txs), Fmt.Reset)
+			for _, tx := range c.Txs {
+				t := time.Unix(tx.Timestamp, 0).In(BrusselsTZ())
+				amt := signedOdooAmountForTransaction(acc, tx)
+				fmt.Printf("      %s  %12s  logIndex=%d  %s  cp=%s\n",
+					t.Format("2006-01-02 15:04"), fmtEURSigned(amt), tx.LogIndex, tx.TxHash, tx.Counterparty)
+			}
+		}
+		fmt.Println()
+	}
+}
+
+
+// fetchImportIDJournals returns importID → journalID for any Odoo
+// account.bank.statement.line whose unique_import_id matches one of the
+// supplied IDs, across all journals. Used to surface cross-journal
+// collisions during sync.
+func fetchImportIDJournals(creds *OdooCredentials, uid int, importIDs []string) (map[string]int, error) {
+	out := map[string]int{}
+	if len(importIDs) == 0 {
+		return out, nil
+	}
+	const batch = 200
+	for i := 0; i < len(importIDs); i += batch {
+		end := i + batch
+		if end > len(importIDs) {
+			end = len(importIDs)
+		}
+		ids := make([]interface{}, len(importIDs[i:end]))
+		for j, s := range importIDs[i:end] {
+			ids[j] = s
+		}
+		data, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
+			"account.bank.statement.line", "search_read",
+			[]interface{}{[]interface{}{
+				[]interface{}{"unique_import_id", "in", ids},
+			}},
+			map[string]interface{}{
+				"fields": []string{"unique_import_id", "journal_id"},
+				"limit":  0,
+			})
+		if err != nil {
+			return out, err
+		}
+		var lines []struct {
+			UniqueImportID interface{} `json:"unique_import_id"`
+			JournalID      interface{} `json:"journal_id"`
+		}
+		if err := json.Unmarshal(data, &lines); err != nil {
+			return out, err
+		}
+		for _, line := range lines {
+			id, _ := line.UniqueImportID.(string)
+			if id == "" {
+				continue
+			}
+			// Odoo returns many2one as [id, "Name"] tuples.
+			tuple, ok := line.JournalID.([]interface{})
+			if !ok || len(tuple) == 0 {
+				continue
+			}
+			jid, ok := tuple[0].(float64)
+			if !ok {
+				continue
+			}
+			out[id] = int(jid)
+		}
+	}
+	return out, nil
 }
 
 // fetchOdooImportIDs returns the set of unique_import_id values already in Odoo for a journal.
