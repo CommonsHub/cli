@@ -241,6 +241,13 @@ type TransactionEntry struct {
 	// keep working — but the canonical public handles are
 	// AccountID/CounterpartyID/ID/ProviderID.
 	TxHash         string `json:"txHash,omitempty"`
+	// LogIndex disambiguates multiple transfers sharing the same TxHash
+	// (e.g. a Safe multisend or DEX swap emits several ERC-20 Transfer
+	// events in one tx). It's the 0-based ordinal of this transfer
+	// among the same (account, hash) group as returned by etherscan.
+	// Single-transfer txs — the common case — keep LogIndex=0 and
+	// remain compatible with existing Odoo unique_import_id values.
+	LogIndex       int    `json:"logIndex,omitempty"`
 	Account        string `json:"account,omitempty"`
 	Counterparty   string `json:"counterparty,omitempty"`
 	StripeChargeID string `json:"stripeChargeId,omitempty"`
@@ -298,6 +305,12 @@ func (tx *TransactionEntry) UnmarshalJSON(data []byte) error {
 		tx.Collective = aux.Collective
 	} else if tx.Collective == "" {
 		tx.Collective = stringMetadata(tx.Metadata, "collective")
+	}
+	// Public transactions.json strips TxHash (the canonical handle is the
+	// NIP-73 ID URI). Restore it on load so verification, Odoo push and
+	// orphan detection don't compare against an empty hash.
+	if tx.TxHash == "" {
+		tx.TxHash = TxHashFromURI(tx.ID)
 	}
 	return nil
 }
@@ -2276,6 +2289,12 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 
 			tokenContract := tokenContracts[strings.ToLower(chain)+":"+strings.ToUpper(tokenSymbol)]
 
+			// Per-(account, txHash) ordinal — etherscan returns transfers in
+			// log order, so the first occurrence is logIndex=0, second is 1,
+			// etc. The cache file is already scoped to one account+token, so
+			// resetting per file is correct.
+			txHashCounter := map[string]int{}
+
 			for _, tx := range txFile.Transactions {
 				dec := 18
 				if tx.TokenDecimal != "" {
@@ -2356,12 +2375,17 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 				} else {
 					counterpartyURI = BuildBlockchainAddressURI(chainID, chain, counterparty)
 				}
+				hashKey := strings.ToLower(tx.Hash)
+				logIndex := txHashCounter[hashKey]
+				txHashCounter[hashKey]++
+
 				entry := TransactionEntry{
 					ID:               BuildBlockchainURI(chainID, tx.Hash),
 					ProviderID:       tx.Hash,
 					AccountID:        BuildBlockchainAddressURI(chainID, chain, accountSide),
 					CounterpartyID:   counterpartyURI,
 					TxHash:           tx.Hash,
+					LogIndex:         logIndex,
 					Provider:         "etherscan",
 					Chain:            &chainStr,
 					Account:          accountAddr,

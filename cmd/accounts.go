@@ -2014,7 +2014,7 @@ func verifyJournalBalanceAgainstLive(acc *AccountConfig, creds *OdooCredentials,
 	cache.FetchedAt = time.Now().UTC().Format(time.RFC3339)
 	saveBalanceCache(cache)
 
-	odooBalance, err := odooJournalLineSum(creds, uid, acc.OdooJournalID)
+	odooBalance, err := odooJournalCurrentBalance(creds, uid, acc.OdooJournalID)
 	if err != nil {
 		warn := fmt.Sprintf("  %s⚠ %s: could not fetch Odoo journal balance: %v%s\n", Fmt.Yellow, acc.Slug, err, Fmt.Reset)
 		if !quietOdooContext() {
@@ -2546,6 +2546,31 @@ func odooJournalLineCount(creds *OdooCredentials, uid int, journalID int) int {
 
 // odooJournalLineSum returns Σ(line.amount) across every statement line on
 // the given journal.
+// odooJournalCurrentBalance returns the same value the Odoo reconciliation
+// widget shows for a journal: the computed `current_statement_balance`
+// on account.journal (the running balance over time, built from
+// statement.balance_end_real). Falls back to the move-line sum on the
+// journal's default account if the field isn't available.
+//
+// Note: if the journal's statement.balance_end_real values are stale
+// (e.g. after a duplicate-line cleanup that didn't trigger a balance
+// walk), this number will diverge from the move-line truth. Run
+// `chb odoo journals <id> fix` to recompute statement balances.
+func odooJournalCurrentBalance(creds *OdooCredentials, uid int, journalID int) (float64, error) {
+	result, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
+		"account.journal", "read",
+		[]interface{}{[]interface{}{journalID}, []string{"current_statement_balance"}}, nil)
+	if err == nil {
+		var rows []struct {
+			Balance float64 `json:"current_statement_balance"`
+		}
+		if json.Unmarshal(result, &rows) == nil && len(rows) > 0 {
+			return rows[0].Balance, nil
+		}
+	}
+	return odooJournalLineSum(creds, uid, journalID)
+}
+
 func odooJournalLineSum(creds *OdooCredentials, uid int, journalID int) (float64, error) {
 	result, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
 		"account.bank.statement.line", "read_group",
@@ -3542,7 +3567,7 @@ func buildUniqueImportID(acc *AccountConfig, tx TransactionEntry) string {
 	if txHash == "" {
 		txHash = tx.ID
 	}
-	return fmt.Sprintf("%s:%s:%s:0", chain, strings.ToLower(address), strings.ToLower(txHash))
+	return fmt.Sprintf("%s:%s:%s:%d", chain, strings.ToLower(address), strings.ToLower(txHash), tx.LogIndex)
 }
 
 // fetchOdooImportIDs returns the set of unique_import_id values already in Odoo for a journal.

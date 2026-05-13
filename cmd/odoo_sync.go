@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"sort"
 	"strings"
 	"time"
 
@@ -528,8 +529,8 @@ func OdooJournals(args []string) error {
 			continue
 		}
 		hasLinked = true
+		acc := acc // capture by value for &acc below
 
-		// Get line count and last date from Odoo
 		countResult, _ := odooExec(creds.URL, creds.DB, uid, creds.Password,
 			"account.bank.statement.line", "search_count",
 			[]interface{}{[]interface{}{
@@ -555,13 +556,41 @@ func OdooJournals(args []string) error {
 		var reconciledCount int
 		json.Unmarshal(reconciledResult, &reconciledCount)
 
+		odooBalance, odooBalErr := odooJournalCurrentBalance(creds, uid, acc.OdooJournalID)
+		currency := accCurrency(&acc)
+
+		var localBalance float64
+		var localCount int
+		if totals := accountTotalsFromGeneratedTransactions(&acc, loadAccountTransactionsForOdoo(&acc)); totals != nil {
+			localBalance = totals.CurrentBalance
+			localCount = totals.TxCount
+		}
+		// In-sync = balance match (within rounding). Counts may diverge
+		// legitimately for Stripe (per-BT local rows vs. aggregated fee
+		// lines in Odoo), so balance is the load-bearing signal.
+		inSync := odooBalErr == nil && math.Abs(odooBalance-localBalance) < 0.01
+
 		journalName := OdooJournalName(acc.OdooJournalID)
 		if journalName == "" {
 			journalName = fmt.Sprintf("journal #%d", acc.OdooJournalID)
 		}
 		fmt.Printf("  %s%s%s  %s#%d%s\n", Fmt.Bold, journalName, Fmt.Reset, Fmt.Dim, acc.OdooJournalID, Fmt.Reset)
 		fmt.Printf("    %sAccount: %s (%s)%s\n", Fmt.Dim, acc.Name, acc.Slug, Fmt.Reset)
-		fmt.Printf("    %s%d statement lines, %d reconciled, %d statements%s\n", Fmt.Dim, lineCount, reconciledCount, stmtCount, Fmt.Reset)
+		if inSync {
+			fmt.Printf("    %sBalance: %s  %d lines (%d reconciled, %d statements)%s\n",
+				Fmt.Dim, formatAccountDataBalance(odooBalance, currency), lineCount, reconciledCount, stmtCount, Fmt.Reset)
+			fmt.Printf("    %s✓ in sync%s\n", Fmt.Green, Fmt.Reset)
+		} else {
+			fmt.Printf("    %sOdoo:    %s  %d lines (%d reconciled, %d statements)%s\n",
+				Fmt.Dim, formatAccountDataBalance(odooBalance, currency), lineCount, reconciledCount, stmtCount, Fmt.Reset)
+			fmt.Printf("    %sLocal:   %s  %d tx%s\n",
+				Fmt.Dim, formatAccountDataBalance(localBalance, currency), localCount, Fmt.Reset)
+			delta := fmt.Sprintf("Δ balance = %s", formatAccountDataBalance(localBalance-odooBalance, currency))
+			if lineCount != localCount {
+				delta += fmt.Sprintf(", Δ count = %+d", localCount-lineCount)
+			}
+			fmt.Printf("    %s⚠ not in sync  %s(%s)%s\n", Fmt.Yellow, Fmt.Dim, delta, Fmt.Reset)
+		}
 		fmt.Println()
 	}
 
@@ -579,7 +608,7 @@ func OdooJournals(args []string) error {
 	fmt.Printf("  %s%schb odoo journals <id> check%s\n", Fmt.Bold, Fmt.Cyan, Fmt.Reset)
 	fmt.Printf("    %sReport statements whose running balance is invalid%s\n\n", Fmt.Dim, Fmt.Reset)
 	fmt.Printf("  %s%schb odoo journals <id> fix%s\n", Fmt.Bold, Fmt.Cyan, Fmt.Reset)
-	fmt.Printf("    %sSet balance_end_real = running balance on invalid statements%s\n\n", Fmt.Dim, Fmt.Reset)
+	fmt.Printf("    %sRepair orphan import IDs in place, remove unmatched lines, fix balances%s\n\n", Fmt.Dim, Fmt.Reset)
 	fmt.Printf("  %s%schb odoo journals <id> reconcile [--dry-run] [--yes]%s\n", Fmt.Bold, Fmt.Cyan, Fmt.Reset)
 	fmt.Printf("    %sMatch unreconciled statement lines against open invoices and bills%s\n\n", Fmt.Dim, Fmt.Reset)
 	fmt.Printf("  %s%schb odoo journals <id> --reset%s\n", Fmt.Bold, Fmt.Cyan, Fmt.Reset)
@@ -634,7 +663,7 @@ func odooJournalDetail(creds *OdooCredentials, uid int, journalID int) error {
 	var reconciledCount int
 	json.Unmarshal(reconciledResult, &reconciledCount)
 
-	currentBalance, balanceErr := odooJournalLineSum(creds, uid, journalID)
+	currentBalance, balanceErr := odooJournalCurrentBalance(creds, uid, journalID)
 
 	stmtResult, _ := odooExec(creds.URL, creds.DB, uid, creds.Password,
 		"account.bank.statement", "search_read",
@@ -657,7 +686,10 @@ func odooJournalDetail(creds *OdooCredentials, uid int, journalID int) error {
 	}
 	json.Unmarshal(stmtResult, &stmts)
 
-	journalURL := OdooWebURL(creds.URL, "account.journal", journalID)
+	journalURL := OdooBankReconciliationURL(creds.URL, journalID)
+	if j.Type != "bank" && j.Type != "cash" {
+		journalURL = OdooWebURL(creds.URL, "account.journal", journalID)
+	}
 	fmt.Printf("\n  %s%s%s  %s#%d  type: %s%s\n", Fmt.Bold, j.Name, Fmt.Reset, Fmt.Dim, j.ID, j.Type, Fmt.Reset)
 	fmt.Printf("  %sOdoo: %s  db: %s%s\n", Fmt.Dim, creds.URL, creds.DB, Fmt.Reset)
 	fmt.Printf("  %sJournal: %s%s\n", Fmt.Dim, hyperlink(journalURL, journalURL), Fmt.Reset)
@@ -834,12 +866,152 @@ func odooJournalCheck(creds *OdooCredentials, uid int, journalID int) error {
 // are authoritative — the starting and ending balances are derived from
 // them, not asserted independently.
 func odooJournalFix(creds *OdooCredentials, uid int, journalID int, assumeYes, dryRun bool) error {
+	res, err := findOdooOrphanStatementLines(creds, uid, journalID)
+	if err != nil {
+		return err
+	}
+
+	loosePlan, looseErr := planAttachLooseLines(creds, uid, journalID)
+	if looseErr != nil {
+		Warnf("  %s⚠ Could not plan loose-line attachment: %v%s", Fmt.Yellow, looseErr, Fmt.Reset)
+		loosePlan = &looseLinesPlan{}
+	}
+
 	issues, err := CheckOdooJournalStatements(creds, uid, journalID)
 	if err != nil {
 		return err
 	}
-	if len(issues) == 0 {
+
+	if res.SkippedReason != "" {
+		fmt.Printf("\n  %s⚠ Skipping orphan check: %s%s\n", Fmt.Yellow, res.SkippedReason, Fmt.Reset)
+	}
+
+	if len(res.Repairs) == 0 && len(res.Duplicates) == 0 && len(res.Orphans) == 0 && len(res.PostLatestLocal) == 0 && len(loosePlan.Assign) == 0 && len(issues) == 0 {
 		fmt.Printf("\n  %s✓ Nothing to fix%s\n\n", Fmt.Green, Fmt.Reset)
+		return nil
+	}
+
+	if len(res.PostLatestLocal) > 0 {
+		printPostLatestOrphanLines(res.PostLatestLocal, res.Account, res.LatestLocal)
+	}
+
+	if len(res.Duplicates) > 0 {
+		printOrphanDuplicates(res.Duplicates)
+		proceed := assumeYes
+		if !assumeYes && !dryRun {
+			fmt.Printf("  %sConsolidate %d duplicate pair(s)? Keeps the reconciled side, deletes the duplicate.%s [y/N] ",
+				Fmt.Bold, len(res.Duplicates), Fmt.Reset)
+			var resp string
+			fmt.Scanln(&resp)
+			proceed = resp == "y" || resp == "Y" || resp == "yes"
+		}
+		switch {
+		case dryRun:
+			fmt.Printf("  %s(dry-run) would consolidate %d pair(s)%s\n\n", Fmt.Dim, len(res.Duplicates), Fmt.Reset)
+		case proceed:
+			ok, conflicts := consolidateOrphanDuplicates(creds, uid, res.Duplicates)
+			fmt.Printf("  %s✓ Consolidated %d pair(s)%s", Fmt.Green, ok, Fmt.Reset)
+			if len(conflicts) > 0 {
+				fmt.Printf("  %s(%d pair(s) had both sides reconciled — manual review needed)%s", Fmt.Yellow, len(conflicts), Fmt.Reset)
+				for _, c := range conflicts {
+					fmt.Printf("\n    %s#%d (legacy) and #%d (canonical)%s",
+						Fmt.Yellow, c.Broken.ID, c.CleanLineID, Fmt.Reset)
+				}
+			}
+			fmt.Println()
+			fmt.Println()
+		default:
+			fmt.Printf("  %sConsolidation skipped.%s\n\n", Fmt.Dim, Fmt.Reset)
+		}
+	}
+
+	if len(res.Repairs) > 0 {
+		printOrphanRepairs(res.Repairs)
+		proceed := assumeYes
+		if !assumeYes && !dryRun {
+			fmt.Printf("  %sRewrite unique_import_id on %d line(s)? Reconciliation, partners and narration are preserved.%s [y/N] ",
+				Fmt.Bold, len(res.Repairs), Fmt.Reset)
+			var resp string
+			fmt.Scanln(&resp)
+			proceed = resp == "y" || resp == "Y" || resp == "yes"
+		}
+		switch {
+		case dryRun:
+			fmt.Printf("  %s(dry-run) would rewrite %d line(s)%s\n\n", Fmt.Dim, len(res.Repairs), Fmt.Reset)
+		case proceed:
+			ok, failed := repairOrphanImportIDs(creds, uid, res.Repairs)
+			fmt.Printf("  %s✓ Rewrote %d line(s)%s", Fmt.Green, ok, Fmt.Reset)
+			if len(failed) > 0 {
+				fmt.Printf("  %s(%d failed — falling back to delete)%s", Fmt.Yellow, len(failed), Fmt.Reset)
+				res.Orphans = append(res.Orphans, failed...)
+			}
+			fmt.Println()
+			fmt.Println()
+		default:
+			fmt.Printf("  %sRepair skipped.%s\n\n", Fmt.Dim, Fmt.Reset)
+		}
+	}
+
+	if len(res.Orphans) > 0 {
+		printOrphanStatementLines(res.Orphans)
+		proceed := assumeYes
+		if !assumeYes && !dryRun {
+			fmt.Printf("  %sDelete %d orphan line(s) from Odoo? This cannot be undone.%s [y/N] ",
+				Fmt.Bold, len(res.Orphans), Fmt.Reset)
+			var resp string
+			fmt.Scanln(&resp)
+			proceed = resp == "y" || resp == "Y" || resp == "yes"
+		}
+		switch {
+		case dryRun:
+			fmt.Printf("  %s(dry-run) would delete %d orphan line(s)%s\n\n", Fmt.Dim, len(res.Orphans), Fmt.Reset)
+		case proceed:
+			ids := make([]int, len(res.Orphans))
+			for i, o := range res.Orphans {
+				ids[i] = o.ID
+			}
+			if err := deleteStatementLines(creds, uid, ids); err != nil {
+				Warnf("  %s⚠ Failed to delete orphan lines: %v%s", Fmt.Red, err, Fmt.Reset)
+			} else {
+				fmt.Printf("  %s✓ Deleted %d orphan line(s)%s\n\n", Fmt.Green, len(res.Orphans), Fmt.Reset)
+			}
+		default:
+			fmt.Printf("  %sOrphan removal skipped.%s\n\n", Fmt.Dim, Fmt.Reset)
+		}
+	}
+
+	if len(loosePlan.Assign) > 0 {
+		printLooseLinesPlan(loosePlan)
+		proceed := assumeYes
+		if !assumeYes && !dryRun {
+			fmt.Printf("  %sAttach %d loose line(s) to their target statement?%s [y/N] ",
+				Fmt.Bold, len(loosePlan.Assign), Fmt.Reset)
+			var resp string
+			fmt.Scanln(&resp)
+			proceed = resp == "y" || resp == "Y" || resp == "yes"
+		}
+		switch {
+		case dryRun:
+			fmt.Printf("  %s(dry-run) would attach %d line(s)%s\n\n", Fmt.Dim, len(loosePlan.Assign), Fmt.Reset)
+		case proceed:
+			ok := attachLooseLines(creds, uid, loosePlan.Assign)
+			fmt.Printf("  %s✓ Attached %d line(s)%s\n\n", Fmt.Green, ok, Fmt.Reset)
+		default:
+			fmt.Printf("  %sLoose-line attachment skipped.%s\n\n", Fmt.Dim, Fmt.Reset)
+		}
+	}
+
+	// Re-check balance invariants now that orphans/duplicates/repairs/
+	// loose-line attachment have run — those mutations can leave
+	// statements with balance_end_real out of sync with their lines
+	// even when the pre-mutation check returned clean.
+	if !dryRun && (len(res.Repairs) > 0 || len(res.Duplicates) > 0 || len(res.Orphans) > 0 || len(loosePlan.Assign) > 0) {
+		if rechecked, err := CheckOdooJournalStatements(creds, uid, journalID); err == nil {
+			issues = rechecked
+		}
+	}
+
+	if len(issues) == 0 {
 		return nil
 	}
 	PrintStatementIssues(issues)
@@ -949,6 +1121,608 @@ func odooJournalFix(creds *OdooCredentials, uid int, journalID int, assumeYes, d
 		}
 	}
 	return nil
+}
+
+// odooOrphanLine is an account.bank.statement.line in Odoo whose
+// unique_import_id has no matching local transaction — typically a stale
+// artifact from an earlier sync (a local tx that was deleted or rebuilt).
+// Lines with no unique_import_id are excluded: those are manual entries
+// (opening balances, accountant adjustments) and chb does not own them.
+type odooOrphanLine struct {
+	ID             int
+	Date           string
+	Amount         float64
+	PaymentRef     string
+	UniqueImportID string
+}
+
+// odooOrphanFindResult holds the categorized output of orphan detection.
+//   - Repairs: broken-form lines whose canonical form isn't yet in Odoo;
+//     a simple in-place unique_import_id rewrite is enough.
+//   - Duplicates: broken-form lines whose canonical form ALSO exists in
+//     the journal (two lines for the same tx). Needs reconciliation-aware
+//     consolidation: delete the unreconciled side, rewrite the keeper.
+//   - Orphans: no canonical form found in local; safe to delete.
+//   - PostLatestLocal: dated after the latest local tx — likely a missed
+//     local sync, not stale data.
+type odooOrphanFindResult struct {
+	Account         *AccountConfig
+	Repairs         []odooOrphanRepair
+	Duplicates      []odooOrphanDuplicate
+	Orphans         []odooOrphanLine
+	PostLatestLocal []odooOrphanLine
+	LatestLocal     time.Time
+	SkippedReason   string
+}
+
+// odooOrphanRepair pairs a broken Odoo line with its canonical
+// unique_import_id. Rewriting in place avoids the unreconcile/draft/
+// unlink dance and keeps all downstream Odoo state intact.
+type odooOrphanRepair struct {
+	Line        odooOrphanLine
+	CanonicalID string
+}
+
+// odooOrphanDuplicate describes a (legacy, canonical) pair of lines for
+// the same on-chain transaction. The broken-form line is typically the
+// older, reconciled one; the clean-form line is typically a recent
+// re-push that hasn't been reconciled yet.
+type odooOrphanDuplicate struct {
+	Broken      odooOrphanLine
+	CleanID     string
+	CleanLineID int
+}
+
+func findOdooOrphanStatementLines(creds *OdooCredentials, uid int, journalID int) (*odooOrphanFindResult, error) {
+	acc := linkedAccountForJournal(journalID)
+	if acc == nil {
+		return &odooOrphanFindResult{}, nil
+	}
+	res := &odooOrphanFindResult{Account: acc}
+
+	if LastFullSyncTime("account:" + strings.ToLower(acc.Slug)).IsZero() {
+		res.SkippedReason = fmt.Sprintf("account %q has never been fully synced (run: chb accounts %s sync --history)", acc.Slug, acc.Slug)
+		return res, nil
+	}
+
+	localIDs := map[string]bool{}
+	// Legacy index: some imports stored `<chain>:<addr>:<chain>:<14-hex
+	// prefix>:<n>` (pre-NIP-73 tx.ID was `<chain>:<short_hash>`). Map the
+	// truncated form back to a unique full-length canonical id by prefix.
+	shortHashIndex := map[string]string{}
+	shortHashAmbiguous := map[string]bool{}
+	var latest time.Time
+	for _, tx := range loadAccountTransactionsForOdoo(acc) {
+		cleanID := buildUniqueImportID(acc, tx)
+		if cleanID != "" {
+			localIDs[cleanID] = true
+		}
+		hash := strings.ToLower(tx.TxHash)
+		if cleanID != "" && strings.HasPrefix(hash, "0x") && len(hash) >= 16 {
+			prefix := hash[:16] // "0x" + 14 hex
+			if existing, ok := shortHashIndex[prefix]; ok && existing != cleanID {
+				shortHashAmbiguous[prefix] = true
+			} else {
+				shortHashIndex[prefix] = cleanID
+			}
+		}
+		if t := time.Unix(tx.Timestamp, 0); t.After(latest) {
+			latest = t
+		}
+	}
+	res.LatestLocal = latest
+
+	data, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
+		"account.bank.statement.line", "search_read",
+		[]interface{}{[]interface{}{
+			[]interface{}{"journal_id", "=", journalID},
+			[]interface{}{"unique_import_id", "!=", false},
+		}},
+		map[string]interface{}{
+			"fields": []string{"id", "date", "amount", "payment_ref", "unique_import_id"},
+			"order":  "date asc, id asc",
+		})
+	if err != nil {
+		return nil, fmt.Errorf("fetch lines: %v", err)
+	}
+	var rows []struct {
+		ID             int     `json:"id"`
+		Date           odooStr `json:"date"`
+		Amount         float64 `json:"amount"`
+		PaymentRef     odooStr `json:"payment_ref"`
+		UniqueImportID odooStr `json:"unique_import_id"`
+	}
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return nil, fmt.Errorf("parse lines: %v", err)
+	}
+
+	// Index every unique_import_id currently in this journal → its line
+	// ID, so we can detect whether a repaired canonical form would
+	// collide with an existing clean-form line (a duplicate pair).
+	odooLineByID := make(map[string]int, len(rows))
+	for _, r := range rows {
+		if id := string(r.UniqueImportID); id != "" {
+			odooLineByID[id] = r.ID
+		}
+	}
+
+	for _, r := range rows {
+		importID := string(r.UniqueImportID)
+		if importID == "" || localIDs[importID] {
+			continue
+		}
+		if isStripeAggregateFeeImportID(importID) {
+			continue
+		}
+		line := odooOrphanLine{
+			ID:             r.ID,
+			Date:           string(r.Date),
+			Amount:         r.Amount,
+			PaymentRef:     string(r.PaymentRef),
+			UniqueImportID: importID,
+		}
+		lineDate, _ := time.Parse("2006-01-02", line.Date)
+		if !latest.IsZero() && lineDate.After(latest) {
+			res.PostLatestLocal = append(res.PostLatestLocal, line)
+			continue
+		}
+		// Try to find the canonical form. First the URI-form
+		// canonicalize (TxHash-stripping bug); then the legacy
+		// short-hash form (<chain>:<addr>:<chain>:<14-hex prefix>:<n>)
+		// matched by hash prefix against local txs.
+		canonical := CanonicalizeImportID(importID)
+		if canonical == "" {
+			if parts := strings.Split(importID, ":"); len(parts) == 5 && parts[0] == parts[2] && strings.HasPrefix(parts[3], "0x") {
+				if prefix := parts[3]; !shortHashAmbiguous[prefix] {
+					canonical = shortHashIndex[prefix]
+				}
+			}
+		}
+		if canonical == "" || !localIDs[canonical] {
+			res.Orphans = append(res.Orphans, line)
+			continue
+		}
+		if cleanLineID, alreadyInOdoo := odooLineByID[canonical]; alreadyInOdoo {
+			// A clean-form line for the same tx already exists in the
+			// journal. Needs reconciliation-aware consolidation, not a
+			// blind rewrite (which would hit a UNIQUE-constraint error).
+			res.Duplicates = append(res.Duplicates, odooOrphanDuplicate{
+				Broken:      line,
+				CleanID:     canonical,
+				CleanLineID: cleanLineID,
+			})
+			continue
+		}
+		res.Repairs = append(res.Repairs, odooOrphanRepair{Line: line, CanonicalID: canonical})
+	}
+	return res, nil
+}
+
+// isStripeAggregateFeeImportID matches both the canonical
+// stripe:<acc>:open:<stmtID>:fees and the per-payout
+// stripe:<acc>:<payoutID>:fees aggregate-fee import IDs created in
+// stripe_odoo_sync.go. These lines summarize hundreds of Stripe balance
+// transactions, so no individual local tx will ever map to them.
+func isStripeAggregateFeeImportID(id string) bool {
+	return strings.HasPrefix(id, "stripe:") && strings.HasSuffix(id, ":fees")
+}
+
+type orphanMonthSummary struct {
+	Month string
+	Count int
+	Sum   float64
+}
+
+func summarizeOrphansByMonth(orphans []odooOrphanLine) []orphanMonthSummary {
+	byMonth := map[string]*orphanMonthSummary{}
+	for _, o := range orphans {
+		key := o.Date
+		if len(key) >= 7 {
+			key = key[:7]
+		}
+		if byMonth[key] == nil {
+			byMonth[key] = &orphanMonthSummary{Month: key}
+		}
+		byMonth[key].Count++
+		byMonth[key].Sum += o.Amount
+	}
+	out := make([]orphanMonthSummary, 0, len(byMonth))
+	for _, s := range byMonth {
+		out = append(out, *s)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Month < out[j].Month })
+	return out
+}
+
+func printOrphanStatementLines(orphans []odooOrphanLine) {
+	fmt.Printf("\n  %s%d orphan line(s) in Odoo (no matching local tx):%s\n",
+		Fmt.Bold, len(orphans), Fmt.Reset)
+	fmt.Printf("\n    %sby month:%s\n", Fmt.Dim, Fmt.Reset)
+	for _, m := range summarizeOrphansByMonth(orphans) {
+		fmt.Printf("      %s   %4d line(s)  %12s\n", m.Month, m.Count, fmtEURSigned(m.Sum))
+	}
+	// Diagnostic: show whether the importID has a recognized broken form.
+	// If canonicalize returns non-empty for any orphan, the line should
+	// have been classified as Repair instead — which means the canonical
+	// form wasn't in the local set (regenerate local) or was already
+	// present in Odoo (stale duplicate of a clean line).
+	fmt.Printf("\n    %sdetail:%s\n", Fmt.Dim, Fmt.Reset)
+	for _, o := range orphans {
+		canonical := CanonicalizeImportID(o.UniqueImportID)
+		canonicalNote := ""
+		if canonical != "" {
+			canonicalNote = fmt.Sprintf("  %scanon=%s (not matched locally)%s", Fmt.Dim, canonical, Fmt.Reset)
+		}
+		fmt.Printf("      %s#%d%s  %s  %12s  %s  %s%s%s%s\n",
+			Fmt.Dim, o.ID, Fmt.Reset,
+			o.Date, fmtEURSigned(o.Amount), o.PaymentRef,
+			Fmt.Dim, o.UniqueImportID, Fmt.Reset,
+			canonicalNote)
+	}
+	fmt.Println()
+}
+
+func printOrphanRepairs(repairs []odooOrphanRepair) {
+	fmt.Printf("\n  %s%d line(s) repairable by rewriting unique_import_id:%s\n",
+		Fmt.Bold, len(repairs), Fmt.Reset)
+	for _, r := range repairs {
+		fmt.Printf("    %s#%d%s  %s  %12s  %s\n      %sfrom:%s %s\n      %s  to:%s %s\n",
+			Fmt.Dim, r.Line.ID, Fmt.Reset,
+			r.Line.Date, fmtEURSigned(r.Line.Amount), r.Line.PaymentRef,
+			Fmt.Dim, Fmt.Reset, r.Line.UniqueImportID,
+			Fmt.Dim, Fmt.Reset, r.CanonicalID)
+	}
+	fmt.Println()
+}
+
+func printOrphanDuplicates(dupes []odooOrphanDuplicate) {
+	fmt.Printf("\n  %s%d duplicate pair(s) — two lines exist for the same tx, in different import_id formats:%s\n",
+		Fmt.Bold, len(dupes), Fmt.Reset)
+	for _, d := range dupes {
+		brokenAge, cleanAge := "newer", "older"
+		if d.Broken.ID < d.CleanLineID {
+			brokenAge, cleanAge = "older", "newer"
+		}
+		fmt.Printf("    %s%s  %12s  %s%s\n      %s%s #%d (broken format):%s %s\n      %s%s #%d (clean format):%s  %s\n",
+			Fmt.Dim, d.Broken.Date, fmtEURSigned(d.Broken.Amount), d.Broken.PaymentRef, Fmt.Reset,
+			Fmt.Dim, brokenAge, d.Broken.ID, Fmt.Reset, d.Broken.UniqueImportID,
+			Fmt.Dim, cleanAge, d.CleanLineID, Fmt.Reset, d.CleanID)
+	}
+	fmt.Println()
+}
+
+// looseLineAssignment describes one orphaned-from-statement line that
+// can be attached to a specific statement based on its date.
+type looseLineAssignment struct {
+	LineID        int
+	Date          string
+	Amount        float64
+	StatementID   int
+	StatementName string
+}
+
+// looseLinesPlan groups the result of planAttachLooseLines into lines we
+// can attach to an existing statement and lines that should stay loose
+// (their date is after every existing statement — typically the
+// current/open period).
+type looseLinesPlan struct {
+	Assign      []looseLineAssignment
+	StayLooseN  int
+	StayLooseSum float64
+}
+
+// planAttachLooseLines surveys account.bank.statement.line for lines
+// with no statement_id and decides where each belongs. A loose line
+// joins the earliest statement whose date is >= the line's date — the
+// "containing" monthly statement. Lines newer than every statement
+// stay loose (they're awaiting the next statement to be created).
+func planAttachLooseLines(creds *OdooCredentials, uid int, journalID int) (*looseLinesPlan, error) {
+	stmtRes, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
+		"account.bank.statement", "search_read",
+		[]interface{}{[]interface{}{[]interface{}{"journal_id", "=", journalID}}},
+		map[string]interface{}{
+			"fields": []string{"id", "date", "name"},
+			"order":  "date asc, id asc",
+		})
+	if err != nil {
+		return nil, fmt.Errorf("fetch statements: %v", err)
+	}
+	var stmts []struct {
+		ID   int     `json:"id"`
+		Date odooStr `json:"date"`
+		Name odooStr `json:"name"`
+	}
+	if err := json.Unmarshal(stmtRes, &stmts); err != nil {
+		return nil, fmt.Errorf("parse statements: %v", err)
+	}
+
+	looseRes, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
+		"account.bank.statement.line", "search_read",
+		[]interface{}{[]interface{}{
+			[]interface{}{"journal_id", "=", journalID},
+			[]interface{}{"statement_id", "=", false},
+		}},
+		map[string]interface{}{
+			"fields": []string{"id", "date", "amount"},
+		})
+	if err != nil {
+		return nil, fmt.Errorf("fetch loose lines: %v", err)
+	}
+	var loose []struct {
+		ID     int     `json:"id"`
+		Date   odooStr `json:"date"`
+		Amount float64 `json:"amount"`
+	}
+	if err := json.Unmarshal(looseRes, &loose); err != nil {
+		return nil, fmt.Errorf("parse loose lines: %v", err)
+	}
+
+	plan := &looseLinesPlan{}
+	for _, l := range loose {
+		lineDate := string(l.Date)
+		targetID := 0
+		targetName := ""
+		for _, s := range stmts {
+			if string(s.Date) >= lineDate {
+				targetID = s.ID
+				targetName = string(s.Name)
+				break
+			}
+		}
+		if targetID == 0 {
+			plan.StayLooseN++
+			plan.StayLooseSum += l.Amount
+			continue
+		}
+		plan.Assign = append(plan.Assign, looseLineAssignment{
+			LineID:        l.ID,
+			Date:          lineDate,
+			Amount:        l.Amount,
+			StatementID:   targetID,
+			StatementName: targetName,
+		})
+	}
+	return plan, nil
+}
+
+func printLooseLinesPlan(plan *looseLinesPlan) {
+	fmt.Printf("\n  %s%d loose line(s) can be attached to a statement:%s\n",
+		Fmt.Bold, len(plan.Assign), Fmt.Reset)
+
+	type stmtBucket struct {
+		Name  string
+		Count int
+		Sum   float64
+	}
+	bucketByID := map[int]*stmtBucket{}
+	for _, a := range plan.Assign {
+		b := bucketByID[a.StatementID]
+		if b == nil {
+			b = &stmtBucket{Name: a.StatementName}
+			bucketByID[a.StatementID] = b
+		}
+		b.Count++
+		b.Sum += a.Amount
+	}
+	stmtIDs := make([]int, 0, len(bucketByID))
+	for id := range bucketByID {
+		stmtIDs = append(stmtIDs, id)
+	}
+	sort.Ints(stmtIDs)
+	fmt.Printf("\n    %sby target statement:%s\n", Fmt.Dim, Fmt.Reset)
+	for _, id := range stmtIDs {
+		b := bucketByID[id]
+		fmt.Printf("      #%-4d %-24s %4d line(s)  %12s\n", id, truncate(b.Name, 24), b.Count, fmtEURSigned(b.Sum))
+	}
+	if plan.StayLooseN > 0 {
+		fmt.Printf("\n    %s%d line(s) stay loose (newer than every statement, %s)%s\n",
+			Fmt.Dim, plan.StayLooseN, fmtEURSigned(plan.StayLooseSum), Fmt.Reset)
+	}
+	fmt.Println()
+}
+
+// attachLooseLines applies a looseLinesPlan, batching writes per target
+// statement (one Odoo RPC per statement instead of per line).
+func attachLooseLines(creds *OdooCredentials, uid int, plan []looseLineAssignment) int {
+	byStmt := map[int][]int{}
+	stmtName := map[int]string{}
+	for _, a := range plan {
+		byStmt[a.StatementID] = append(byStmt[a.StatementID], a.LineID)
+		stmtName[a.StatementID] = a.StatementName
+	}
+	stmtIDs := make([]int, 0, len(byStmt))
+	for id := range byStmt {
+		stmtIDs = append(stmtIDs, id)
+	}
+	sort.Ints(stmtIDs)
+
+	assigned := 0
+	for i, stmtID := range stmtIDs {
+		ids := byStmt[stmtID]
+		prefix := fmt.Sprintf("  %s[%d/%d]%s", Fmt.Dim, i+1, len(stmtIDs), Fmt.Reset)
+		fmt.Printf("%s attach %d line(s) → statement #%d %s\n", prefix, len(ids), stmtID, stmtName[stmtID])
+		_, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
+			"account.bank.statement.line", "write",
+			[]interface{}{intsToInterfaces(ids), map[string]interface{}{
+				"statement_id": stmtID,
+			}}, nil)
+		if err != nil {
+			Warnf("%s ✗ attach to #%d failed: %v", prefix, stmtID, err)
+			continue
+		}
+		assigned += len(ids)
+	}
+	return assigned
+}
+
+// fetchStatementLinesReconciledState returns is_reconciled for each
+// account.bank.statement.line ID in `ids`, keyed by id.
+func fetchStatementLinesReconciledState(creds *OdooCredentials, uid int, ids []int) (map[int]bool, error) {
+	out := map[int]bool{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	data, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
+		"account.bank.statement.line", "read",
+		[]interface{}{intsToInterfaces(ids), []string{"id", "is_reconciled"}}, nil)
+	if err != nil {
+		return nil, fmt.Errorf("read is_reconciled: %v", err)
+	}
+	var rows []struct {
+		ID           int  `json:"id"`
+		IsReconciled bool `json:"is_reconciled"`
+	}
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return nil, fmt.Errorf("parse is_reconciled: %v", err)
+	}
+	for _, r := range rows {
+		out[r.ID] = r.IsReconciled
+	}
+	return out, nil
+}
+
+// consolidateOrphanDuplicates resolves each (legacy, canonical) pair by
+// keeping the line that carries the accountant's reconciliation work.
+// Rules:
+//   - legacy reconciled, clean not → delete clean, rewrite legacy → clean
+//   - clean reconciled, legacy not → delete legacy (clean already correct)
+//   - neither reconciled            → delete legacy (clean already correct)
+//   - both reconciled               → skip with warning (manual review)
+//
+// Returns (consolidated, conflicts) where conflicts are pairs where both
+// sides are reconciled and need a human to choose.
+func consolidateOrphanDuplicates(creds *OdooCredentials, uid int, dupes []odooOrphanDuplicate) (int, []odooOrphanDuplicate) {
+	if len(dupes) == 0 {
+		return 0, nil
+	}
+	ids := make([]int, 0, 2*len(dupes))
+	for _, d := range dupes {
+		ids = append(ids, d.Broken.ID, d.CleanLineID)
+	}
+	reconciled, err := fetchStatementLinesReconciledState(creds, uid, ids)
+	if err != nil {
+		Warnf("  %s⚠ Could not read reconciliation state: %v%s", Fmt.Yellow, err, Fmt.Reset)
+		return 0, dupes
+	}
+
+	consolidated := 0
+	var conflicts []odooOrphanDuplicate
+	total := len(dupes)
+	for i, d := range dupes {
+		brokenRec := reconciled[d.Broken.ID]
+		cleanRec := reconciled[d.CleanLineID]
+		prefix := fmt.Sprintf("  %s[%d/%d]%s", Fmt.Dim, i+1, total, Fmt.Reset)
+
+		// Age labels: Postgres serial IDs grow with creation time, so
+		// the lower id is the older line.
+		brokenAge, cleanAge := "newer", "older"
+		if d.Broken.ID < d.CleanLineID {
+			brokenAge, cleanAge = "older", "newer"
+		}
+
+		switch {
+		case brokenRec && cleanRec:
+			// Keep the older, delete the newer. Deleting a reconciled
+			// line undoes its match, so the invoice/bill that the
+			// duplicate was attached to will flag back to unpaid —
+			// that's the desired signal for the accountant to
+			// investigate the double-reconciliation.
+			keepID, deleteID := d.CleanLineID, d.Broken.ID
+			keepFmt, deleteFmt := "clean", "broken"
+			if d.Broken.ID < d.CleanLineID {
+				keepID, deleteID = d.Broken.ID, d.CleanLineID
+				keepFmt, deleteFmt = "broken", "clean"
+			}
+			fmt.Printf("%s keep older #%d (%s format), delete newer #%d (%s format) — both reconciled, undoes newer's match\n",
+				prefix, keepID, keepFmt, deleteID, deleteFmt)
+			if err := deleteStatementLines(creds, uid, []int{deleteID}); err != nil {
+				Warnf("%s ✗ delete #%d failed: %v", prefix, deleteID, err)
+				continue
+			}
+			if keepFmt == "broken" {
+				if err := updateStatementLineFields(creds, uid, keepID, map[string]interface{}{
+					"unique_import_id": d.CleanID,
+				}); err != nil {
+					Warnf("%s ✗ rewrite #%d failed: %v", prefix, keepID, err)
+					continue
+				}
+			}
+		case brokenRec && !cleanRec:
+			fmt.Printf("%s keep %s #%d (broken format, reconciled), delete %s #%d (clean format, unreconciled) — rewriting kept line → canonical\n",
+				prefix, brokenAge, d.Broken.ID, cleanAge, d.CleanLineID)
+			if err := deleteStatementLines(creds, uid, []int{d.CleanLineID}); err != nil {
+				Warnf("%s ✗ delete #%d failed: %v", prefix, d.CleanLineID, err)
+				continue
+			}
+			if err := updateStatementLineFields(creds, uid, d.Broken.ID, map[string]interface{}{
+				"unique_import_id": d.CleanID,
+			}); err != nil {
+				Warnf("%s ✗ rewrite #%d failed: %v", prefix, d.Broken.ID, err)
+				continue
+			}
+		default:
+			reason := "neither reconciled"
+			if cleanRec {
+				reason = "clean line is reconciled"
+			}
+			fmt.Printf("%s keep %s #%d (clean format), delete %s #%d (broken format) — %s\n",
+				prefix, cleanAge, d.CleanLineID, brokenAge, d.Broken.ID, reason)
+			if err := deleteStatementLines(creds, uid, []int{d.Broken.ID}); err != nil {
+				Warnf("%s ✗ delete #%d failed: %v", prefix, d.Broken.ID, err)
+				continue
+			}
+		}
+		consolidated++
+	}
+	return consolidated, conflicts
+}
+
+// repairOrphanImportIDs rewrites unique_import_id in place using Odoo's
+// `write` method. This preserves the underlying account.move, partner_id,
+// statement_id and reconciliation links — exactly the state that the
+// delete-and-re-push path would otherwise unwind. Returns the count of
+// successful rewrites and the list of repairs that failed (e.g. due to
+// a unique-constraint race) so the caller can fall back to delete.
+func repairOrphanImportIDs(creds *OdooCredentials, uid int, repairs []odooOrphanRepair) (int, []odooOrphanLine) {
+	ok := 0
+	var failed []odooOrphanLine
+	total := len(repairs)
+	for i, r := range repairs {
+		prefix := fmt.Sprintf("  %s[%d/%d]%s", Fmt.Dim, i+1, total, Fmt.Reset)
+		fmt.Printf("%s rewriting #%d → %s\n", prefix, r.Line.ID, r.CanonicalID)
+		err := updateStatementLineFields(creds, uid, r.Line.ID, map[string]interface{}{
+			"unique_import_id": r.CanonicalID,
+		})
+		if err != nil {
+			Warnf("%s ✗ rewrite #%d failed: %v", prefix, r.Line.ID, err)
+			failed = append(failed, r.Line)
+			continue
+		}
+		ok++
+	}
+	return ok, failed
+}
+
+func printPostLatestOrphanLines(post []odooOrphanLine, acc *AccountConfig, latestLocal time.Time) {
+	latestStr := "no local txs"
+	if !latestLocal.IsZero() {
+		latestStr = latestLocal.Format("2006-01-02")
+	}
+	slug := ""
+	if acc != nil {
+		slug = acc.Slug
+	}
+	fmt.Printf("\n  %s⚠ %d Odoo line(s) dated after last local tx (%s) — likely a missed local sync, not orphans:%s\n",
+		Fmt.Yellow, len(post), latestStr, Fmt.Reset)
+	if slug != "" {
+		fmt.Printf("    %sRun: chb accounts %s sync%s\n", Fmt.Dim, slug, Fmt.Reset)
+	}
+	for _, o := range post {
+		fmt.Printf("    %s#%d%s  %s  %12s  %s\n",
+			Fmt.Dim, o.ID, Fmt.Reset,
+			o.Date, fmtEURSigned(o.Amount), o.PaymentRef)
+	}
+	fmt.Println()
 }
 
 // fetchJournalStatementsOrdered returns all statements for the journal

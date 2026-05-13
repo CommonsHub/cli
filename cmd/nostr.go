@@ -447,6 +447,53 @@ func BuildBlockchainURI(chainID int, txHash string) string {
 	return fmt.Sprintf("ethereum:%d:tx:%s", chainID, strings.ToLower(txHash))
 }
 
+// TxHashFromURI extracts the raw transaction hash / id from a NIP-73
+// transaction URI. Returns "" for unrecognized forms. This is the
+// inverse of BuildBlockchainURI / BuildStripeURI and is used at load
+// time to backfill TransactionEntry.TxHash, which the public-projection
+// step in generate.go strips before saving.
+func TxHashFromURI(uri string) string {
+	if uri == "" {
+		return ""
+	}
+	if strings.HasPrefix(uri, "ethereum:") {
+		const sep = ":tx:"
+		if i := strings.Index(uri, sep); i >= 0 {
+			return uri[i+len(sep):]
+		}
+		return ""
+	}
+	if strings.HasPrefix(uri, "stripe:") {
+		return strings.TrimPrefix(uri, "stripe:")
+	}
+	return ""
+}
+
+// CanonicalizeImportID rewrites a broken URI-form unique_import_id back
+// to the clean form expected by buildUniqueImportID. The bug surfaced
+// while generate.go's public projection stripped TxHash, so
+// buildUniqueImportID fell back to using tx.ID (the NIP-73 URI) as the
+// hash segment.
+//
+//	Broken etherscan: <chain>:<address>:ethereum:<chainId>:tx:<hash>:<n>
+//	Clean etherscan:  <chain>:<address>:<hash>:<n>
+//
+//	Broken stripe:    stripe:<account>:stripe:<txId>:<n>
+//	Clean stripe:     stripe:<account>:<txId>:<n>
+//
+// Returns "" for an already-clean or unrecognized form, so callers can
+// distinguish "repair available" from "true orphan" cleanly.
+func CanonicalizeImportID(brokenID string) string {
+	parts := strings.Split(brokenID, ":")
+	if len(parts) == 7 && parts[2] == "ethereum" && parts[4] == "tx" {
+		return fmt.Sprintf("%s:%s:%s:%s", parts[0], parts[1], parts[5], parts[6])
+	}
+	if len(parts) == 5 && parts[0] == "stripe" && parts[2] == "stripe" {
+		return fmt.Sprintf("%s:%s:%s:%s", parts[0], parts[1], parts[3], parts[4])
+	}
+	return ""
+}
+
 // BuildBlockchainAddressURI creates a NIP-73 URI for a blockchain address.
 func BuildBlockchainAddressURI(chainID int, chain, address string) string {
 	addr := strings.ToLower(strings.TrimSpace(address))

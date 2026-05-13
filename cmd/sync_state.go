@@ -30,6 +30,7 @@ type SyncState struct {
 	Messages     *SyncSourceState            `json:"messages,omitempty"`
 	Images       *SyncSourceState            `json:"images,omitempty"`
 	Accounts     map[string]*SyncSourceState `json:"accounts,omitempty"`
+	OdooJournals map[string]*SyncSourceState `json:"odooJournals,omitempty"`
 	Runs         *SyncRunState               `json:"runs,omitempty"`
 }
 
@@ -91,17 +92,34 @@ func UpdateSyncSource(source string, full bool) {
 	case "images":
 		ss = get(&state.Images)
 	default:
-		if account, ok := strings.CutPrefix(source, "account:"); ok && account != "" {
+		switch {
+		case strings.HasPrefix(source, "account:"):
+			account := strings.ToLower(strings.TrimPrefix(source, "account:"))
+			if account == "" {
+				return
+			}
 			if state.Accounts == nil {
 				state.Accounts = map[string]*SyncSourceState{}
 			}
-			account = strings.ToLower(account)
 			ss = state.Accounts[account]
 			if ss == nil {
 				ss = &SyncSourceState{}
 				state.Accounts[account] = ss
 			}
-		} else {
+		case strings.HasPrefix(source, "odoo:journal:"):
+			key := strings.TrimPrefix(source, "odoo:journal:")
+			if key == "" {
+				return
+			}
+			if state.OdooJournals == nil {
+				state.OdooJournals = map[string]*SyncSourceState{}
+			}
+			ss = state.OdooJournals[key]
+			if ss == nil {
+				ss = &SyncSourceState{}
+				state.OdooJournals[key] = ss
+			}
+		default:
 			return
 		}
 	}
@@ -210,8 +228,15 @@ func SyncSourceStateFor(source string) *SyncSourceState {
 	case "images":
 		ss = state.Images
 	default:
-		if account, ok := strings.CutPrefix(source, "account:"); ok && account != "" && state.Accounts != nil {
-			ss = state.Accounts[strings.ToLower(account)]
+		switch {
+		case strings.HasPrefix(source, "account:"):
+			if account := strings.ToLower(strings.TrimPrefix(source, "account:")); account != "" && state.Accounts != nil {
+				ss = state.Accounts[account]
+			}
+		case strings.HasPrefix(source, "odoo:journal:"):
+			if key := strings.TrimPrefix(source, "odoo:journal:"); key != "" && state.OdooJournals != nil {
+				ss = state.OdooJournals[key]
+			}
 		}
 	}
 	return ss

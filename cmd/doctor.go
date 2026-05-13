@@ -229,7 +229,7 @@ func checkAccountBalanceAgainstLive(report *doctorReport) {
 			})
 			continue
 		}
-		odooBalance, err := odooJournalLineSum(creds, uid, acc.OdooJournalID)
+		odooBalance, err := odooJournalCurrentBalance(creds, uid, acc.OdooJournalID)
 		if err != nil {
 			continue
 		}

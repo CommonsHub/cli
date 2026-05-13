@@ -57,3 +57,12 @@ func OdooHost(rawURL string) string {
 func OdooWebURL(baseURL, model string, id int) string {
 	return fmt.Sprintf("%s/web#id=%d&model=%s", strings.TrimRight(baseURL, "/"), id, model)
 }
+
+// OdooBankReconciliationURL returns the URL of the bank reconciliation
+// widget for a journal, which is what most users actually want to open
+// from `chb odoo journals <id>` (vs. the generic record-form view).
+//
+//	https://citizenspring.odoo.com/odoo/accounting/47/reconciliation
+func OdooBankReconciliationURL(baseURL string, journalID int) string {
+	return fmt.Sprintf("%s/odoo/accounting/%d/reconciliation", strings.TrimRight(baseURL, "/"), journalID)
+}

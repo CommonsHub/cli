@@ -17,6 +17,7 @@ detect_os() {
   os="$(uname -s)"
   case "$os" in
     Linux) echo "linux" ;;
+    Darwin) echo "darwin" ;;
     *)
       echo "Unsupported OS: $os" >&2
       exit 1
