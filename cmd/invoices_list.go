@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	nostrsource "github.com/CommonsHub/chb/sources/nostr"
+	nostrsource "github.com/CommonsHub/chb/providers/nostr"
 )
 
 // structuredPaymentRefPattern matches a Belgian OGM structured reference

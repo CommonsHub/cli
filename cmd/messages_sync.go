@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	discordsource "github.com/CommonsHub/chb/sources/discord"
+	discordsource "github.com/CommonsHub/chb/providers/discord"
 )
 
 const discordAPIBase = "https://discord.com/api/v10"
@@ -139,7 +139,7 @@ func MessagesSync(args []string) (int, error) {
 			}
 			year, month := parts[0], parts[1]
 
-			// Save to data/YYYY/MM/sources/discord/{channelId}/messages.json
+			// Save to data/YYYY/MM/providers/discord/{channelId}/messages.json
 			dataDir := DataDir()
 			relPath := discordsource.ChannelRelPath(channelID)
 
@@ -371,7 +371,7 @@ func printMessagesSyncHelp() {
 %sBEHAVIOR%s
   Messages are fetched from newest to oldest (Discord API pagination).
   Each page returns 100 messages. Source data is saved per month to:
-    DATA_DIR/YYYY/MM/sources/discord/{channelId}/messages.json
+    DATA_DIR/YYYY/MM/providers/discord/{channelId}/messages.json
 
   %s--history%s: paginates backwards until hitting a month with cached
   data, then stops. Saves everything from that point forward.

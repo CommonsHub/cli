@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/CommonsHub/chb/sources"
+	"github.com/CommonsHub/chb/providers"
 )
 
 type SourceProvider struct{}
@@ -15,8 +15,8 @@ func (SourceProvider) Name() string {
 	return Source
 }
 
-func (SourceProvider) Files() []sources.File {
-	return []sources.File{
+func (SourceProvider) Files() []providers.File {
+	return []providers.File{
 		{Name: BalanceTransactionsFile, Description: "Monthly Stripe balance transactions.", Private: true},
 		{Name: ChargesFile, Description: "Monthly Stripe charge, refund, checkout session, and application data.", Private: true},
 		{Name: CustomersFile, Description: "Monthly Stripe customer PII keyed by balance transaction.", Private: true},

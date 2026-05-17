@@ -22,7 +22,7 @@ func TestRunDoctorChecksHealthyData(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	latestChannelDir := filepath.Join(dataDir, "latest", "sources", "discord", "1443322327159803945")
+	latestChannelDir := filepath.Join(dataDir, "latest", "providers", "discord", "1443322327159803945")
 	if err := os.MkdirAll(latestChannelDir, 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -31,17 +31,17 @@ func TestRunDoctorChecksHealthyData(t *testing.T) {
 	}
 
 	monthDir := filepath.Join(dataDir, "2026", "04")
-	if err := os.MkdirAll(filepath.Join(monthDir, "sources", "discord", "chan-1"), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Join(monthDir, "providers", "discord", "chan-1"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(monthDir, "sources", "discord", "chan-1", "messages.json"), []byte(`{"messages":[{}]}`), 0644); err != nil {
+	if err := os.WriteFile(filepath.Join(monthDir, "providers", "discord", "chan-1", "messages.json"), []byte(`{"messages":[{}]}`), 0644); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.MkdirAll(filepath.Join(monthDir, "generated"), 0755); err != nil {
 		t.Fatal(err)
 	}
-	imageRel := "2026/04/sources/discord/images/att-1.png"
-	if err := os.MkdirAll(filepath.Join(dataDir, "2026", "04", "sources", "discord", "images"), 0755); err != nil {
+	imageRel := "2026/04/providers/discord/images/att-1.png"
+	if err := os.MkdirAll(filepath.Join(dataDir, "2026", "04", "providers", "discord", "images"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(dataDir, filepath.FromSlash(imageRel)), []byte("png"), 0644); err != nil {
@@ -52,7 +52,7 @@ func TestRunDoctorChecksHealthyData(t *testing.T) {
 	    {
 	      "id": "att-1",
 	      "url": "https://cdn.discordapp.com/file.png",
-	      "filePath": "2026/04/sources/discord/images/att-1.png",
+	      "filePath": "2026/04/providers/discord/images/att-1.png",
 	      "timestamp": "2026-04-13T12:00:00.000000+00:00"
 	    }
 	  ]
@@ -163,7 +163,7 @@ func TestRunDoctorChecksFindsBrokenImagesJSON(t *testing.T) {
 	    {
 	      "id": "att-1",
 	      "url": "",
-	      "filePath": "latest/sources/discord/images/att-1.png",
+	      "filePath": "latest/providers/discord/images/att-1.png",
 	      "timestamp": "2026-04-13T12:00:00.000000+00:00",
 	      "proxyUrl": "/api/discord-image-proxy"
 	    }
@@ -208,7 +208,7 @@ func TestRunDoctorChecksIgnoresRoomICSOnlyMonth(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	icsDir := filepath.Join(dataDir, "2026", "07", "sources", "ics")
+	icsDir := filepath.Join(dataDir, "2026", "07", "providers", "ics")
 	if err := os.MkdirAll(icsDir, 0755); err != nil {
 		t.Fatal(err)
 	}

@@ -109,7 +109,7 @@ Spread lives in three places, in order of authority:
    URI are kept by relays — the latest `created_at` wins on read. (Audit trail
    is recoverable but not yet exposed locally; the cache currently keeps only
    the latest.)
-2. **Local annotation cache.** `DATA_DIR/YYYY/MM/sources/nostr/transaction-annotations.json`
+2. **Local annotation cache.** `DATA_DIR/YYYY/MM/providers/nostr/transaction-annotations.json`
    under the natural month, keyed by transaction URI:
    ```json
    {
@@ -177,7 +177,7 @@ leave stale entries):
 
 1. Walk every existing `inbound_spreads.json` to record what's currently on
    disk.
-2. Walk every `sources/nostr/transaction-annotations.json`, lazy-loading the
+2. Walk every `providers/nostr/transaction-annotations.json`, lazy-loading the
    matching `transactions.json` per natural month for denormalized fields.
 3. For each annotation with a non-empty `Spread`, emit one `InboundSpread` per
    target month into a `targetYM → []InboundSpread` map.

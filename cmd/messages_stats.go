@@ -7,7 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	discordsource "github.com/CommonsHub/chb/sources/discord"
+	discordsource "github.com/CommonsHub/chb/providers/discord"
 )
 
 type MessagesStatsMonth struct {

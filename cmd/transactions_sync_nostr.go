@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	nostrsource "github.com/CommonsHub/chb/sources/nostr"
+	nostrsource "github.com/CommonsHub/chb/providers/nostr"
 	"github.com/charmbracelet/huh"
 	"github.com/nbd-wtf/go-nostr"
 )

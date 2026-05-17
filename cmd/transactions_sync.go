@@ -10,11 +10,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/CommonsHub/chb/sources"
-	etherscansource "github.com/CommonsHub/chb/sources/etherscan"
-	moneriumsource "github.com/CommonsHub/chb/sources/monerium"
-	nostrsource "github.com/CommonsHub/chb/sources/nostr"
-	stripesource "github.com/CommonsHub/chb/sources/stripe"
+	"github.com/CommonsHub/chb/providers"
+	etherscansource "github.com/CommonsHub/chb/providers/etherscan"
+	moneriumsource "github.com/CommonsHub/chb/providers/monerium"
+	nostrsource "github.com/CommonsHub/chb/providers/nostr"
+	stripesource "github.com/CommonsHub/chb/providers/stripe"
 )
 
 // EtherscanResponse represents the Etherscan V2 API response
@@ -236,7 +236,7 @@ func TransactionsSync(args []string) (int, error) {
 						}
 						year, month := parts[0], parts[1]
 
-						// Save to data/YYYY/MM/sources/etherscan/{chain}/{slug}.{token}.json
+						// Save to data/YYYY/MM/providers/etherscan/{chain}/{slug}.{token}.json
 						dataDir := DataDir()
 						filename := etherscansource.FileName(acc.Slug, acc.Token.Symbol)
 						relPath := etherscansource.RelPath(acc.Chain, filename)
@@ -318,7 +318,7 @@ func TransactionsSync(args []string) (int, error) {
 						}
 						if allMonthsCached(DataDir(), startMonth, endMonth, relPathFn) {
 							if !monthRangeIncludes(time.Now().In(BrusselsTZ()).Format("2006-01"), startMonth, endMonth) {
-								fmt.Printf("  %sAll requested Stripe source files are already cached%s\n", Fmt.Dim, Fmt.Reset)
+								fmt.Printf("  %sAll requested Stripe provider files are already cached%s\n", Fmt.Dim, Fmt.Reset)
 								continue
 							}
 						}
@@ -376,7 +376,7 @@ func TransactionsSync(args []string) (int, error) {
 
 					if len(monthsToUpdate) == 0 {
 						status.Clear()
-						fmt.Printf("  %sNo Stripe source files changed%s\n", Fmt.Dim, Fmt.Reset)
+						fmt.Printf("  %sNo Stripe provider files changed%s\n", Fmt.Dim, Fmt.Reset)
 					}
 
 					updatedMonths := sortedTrueMonths(monthsToUpdate)
@@ -408,7 +408,7 @@ func TransactionsSync(args []string) (int, error) {
 						status.Update("Writing %s...", displayMonthRelPath(year, month, relPath))
 						if err := stripesource.WriteJSON(dataDir, year, month, cache, stripesource.BalanceTransactionsFile); err != nil {
 							status.Clear()
-							Errorf("  %s✗ Failed to write Stripe source data: %v%s", Fmt.Red, err, Fmt.Reset)
+							Errorf("  %s✗ Failed to write Stripe provider data: %v%s", Fmt.Red, err, Fmt.Reset)
 							continue
 						}
 						status.Clear()
@@ -805,7 +805,7 @@ func tokenTransferKey(tx etherscansource.TokenTransfer) string {
 // saveNostrMetadataLayers writes Nostr metadata to two layers:
 //   - per-month files (filtered to txs/addresses involved in that month) — frozen
 //     snapshots so re-reading any month gives what was known at sync time.
-//   - data/latest/sources/nostr/<chainID>/metadata.json — timeless union across
+//   - data/latest/providers/nostr/<chainID>/metadata.json — timeless union across
 //     every chain ever synced.
 //
 // Both writes merge into existing entries by createdAt so concurrent accounts
@@ -917,7 +917,7 @@ func findFirstIncompleteMonth(settings *Settings, sourceFilter string) string {
 
 		allPresent := true
 		for _, source := range expectedSources {
-			sourceDir := filepath.Join(dataDir, year, month, "sources", source)
+			sourceDir := filepath.Join(dataDir, year, month, "providers", source)
 			if source == "monerium" {
 				sourceDir = moneriumsource.Path(dataDir, year, month)
 			} else if source == "celo" || source == "gnosis" || source == "ethereum" || source == "etherscan" {
@@ -1050,8 +1050,8 @@ func printMonthHeadingOnce(ym string, printed map[string]bool) {
 	fmt.Printf("%s\n", strings.ReplaceAll(ym, "-", "/"))
 }
 
-func stripeTransactionProgress(status *statusLine) sources.ProgressFunc {
-	return func(ev sources.ProgressEvent) {
+func stripeTransactionProgress(status *statusLine) providers.ProgressFunc {
+	return func(ev providers.ProgressEvent) {
 		if ev.Source != "stripe" || ev.Step != "fetch_transactions" {
 			return
 		}
@@ -1066,8 +1066,8 @@ func stripeTransactionProgress(status *statusLine) sources.ProgressFunc {
 	}
 }
 
-func stripeChargeProgress(status *statusLine) sources.ProgressFunc {
-	return func(ev sources.ProgressEvent) {
+func stripeChargeProgress(status *statusLine) providers.ProgressFunc {
+	return func(ev providers.ProgressEvent) {
 		if ev.Source == "stripe" && ev.Step == "fetch_charges" && ev.Detail == "charge_session" {
 			status.Update("Fetching Stripe charge records... %d/%d", ev.Current, ev.Total)
 		}
@@ -1119,7 +1119,7 @@ func printTransactionsSyncHelp() {
   %sgnosis%s      ERC20 token transfers via Etherscan V2 API (Gnosis Chain)
   %scelo%s        ERC20 token transfers via Etherscan V2 API (Celo)
   %sstripe%s      Balance transactions from Stripe
-  %smonerium%s    SEPA orders from Monerium (stored in sources/monerium/)
+  %smonerium%s    SEPA orders from Monerium (stored in providers/monerium/)
 
 %sENVIRONMENT%s
   %sETHERSCAN_API_KEY%s         Etherscan/Gnosisscan API key
@@ -1134,7 +1134,7 @@ func printTransactionsSyncHelp() {
   Nostr annotations are used when generating reports. Use %s--no-nostr%s to skip.
 
 %sEXAMPLES%s
-  %schb transactions sync%s                       Sync all sources, last 2 months
+  %schb transactions sync%s                       Sync all providers, last 2 months
   %schb transactions sync --source monerium%s     Monerium only
   %schb transactions sync 2025 --source stripe%s  Stripe for all of 2025
   %schb transactions sync --no-nostr%s            Skip Nostr metadata fetching

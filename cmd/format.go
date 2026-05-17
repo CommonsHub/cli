@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+	_ "time/tzdata"
 )
 
 // Pluralize returns "<n> <noun>" with the noun's number adjusted to match

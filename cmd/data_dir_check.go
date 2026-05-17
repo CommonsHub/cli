@@ -38,6 +38,7 @@ func EnsureWritableDataDir() (string, error) {
 		return dataDir, fmt.Errorf("cannot clean up write test file in DATA_DIR %s: %w%s", dataDir, err, dataDirAccessContext(dataDir))
 	}
 
+	normalizeDataDir(dataDir)
 	return dataDir, nil
 }
 

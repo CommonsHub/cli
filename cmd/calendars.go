@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/CommonsHub/chb/ical"
-	icssource "github.com/CommonsHub/chb/sources/ics"
+	icssource "github.com/CommonsHub/chb/providers/ics"
 )
 
 type calendarSummary struct {
@@ -46,7 +46,7 @@ func Calendars(args []string) {
 	summaries := buildCalendarSummaries(dataDir, dateRange)
 	if len(summaries) == 0 {
 		fmt.Printf("\n%sNo calendar data found.%s\n", Fmt.Dim, Fmt.Reset)
-		fmt.Printf("%sRun 'chb calendars sync' to fetch calendar sources.%s\n\n", Fmt.Dim, Fmt.Reset)
+		fmt.Printf("%sRun 'chb calendars sync' to fetch calendar providers.%s\n\n", Fmt.Dim, Fmt.Reset)
 		return
 	}
 

@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	odoosource "github.com/CommonsHub/chb/sources/odoo"
+	odoosource "github.com/CommonsHub/chb/providers/odoo"
 )
 
 type attachmentSyncResult struct {
@@ -321,14 +321,14 @@ func printAttachmentsSyncHelp() {
 
 %sDESCRIPTION%s
   By default, processes the current month and previous month.
-  With %s--history%s, processes all historical months with Odoo source data.
+  With %s--history%s, processes all historical months with Odoo provider data.
 
   Reads:
-    data/YYYY/MM/sources/odoo/private/invoices.json
-    data/YYYY/MM/sources/odoo/private/bills.json
+    data/YYYY/MM/providers/odoo/private/invoices.json
+    data/YYYY/MM/providers/odoo/private/bills.json
 
   Downloads listed attachment binaries or URL attachments and stores them under:
-    data/YYYY/MM/sources/odoo/private/attachments/{invoices|bills}/{documentId}/{attachmentId}.{ext}
+    data/YYYY/MM/providers/odoo/private/attachments/{invoices|bills}/{documentId}/{attachmentId}.{ext}
 
   Existing files are skipped unless --force is used.
 

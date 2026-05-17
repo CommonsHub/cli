@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	odoosource "github.com/CommonsHub/chb/sources/odoo"
+	odoosource "github.com/CommonsHub/chb/providers/odoo"
 )
 
 // OdooCredentials holds resolved Odoo connection info.

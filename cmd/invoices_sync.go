@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	odoosource "github.com/CommonsHub/chb/sources/odoo"
+	odoosource "github.com/CommonsHub/chb/providers/odoo"
 )
 
 const odooDocumentsSchemaVersion = 4
@@ -1834,8 +1834,8 @@ func printInvoicesSyncHelp() {
 
 %sDATA%s
   Saves monthly invoice snapshots to:
-    DATA_DIR/YYYY/MM/sources/odoo/invoices.json
-    DATA_DIR/YYYY/MM/sources/odoo/private/invoices.json
+    DATA_DIR/YYYY/MM/providers/odoo/invoices.json
+    DATA_DIR/YYYY/MM/providers/odoo/private/invoices.json
 
   Each invoice includes:
   • public: date, status, payment status, amounts, title, line items, VAT, categories, tags, journal, reconciled transaction

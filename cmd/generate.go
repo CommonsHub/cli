@@ -12,12 +12,12 @@ import (
 	"strings"
 	"time"
 
-	discordsource "github.com/CommonsHub/chb/sources/discord"
-	etherscansource "github.com/CommonsHub/chb/sources/etherscan"
-	moneriumsource "github.com/CommonsHub/chb/sources/monerium"
-	nostrsource "github.com/CommonsHub/chb/sources/nostr"
-	odoosource "github.com/CommonsHub/chb/sources/odoo"
-	stripesource "github.com/CommonsHub/chb/sources/stripe"
+	discordsource "github.com/CommonsHub/chb/providers/discord"
+	etherscansource "github.com/CommonsHub/chb/providers/etherscan"
+	moneriumsource "github.com/CommonsHub/chb/providers/monerium"
+	nostrsource "github.com/CommonsHub/chb/providers/nostr"
+	odoosource "github.com/CommonsHub/chb/providers/odoo"
+	stripesource "github.com/CommonsHub/chb/providers/stripe"
 )
 
 // ── Data types ──────────────────────────────────────────────────────────────
@@ -206,41 +206,41 @@ func roundCents(v float64) float64 {
 }
 
 type TransactionEntry struct {
-	ID               string                 `json:"id"` // NIP-73 URI (matches the `i` tag used by Nostr annotations)
-	Provider         string                 `json:"provider"`
-	ProviderID       string                 `json:"providerId,omitempty"`
-	AccountID        string                 `json:"accountId,omitempty"`
-	CounterpartyID   string                 `json:"counterpartyId,omitempty"`
-	Chain            *string                `json:"chain,omitempty"`
-	AccountSlug      string                 `json:"accountSlug,omitempty"`
-	AccountName      string                 `json:"accountName,omitempty"`
-	Currency         string                 `json:"currency"`
-	Value            string                 `json:"value"`
-	Amount           float64                `json:"amount"`
-	NetAmount        float64                `json:"netAmount,omitempty"`
-	GrossAmount      float64                `json:"grossAmount"`
-	NormalizedAmount float64                `json:"normalizedAmount"`
-	Fee              float64                `json:"fee"`
-	Type             string                 `json:"type"`
-	Timestamp        int64                  `json:"timestamp"`
-	Application      string                 `json:"application,omitempty"`
-	StripeCustomerID string                 `json:"stripeCustomerId,omitempty"`
+	ID               string  `json:"id"` // NIP-73 URI (matches the `i` tag used by Nostr annotations)
+	Provider         string  `json:"provider"`
+	ProviderID       string  `json:"providerId,omitempty"`
+	AccountID        string  `json:"accountId,omitempty"`
+	CounterpartyID   string  `json:"counterpartyId,omitempty"`
+	Chain            *string `json:"chain,omitempty"`
+	AccountSlug      string  `json:"accountSlug,omitempty"`
+	AccountName      string  `json:"accountName,omitempty"`
+	Currency         string  `json:"currency"`
+	Value            string  `json:"value"`
+	Amount           float64 `json:"amount"`
+	NetAmount        float64 `json:"netAmount,omitempty"`
+	GrossAmount      float64 `json:"grossAmount"`
+	NormalizedAmount float64 `json:"normalizedAmount"`
+	Fee              float64 `json:"fee"`
+	Type             string  `json:"type"`
+	Timestamp        int64   `json:"timestamp"`
+	Application      string  `json:"application,omitempty"`
+	StripeCustomerID string  `json:"stripeCustomerId,omitempty"`
 	// Category and Collective live in Metadata in the public JSON
 	// (metadata.category / metadata.collective). They're kept on the struct
 	// for internal access by rules, reports and reconciliation; the custom
 	// UnmarshalJSON below restores them from metadata when loading.
-	Category   string `json:"-"`
-	Collective string `json:"-"`
-	Event            string                 `json:"event,omitempty"`
-	Tags             [][]string             `json:"tags,omitempty"`
-	Metadata         map[string]interface{} `json:"metadata,omitempty"`
-	Spread           []SpreadEntry          `json:"spread,omitempty"`
+	Category   string                 `json:"-"`
+	Collective string                 `json:"-"`
+	Event      string                 `json:"event,omitempty"`
+	Tags       [][]string             `json:"tags,omitempty"`
+	Metadata   map[string]interface{} `json:"metadata,omitempty"`
+	Spread     []SpreadEntry          `json:"spread,omitempty"`
 
 	// Internal-only (omitempty + cleared when building publicTxs). Kept on
 	// the struct so categorizer/rules/reconciliation logic and JSON fixtures
 	// keep working — but the canonical public handles are
 	// AccountID/CounterpartyID/ID/ProviderID.
-	TxHash         string `json:"txHash,omitempty"`
+	TxHash string `json:"txHash,omitempty"`
 	// LogIndex disambiguates multiple transfers sharing the same TxHash
 	// (e.g. a Safe multisend or DEX swap emits several ERC-20 Transfer
 	// events in one tx). It's the 0-based ordinal of this transfer
@@ -628,6 +628,8 @@ func Generate(args []string) error {
 
 	fmt.Printf("\n%s🔧 Generating derived data files...%s\n", Fmt.Bold, Fmt.Reset)
 	fmt.Printf("%sDATA_DIR: %s%s\n\n", Fmt.Dim, dataDir, Fmt.Reset)
+	latestDir := filepath.Join(dataDir, "latest")
+	hadLatestDir := dirExists(latestDir)
 
 	years := getAvailableYears(dataDir)
 	if len(years) == 0 {
@@ -645,7 +647,7 @@ func Generate(args []string) error {
 		fmt.Printf("%sGeneration window: %s → %s%s\n\n", Fmt.Dim, first, last, Fmt.Reset)
 	}
 
-	// Write generated/ README
+	// Write latest/generated/ README
 	writeGeneratedReadme(dataDir)
 
 	settings, _ := LoadSettings()
@@ -661,9 +663,8 @@ func Generate(args []string) error {
 		}
 	}
 
-	// Generate latest images (from latest/sources/discord/)
-	latestDir := filepath.Join(dataDir, "latest")
-	if _, err := os.Stat(latestDir); err == nil {
+	// Generate latest images (from latest/providers/discord/)
+	if hadLatestDir {
 		n := generateMonthImagesGo(dataDir, "latest", "")
 		if n > 0 {
 			fmt.Printf("  ✓ latest: %s\n", Pluralize(n, "image", ""))
@@ -690,7 +691,7 @@ func Generate(args []string) error {
 		}
 	}
 	// Also generate for latest/ — rolling 90-day window
-	if _, err := os.Stat(latestDir); err == nil {
+	if hadLatestDir {
 		cutoff := time.Now().UTC().AddDate(0, 0, -LatestContributorsWindowDays)
 		n := generateMonthContributorsGo(dataDir, "latest", "", settings, contributorsCache, cutoff)
 		if n > 0 {
@@ -726,7 +727,7 @@ func Generate(args []string) error {
 		}
 	}
 	// Also generate for latest/
-	if _, err := os.Stat(latestDir); err == nil {
+	if hadLatestDir {
 		n := generateTransactionsGo(dataDir, "latest", "", settings)
 		if n > 0 {
 			fmt.Printf("  ✓ latest: %s\n", Pluralize(n, "transaction", ""))
@@ -748,6 +749,7 @@ func Generate(args []string) error {
 	// 9. Generate latest events
 	fmt.Printf("📅 Generating latest events...\n")
 	generateLatestEventsGo(dataDir, years)
+	generateMarkdownFiles(dataDir)
 	fmt.Println()
 
 	// 10. Generate counterparties
@@ -756,7 +758,7 @@ func Generate(args []string) error {
 		generateCounterpartiesGo(dataDir, scope.Year, scope.Month)
 	}
 	// Also generate for latest/
-	if _, err := os.Stat(latestDir); err == nil {
+	if hadLatestDir {
 		generateCounterpartiesGo(dataDir, "latest", "")
 	}
 	fmt.Println()
@@ -938,6 +940,7 @@ func GenerateEvents(args []string) error {
 	enrichEventsWithTicketSales(dataDir)
 	fmt.Printf("\n%s📅 Generating latest events...%s\n", Fmt.Bold, Fmt.Reset)
 	generateLatestEventsGo(dataDir, years)
+	generateMarkdownFiles(dataDir)
 	fmt.Printf("%s✓ Events generators complete%s\n\n", Fmt.Green, Fmt.Reset)
 	return nil
 }
@@ -1190,7 +1193,7 @@ func generateActivityGridGo(dataDir string, years []string) ActivityGridData {
 		grid.Years = append(grid.Years, ActivityGridYear{Year: year, Months: yearMonths})
 	}
 
-	outputPath := filepath.Join(dataDir, "generated", "activitygrid.json")
+	outputPath := filepath.Join(dataDir, "latest", "generated", "activitygrid.json")
 	writeJSONFile(outputPath, grid)
 	fmt.Printf("  ✓ Generated global activity grid\n")
 
@@ -1764,7 +1767,7 @@ func generateTopContributorsGo(dataDir string, settings *Settings) {
 		IsMockData:      false,
 	}
 
-	outputPath := filepath.Join(dataDir, "generated", "contributors.json")
+	outputPath := filepath.Join(dataDir, "latest", "generated", "contributors.json")
 	writeJSONFile(outputPath, out)
 	fmt.Printf("  ✓ Generated contributors.json (%d contributors, %d active)\n", len(list), len(contributorMap))
 }
@@ -1782,7 +1785,7 @@ func generateUserProfilesGo(dataDir string, settings *Settings) {
 	contributors := map[string]*contribData{}
 
 	// From global contributors.json
-	globalPath := filepath.Join(dataDir, "generated", "contributors.json")
+	globalPath := filepath.Join(dataDir, "latest", "generated", "contributors.json")
 	if data, err := os.ReadFile(globalPath); err == nil {
 		var f TopContributorsFile
 		if json.Unmarshal(data, &f) == nil {
@@ -1812,7 +1815,7 @@ func generateUserProfilesGo(dataDir string, settings *Settings) {
 		}
 	}
 
-	profilesDir := filepath.Join(dataDir, "generated", "profiles")
+	profilesDir := filepath.Join(dataDir, "latest", "generated", "profiles")
 	os.MkdirAll(profilesDir, 0755)
 
 	profileCount := 0
@@ -2025,7 +2028,7 @@ func generateYearlyUsersGo(dataDir, year string, settings *Settings) {
 
 func generateTransactionsGo(dataDir, year, month string, settings *Settings) int {
 	stripePaths := stripesource.TransactionCachePaths(dataDir, year, month)
-	etherscanDir := filepath.Join(dataDir, year, month, "sources", "etherscan")
+	etherscanDir := filepath.Join(dataDir, year, month, "providers", "etherscan")
 	etherscanExists := true
 	if _, err := os.Stat(etherscanDir); os.IsNotExist(err) {
 		etherscanExists = false
@@ -3278,7 +3281,7 @@ func generateLatestEventsGo(dataDir string, years []string) {
 // ── Generated README ────────────────────────────────────────────────────────
 
 func writeGeneratedReadme(dataDir string) {
-	readme := `# generated/
+	readme := `# latest/generated/
 
 Files in this folder are produced by ` + "`chb generate`" + `.
 They are derived from raw synced data and can be regenerated at any time.
@@ -3296,7 +3299,7 @@ They are derived from raw synced data and can be regenerated at any time.
 | members.json | Membership snapshot (Stripe + Odoo) |
 | images.json | Images extracted from Discord messages |
 `
-	readmePath := filepath.Join(dataDir, "generated", "README.md")
+	readmePath := filepath.Join(dataDir, "latest", "generated", "README.md")
 	_ = writeDataFile(readmePath, []byte(readme))
 }
 

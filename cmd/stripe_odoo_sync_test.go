@@ -3,7 +3,7 @@ package cmd
 import (
 	"testing"
 
-	stripesource "github.com/CommonsHub/chb/sources/stripe"
+	stripesource "github.com/CommonsHub/chb/providers/stripe"
 )
 
 func TestStripeStatementLineAmountUsesGrossForCustomerTransactions(t *testing.T) {

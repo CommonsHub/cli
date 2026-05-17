@@ -27,7 +27,7 @@ func TestCalendarsShowsSummaryAndOptionalMonthlyBreakdown(t *testing.T) {
 	    "calendar": "ostrom"
 	  }]
 	}`)
-	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "sources", "ics", "ostrom.ics"), `BEGIN:VCALENDAR
+	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "providers", "ics", "ostrom.ics"), `BEGIN:VCALENDAR
 VERSION:2.0
 BEGIN:VEVENT
 UID:room-private-1
@@ -45,7 +45,7 @@ SUMMARY:Room public
 DTSTART:20260412T100000Z
 END:VEVENT
 END:VCALENDAR`)
-	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "sources", "ics", "privatecal.ics"), `BEGIN:VCALENDAR
+	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "providers", "ics", "privatecal.ics"), `BEGIN:VCALENDAR
 VERSION:2.0
 BEGIN:VEVENT
 UID:private-source-1
@@ -60,7 +60,7 @@ END:VCALENDAR`)
 	    {"id":"luma-2","name":"Luma 2","calendarSource":"luma","startAt":"2026-04-15T10:00:00Z"}
 	  ]
 	}`)
-	writeJSONFixture(t, filepath.Join(dataDir, "2026", "05", "sources", "ics", "ostrom.ics"), `BEGIN:VCALENDAR
+	writeJSONFixture(t, filepath.Join(dataDir, "2026", "05", "providers", "ics", "ostrom.ics"), `BEGIN:VCALENDAR
 VERSION:2.0
 BEGIN:VEVENT
 UID:room-private-may
@@ -159,7 +159,7 @@ func TestLoadAllBookingsUsesRoomCalendarReference(t *testing.T) {
 	    "calendar": "ostrom-calendar"
 	  }]
 	}`)
-	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "sources", "ics", "ostrom-calendar.ics"), `BEGIN:VCALENDAR
+	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "providers", "ics", "ostrom-calendar.ics"), `BEGIN:VCALENDAR
 VERSION:2.0
 BEGIN:VEVENT
 UID:room-booking
@@ -167,7 +167,7 @@ SUMMARY:Room booking
 DTSTART:20260410T100000Z
 END:VEVENT
 END:VCALENDAR`)
-	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "sources", "ics", "privatecal.ics"), `BEGIN:VCALENDAR
+	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "providers", "ics", "privatecal.ics"), `BEGIN:VCALENDAR
 VERSION:2.0
 BEGIN:VEVENT
 UID:private-source

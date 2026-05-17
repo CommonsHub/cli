@@ -49,13 +49,13 @@ func TestWriteDataFileSetsPrivateDirectoryPermissions(t *testing.T) {
 	assertMode(t, path, 0644)
 }
 
-func TestWriteDataFileTreatsSourcesAsPrivate(t *testing.T) {
+func TestWriteDataFileTreatsProviderArchivesAsPrivate(t *testing.T) {
 	dataDir := t.TempDir()
 	t.Setenv("DATA_DIR", dataDir)
 
-	path := filepath.Join(DataDir(), "2026", "04", "sources", "stripe", "customers.json")
+	path := filepath.Join(DataDir(), "2026", "04", "providers", "stripe", "customers.json")
 	if err := writeDataFile(path, []byte(`{"name":"alice@example.org"}`)); err != nil {
-		t.Fatalf("write sources file: %v", err)
+		t.Fatalf("write provider archive file: %v", err)
 	}
 
 	data, err := os.ReadFile(path)
@@ -63,10 +63,80 @@ func TestWriteDataFileTreatsSourcesAsPrivate(t *testing.T) {
 		t.Fatal(err)
 	}
 	if string(data) != `{"name":"alice@example.org"}` {
-		t.Fatalf("sources should not be scrubbed, got %s", data)
+		t.Fatalf("provider archives should not be scrubbed, got %s", data)
 	}
-	assertMode(t, filepath.Join(dataDir, "2026", "04", "sources"), 0700)
-	assertMode(t, filepath.Join(dataDir, "2026", "04", "sources", "stripe"), 0700)
+	assertMode(t, filepath.Join(dataDir, "2026", "04", "providers"), 0700)
+	assertMode(t, filepath.Join(dataDir, "2026", "04", "providers", "stripe"), 0700)
+}
+
+func TestDataDirMigratesLegacySourcesArchives(t *testing.T) {
+	dataDir := t.TempDir()
+	legacyFile := filepath.Join(dataDir, "2026", "04", "sources", "stripe", "customers.json")
+	if err := os.MkdirAll(filepath.Dir(legacyFile), 0700); err != nil {
+		t.Fatalf("mkdir legacy archive: %v", err)
+	}
+	if err := os.WriteFile(legacyFile, []byte(`{"ok":true}`), 0600); err != nil {
+		t.Fatalf("write legacy archive: %v", err)
+	}
+
+	t.Setenv("DATA_DIR", dataDir)
+	_ = DataDir()
+
+	migratedFile := filepath.Join(dataDir, "2026", "04", "providers", "stripe", "customers.json")
+	if _, err := os.Stat(migratedFile); err != nil {
+		t.Fatalf("expected migrated archive file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "2026", "04", "sources")); !os.IsNotExist(err) {
+		t.Fatalf("expected legacy sources directory to be removed, got err=%v", err)
+	}
+}
+
+func TestDataDirMigratesLegacySourcePathReferences(t *testing.T) {
+	dataDir := t.TempDir()
+	imagesFile := filepath.Join(dataDir, "2026", "04", "generated", "images.json")
+	if err := os.MkdirAll(filepath.Dir(imagesFile), 0755); err != nil {
+		t.Fatalf("mkdir generated: %v", err)
+	}
+	if err := os.WriteFile(imagesFile, []byte(`{"filePath":"2026/04/sources/discord/images/att-1.png","sources":[]}`), 0644); err != nil {
+		t.Fatalf("write generated file: %v", err)
+	}
+
+	t.Setenv("DATA_DIR", dataDir)
+	_ = DataDir()
+
+	data, err := os.ReadFile(imagesFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(data)
+	if !strings.Contains(got, `"filePath":"2026/04/providers/discord/images/att-1.png"`) {
+		t.Fatalf("expected filePath migration, got %s", got)
+	}
+	if !strings.Contains(got, `"sources":[]`) {
+		t.Fatalf("schema field should not be renamed, got %s", got)
+	}
+}
+
+func TestDataDirMigratesLegacyRootGenerated(t *testing.T) {
+	dataDir := t.TempDir()
+	legacyFile := filepath.Join(dataDir, "generated", "contributors.json")
+	if err := os.MkdirAll(filepath.Dir(legacyFile), 0755); err != nil {
+		t.Fatalf("mkdir legacy generated: %v", err)
+	}
+	if err := os.WriteFile(legacyFile, []byte(`{"contributors":[]}`), 0644); err != nil {
+		t.Fatalf("write legacy generated: %v", err)
+	}
+
+	t.Setenv("DATA_DIR", dataDir)
+	_ = DataDir()
+
+	migratedFile := filepath.Join(dataDir, "latest", "generated", "contributors.json")
+	if _, err := os.Stat(migratedFile); err != nil {
+		t.Fatalf("expected migrated generated file: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(dataDir, "generated")); !os.IsNotExist(err) {
+		t.Fatalf("expected legacy root generated directory to be removed, got err=%v", err)
+	}
 }
 
 func TestDataDirNormalizesExistingPrivateDirectoryModes(t *testing.T) {
@@ -93,15 +163,15 @@ func TestWriteMonthFileCreatesNestedMessageDirectories(t *testing.T) {
 		DataDir(),
 		"2026",
 		"03",
-		filepath.Join("sources", "discord", "1443322243949137971", "messages.json"),
+		filepath.Join("providers", "discord", "1443322243949137971", "messages.json"),
 		[]byte(`{"messages":[]}`),
 	)
 	if err != nil {
 		t.Fatalf("write month file: %v", err)
 	}
 
-	monthPath := filepath.Join(dataDir, "2026", "03", "sources", "discord", "1443322243949137971", "messages.json")
-	latestPath := filepath.Join(dataDir, "latest", "sources", "discord", "1443322243949137971", "messages.json")
+	monthPath := filepath.Join(dataDir, "2026", "03", "providers", "discord", "1443322243949137971", "messages.json")
+	latestPath := filepath.Join(dataDir, "latest", "providers", "discord", "1443322243949137971", "messages.json")
 
 	assertMode(t, filepath.Dir(monthPath), 0700)
 	assertMode(t, monthPath, 0644)

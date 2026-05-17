@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/CommonsHub/chb/ical"
-	icssource "github.com/CommonsHub/chb/sources/ics"
+	icssource "github.com/CommonsHub/chb/providers/ics"
 )
 
 type BookingEntry struct {

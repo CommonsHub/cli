@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	discordsource "github.com/CommonsHub/chb/sources/discord"
-	icssource "github.com/CommonsHub/chb/sources/ics"
+	discordsource "github.com/CommonsHub/chb/providers/discord"
+	icssource "github.com/CommonsHub/chb/providers/ics"
 )
 
 type dirSize struct {
@@ -461,7 +461,7 @@ func Stats(args []string) {
 		ms := &monthMsgStats{}
 
 		// Count messages from discord channel files
-		discordDir := filepath.Join(m.path, "sources", "discord")
+		discordDir := filepath.Join(m.path, "providers", "discord")
 		if channels, err := os.ReadDir(discordDir); err == nil {
 			for _, ch := range channels {
 				if !ch.IsDir() || ch.Name() == "images" {

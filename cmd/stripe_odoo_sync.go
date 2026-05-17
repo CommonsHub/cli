@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	stripesource "github.com/CommonsHub/chb/sources/stripe"
+	stripesource "github.com/CommonsHub/chb/providers/stripe"
 )
 
 // stripe_odoo_sync implements the chronological BT-iteration sync model.
@@ -54,10 +54,10 @@ func syncStripeChronological(
 	// further down. The previous max(date)-2d resume cursor missed BTs
 	// that Stripe added retroactively beyond the 2-day buffer (refunds,
 	// disputes, late captures), leaving them silently absent from Odoo.
-	odooLog("  %sLoading archived Stripe source transactions...%s\n", Fmt.Dim, Fmt.Reset)
+	odooLog("  %sLoading archived Stripe provider transactions...%s\n", Fmt.Dim, Fmt.Reset)
 	bts, err := stripesource.LoadTransactionsSince(DataDir(), acc.AccountID, 0)
 	if err != nil {
-		return "", fmt.Errorf("load Stripe source transactions: %v", err)
+		return "", fmt.Errorf("load Stripe provider transactions: %v", err)
 	}
 	odooLog("  %s%s%s\n\n", Fmt.Dim, Pluralize(len(bts), "new Stripe balance transaction", ""), Fmt.Reset)
 	if len(bts) == 0 {
@@ -620,7 +620,6 @@ func setStatementBalanceEndReal(creds *OdooCredentials, uid int, stmtID int, val
 	return err
 }
 
-
 // AccountStripePending prints a breakdown of balance transactions that have
 // accumulated since the most recent payout — what will flow into the next
 // payout. Useful for sanity-checking Odoo's trailing balance against
@@ -642,11 +641,11 @@ func AccountStripePending(slug string) error {
 	}
 	// Walk archived balance_transactions newest-first to find the last payout,
 	// then collect every BT created after it.
-	fmt.Printf("\n  %sLoading archived Stripe source transactions...%s\n", Fmt.Dim, Fmt.Reset)
+	fmt.Printf("\n  %sLoading archived Stripe provider transactions...%s\n", Fmt.Dim, Fmt.Reset)
 	all, err := stripesource.LoadTransactions(DataDir(), acc.AccountID)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return fmt.Errorf("no Stripe source data found; run `chb transactions sync --source stripe --reset` first")
+			return fmt.Errorf("no Stripe provider data found; run `chb transactions sync --source stripe --reset` first")
 		}
 		return err
 	}

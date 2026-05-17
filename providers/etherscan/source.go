@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/CommonsHub/chb/sources"
+	"github.com/CommonsHub/chb/providers"
 )
 
 type SourceProvider struct{}
@@ -15,14 +15,14 @@ func (SourceProvider) Name() string {
 	return Source
 }
 
-func (SourceProvider) Files() []sources.File {
-	return []sources.File{
+func (SourceProvider) Files() []providers.File {
+	return []providers.File{
 		{Name: "<chain>/<account>.<token>.json", Description: "Monthly ERC20 token transfers from Etherscan V2.", Private: false},
 	}
 }
 
 func RelPath(chain string, elems ...string) string {
-	parts := []string{"sources", Source}
+	parts := []string{"providers", Source}
 	if chain != "" {
 		parts = append(parts, normalize(chain))
 	}

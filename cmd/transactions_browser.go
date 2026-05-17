@@ -12,7 +12,7 @@ import (
 	"time"
 
 	stickertable "github.com/76creates/stickers/table"
-	nostrsource "github.com/CommonsHub/chb/sources/nostr"
+	nostrsource "github.com/CommonsHub/chb/providers/nostr"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/nbd-wtf/go-nostr"

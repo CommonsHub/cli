@@ -340,7 +340,7 @@ func TestLumaProcessorDoesNotInferStripeFeesOrTaxes(t *testing.T) {
 
 func TestGenerateTransactionsMergesStripeChargeDataEvenWithCustomerData(t *testing.T) {
 	dataDir := t.TempDir()
-	sourceDir := filepath.Join(dataDir, "2026", "04", "sources", "stripe")
+	sourceDir := filepath.Join(dataDir, "2026", "04", "providers", "stripe")
 	if err := os.MkdirAll(sourceDir, 0755); err != nil {
 		t.Fatal(err)
 	}

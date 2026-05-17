@@ -32,7 +32,7 @@ func TestRebuildInboundSpreadsAndAccrualAggregation(t *testing.T) {
 	    "timestamp": 1735680000
 	  }]
 	}`)
-	writeJSONFixture(t, filepath.Join(dataDir, "2025", "12", "sources", "nostr", "transaction-annotations.json"), `{
+	writeJSONFixture(t, filepath.Join(dataDir, "2025", "12", "providers", "nostr", "transaction-annotations.json"), `{
 	  "annotations": {
 	    "stripe:ch_aaa": {
 	      "uri": "stripe:ch_aaa",

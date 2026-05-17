@@ -5,7 +5,7 @@ import (
 	"strings"
 
 	moneriumprocessor "github.com/CommonsHub/chb/processors/monerium"
-	moneriumsource "github.com/CommonsHub/chb/sources/monerium"
+	moneriumsource "github.com/CommonsHub/chb/providers/monerium"
 )
 
 type moneriumProcessor struct {

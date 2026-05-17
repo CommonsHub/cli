@@ -61,7 +61,7 @@ func TestGenerateTransactionsGoUsesStripeEtherscanAndMoneriumSources(t *testing.
 	dataDir := t.TempDir()
 	hash := "0xabcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890"
 
-	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "sources", "stripe", "balance-transactions.json"), `{
+	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "providers", "stripe", "balance-transactions.json"), `{
 	  "accountId": "acct_test",
 	  "currency": "eur",
 	  "transactions": [{
@@ -77,7 +77,7 @@ func TestGenerateTransactionsGoUsesStripeEtherscanAndMoneriumSources(t *testing.
 	    "source": {"id": "ch_stripe"}
 	  }]
 	}`)
-	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "sources", "etherscan", "gnosis", "treasury.EURe.json"), `{
+	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "providers", "etherscan", "gnosis", "treasury.EURe.json"), `{
 	  "cachedAt": "2026-04-01T00:00:00Z",
 	  "account": "0xabc0000000000000000000000000000000000000",
 	  "chain": "gnosis",
@@ -92,7 +92,7 @@ func TestGenerateTransactionsGoUsesStripeEtherscanAndMoneriumSources(t *testing.
 	    "tokenSymbol": "EURe"
 	  }]
 	}`)
-	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "sources", "monerium", "treasury.json"), `{
+	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "providers", "monerium", "treasury.json"), `{
 	  "cachedAt": "2026-04-01T00:00:00Z",
 	  "address": "0xabc0000000000000000000000000000000000000",
 	  "orders": [{
@@ -197,14 +197,14 @@ func TestGenerateTransactionsGoKeepsBothSidesOfInternalAccountTransfer(t *testin
 	  "tokenDecimal": "18",
 	  "tokenSymbol": "EURe"
 	}`
-	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "sources", "etherscan", "gnosis", "savings.EURe.json"), `{
+	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "providers", "etherscan", "gnosis", "savings.EURe.json"), `{
 	  "cachedAt": "2026-04-01T00:00:00Z",
 	  "account": "`+savings+`",
 	  "chain": "gnosis",
 	  "token": "EURe",
 	  "transactions": [`+txJSON+`]
 	}`)
-	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "sources", "etherscan", "gnosis", "checking.EURe.json"), `{
+	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "providers", "etherscan", "gnosis", "checking.EURe.json"), `{
 	  "cachedAt": "2026-04-01T00:00:00Z",
 	  "account": "`+checking+`",
 	  "chain": "gnosis",
@@ -260,14 +260,14 @@ func TestGenerateTransactionsGoDetectsInternalAccountsFromAccountsConfig(t *test
 	  "tokenDecimal": "18",
 	  "tokenSymbol": "EURe"
 	}`
-	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "sources", "etherscan", "gnosis", "savings.EURe.json"), `{
+	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "providers", "etherscan", "gnosis", "savings.EURe.json"), `{
 	  "cachedAt": "2026-04-01T00:00:00Z",
 	  "account": "`+savings+`",
 	  "chain": "gnosis",
 	  "token": "EURe",
 	  "transactions": [`+txJSON+`]
 	}`)
-	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "sources", "etherscan", "gnosis", "checking.EURe.json"), `{
+	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "providers", "etherscan", "gnosis", "checking.EURe.json"), `{
 	  "cachedAt": "2026-04-01T00:00:00Z",
 	  "account": "`+checking+`",
 	  "chain": "gnosis",
@@ -334,22 +334,22 @@ func TestGenerateMonthlyReportGoSummarizesGeneratedFilesAndSources(t *testing.T)
 	    ]
 	  }]
 	}`)
-	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "sources", "stripe", "balance-transactions.json"), `{
+	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "providers", "stripe", "balance-transactions.json"), `{
 	  "transactions": [{"id":"txn_1"}]
 	}`)
-	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "sources", "etherscan", "gnosis", "treasury.EURe.json"), `{
+	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "providers", "etherscan", "gnosis", "treasury.EURe.json"), `{
 	  "transactions": [{"hash":"`+hash+`"}]
 	}`)
-	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "sources", "monerium", "treasury.json"), `{
+	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "providers", "monerium", "treasury.json"), `{
 	  "orders": [{"id":"ord_1","state":"processed"}]
 	}`)
-	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "sources", "odoo", "invoices.json"), `{
+	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "providers", "odoo", "invoices.json"), `{
 	  "invoices": [{"id": 1}]
 	}`)
-	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "sources", "odoo", "private", "invoices.json"), `{
+	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "providers", "odoo", "private", "invoices.json"), `{
 	  "invoices": [{"id": 1, "attachments": [{"id": 7, "name": "invoice.pdf"}]}]
 	}`)
-	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "sources", "ics", "ostrom.ics"), `BEGIN:VCALENDAR
+	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "providers", "ics", "ostrom.ics"), `BEGIN:VCALENDAR
 VERSION:2.0
 BEGIN:VEVENT
 UID:booking-1
@@ -416,7 +416,7 @@ func TestGenerateMonthlyReportGoSummarizesMintableTokens(t *testing.T) {
 	addr2 := "0x2222222222222222222222222222222222222222"
 	addr3 := "0x3333333333333333333333333333333333333333"
 
-	writeJSONFixture(t, filepath.Join(dataDir, "2026", "03", "sources", "etherscan", "celo", "cht.CHT.json"), `{
+	writeJSONFixture(t, filepath.Join(dataDir, "2026", "03", "providers", "etherscan", "celo", "cht.CHT.json"), `{
 	  "cachedAt": "2026-03-01T00:00:00Z",
 	  "account": "",
 	  "chain": "celo",
@@ -431,7 +431,7 @@ func TestGenerateMonthlyReportGoSummarizesMintableTokens(t *testing.T) {
 	    "tokenSymbol": "CHT"
 	  }]
 	}`)
-	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "sources", "etherscan", "celo", "cht.CHT.json"), `{
+	writeJSONFixture(t, filepath.Join(dataDir, "2026", "04", "providers", "etherscan", "celo", "cht.CHT.json"), `{
 	  "cachedAt": "2026-04-01T00:00:00Z",
 	  "account": "",
 	  "chain": "celo",

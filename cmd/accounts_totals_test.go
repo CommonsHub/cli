@@ -4,7 +4,7 @@ import (
 	"math"
 	"testing"
 
-	stripesource "github.com/CommonsHub/chb/sources/stripe"
+	stripesource "github.com/CommonsHub/chb/providers/stripe"
 )
 
 func TestAccountTotalsFromStripeTransactions(t *testing.T) {

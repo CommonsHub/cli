@@ -19,20 +19,20 @@ func TestGenerateMonthImagesGoUsesOriginalURLAndRelativeFilePath(t *testing.T) {
 			name:         "monthly",
 			year:         "2026",
 			month:        "04",
-			wantFilePath: "2026/04/sources/discord/images/att-1.png",
+			wantFilePath: "2026/04/providers/discord/images/att-1.png",
 		},
 		{
 			name:         "latest",
 			year:         "latest",
 			month:        "",
-			wantFilePath: "2026/04/sources/discord/images/att-1.png",
+			wantFilePath: "2026/04/providers/discord/images/att-1.png",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			dataDir := t.TempDir()
-			discordDir := filepath.Join(dataDir, tt.year, tt.month, "sources", "discord", "chan-1")
+			discordDir := filepath.Join(dataDir, tt.year, tt.month, "providers", "discord", "chan-1")
 			if err := os.MkdirAll(discordDir, 0755); err != nil {
 				t.Fatalf("mkdir: %v", err)
 			}
@@ -159,7 +159,7 @@ func TestGenerateMonthImagesGoIncludesAllSourceDiscordChannels(t *testing.T) {
 
 func writeDiscordSourceMessagesFixture(t *testing.T, dataDir, year, month, channelID, payload string) {
 	t.Helper()
-	discordDir := filepath.Join(dataDir, year, month, "sources", "discord", channelID)
+	discordDir := filepath.Join(dataDir, year, month, "providers", "discord", channelID)
 	if err := os.MkdirAll(discordDir, 0755); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}

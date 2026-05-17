@@ -1,6 +1,9 @@
 package cmd
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 func PrintHelp(version string) {
 	f := Fmt
@@ -19,7 +22,7 @@ func PrintHelp(version string) {
 %sCOMMANDS%s
   %sevents%s              List upcoming events
   %scalendars%s           Show calendar summary
-  %scalendars sync%s      Sync calendar sources
+  %scalendars sync%s      Sync calendar providers
   %sevents stats%s        Show event statistics
   %srooms%s               List all rooms with pricing
   %sbookings%s            List upcoming room bookings
@@ -33,7 +36,8 @@ func PrintHelp(version string) {
   %smessages sync%s       Fetch Discord messages
   %smessages stats%s      Show message statistics
   %simages sync%s         Download images from Discord and Luma
-  %ssync%s                Sync everything (calendars, transactions, invoices, bills, attachments, messages, generate, images)
+  %sproviders%s           List providers and provider-scoped commands
+  %ssync%s                Sync all providers
   %sgenerate%s            Generate derived data files (contributors, images, etc.)
   %smembers sync%s        Fetch membership data from Stripe/Odoo
   %sreport%s <period>     Generate monthly/yearly report
@@ -51,7 +55,7 @@ func PrintHelp(version string) {
 
 %sEXAMPLES%s
   %s$ chb events                          # next 10 upcoming events
-  $ chb calendars sync                   # sync calendar sources
+  $ chb calendars sync                   # sync calendar providers
   $ chb calendars sync 2025/11           # sync calendars for Nov 2025
   $ chb calendars sync 2025              # sync calendars for all of 2025
   $ chb sync 2025/11 --force             # resync everything for Nov 2025
@@ -62,6 +66,8 @@ func PrintHelp(version string) {
   $ chb bills sync                       # sync vendor bills from Odoo
   $ chb attachments sync                 # sync invoice/bill attachments from Odoo
   $ chb messages sync 2025              # sync messages for all of 2025
+  $ chb providers ics generate          # generate calendar outputs
+  $ chb providers * sync 2025/11        # sync all providers for Nov 2025
   $ chb calendars sync 2025/06           # sync calendars for Jun 2025
   $ chb tools getUrlMetadata https://example.com/event
   $ chb report 2025/11                   # monthly report
@@ -102,6 +108,7 @@ func PrintHelp(version string) {
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
 		f.Bold, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
@@ -116,6 +123,74 @@ func PrintHelp(version string) {
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
+	)
+}
+
+func PrintProvidersHelp() {
+	f := Fmt
+	fmt.Printf(`
+%schb providers%s — Provider command registry
+
+%sUSAGE%s
+  %schb providers%s
+  %schb providers%s <provider|*> <sync|generate> [year[/month]] [options]
+
+%sPROVIDERS%s
+`,
+		f.Bold, f.Reset,
+		f.Bold, f.Reset,
+		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
+		f.Bold, f.Reset,
+	)
+	for _, spec := range sortedProviderCommandSpecs() {
+		fmt.Printf("  %s%-10s%s %s\n", f.Cyan, spec.Name, f.Reset, strings.Join(spec.Commands, "|"))
+		if spec.Description != "" {
+			fmt.Printf("             %s%s%s\n", f.Dim, spec.Description, f.Reset)
+		}
+	}
+	fmt.Printf(`
+%sALIASES%s
+  %schb sync%s       Same as %schb providers * sync%s
+  %schb generate%s   Same as %schb providers * generate%s
+
+%sEXAMPLES%s
+  %schb providers ics sync%s 2025/11
+  %schb providers ics generate%s
+  %schb providers stripe sync%s --since 2025/01
+  %schb providers * generate%s
+`,
+		f.Bold, f.Reset,
+		f.Cyan, f.Reset, f.Cyan, f.Reset,
+		f.Cyan, f.Reset, f.Cyan, f.Reset,
+		f.Bold, f.Reset,
+		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
+	)
+}
+
+func PrintProviderHelp(spec providerCommandSpec) {
+	f := Fmt
+	fmt.Printf(`
+%schb providers %s%s — %s
+
+%sUSAGE%s
+  %schb providers %s sync%s [year[/month]] [options]
+  %schb providers %s generate%s [year[/month]] [options]
+
+%sCOMMANDS%s
+  %ssync%s       Fetch provider data into the monthly archive
+  %sgenerate%s   Transform archived provider data into generated outputs
+`,
+		f.Bold, spec.Name, f.Reset, spec.Description,
+		f.Bold, f.Reset,
+		f.Cyan, spec.Name, f.Reset,
+		f.Cyan, spec.Name, f.Reset,
+		f.Bold, f.Reset,
+		f.Cyan, f.Reset,
+		f.Cyan, f.Reset,
 	)
 }
 
@@ -184,8 +259,8 @@ func PrintDoctorHelp() {
   %schb doctor%s
 
 %sCHECKS%s
-  • Room Discord channel directories exist in latest/sources/discord/
-  • Generated files exist when source archives are present
+  • Room Discord channel directories exist in latest/providers/discord/
+  • Generated files exist when provider archives are present
   • images.json entries use canonical year/month image paths
   • Referenced local image files exist under DATA_DIR
   • images.json does not contain deprecated proxyUrl fields or \u escapes
@@ -209,13 +284,14 @@ func PrintDoctorHelp() {
 func PrintSyncAllHelp() {
 	f := Fmt
 	fmt.Printf(`
-%schb sync%s — Sync all data sources
+%schb sync%s — Sync all providers
 
-%sSources:%s calendars (room bookings and public events), transactions (Gnosis/Stripe),
+%sProviders:%s calendars (room bookings and public events), transactions (Gnosis/Stripe),
 invoices/bills/attachments (Odoo), messages (Discord), members (Stripe/Odoo)
 
 %sUSAGE%s
   %schb sync%s [year[/month]] [options]
+  %schb providers * sync%s [year[/month]] [options]
   %schb calendars sync%s [year[/month]] [options]
   %schb transactions sync%s [year[/month]] [options]
   %schb invoices sync%s [year[/month]] [options]
@@ -236,7 +312,7 @@ invoices/bills/attachments (Odoo), messages (Discord), members (Stripe/Odoo)
   %s--help, -h%s           Show this help
 
 %sEXAMPLES%s
-  %schb sync%s                        Sync latest data (all sources)
+  %schb sync%s                        Sync latest data (all providers)
   %schb sync --history%s              Sync history from where cache left off
   %schb sync --since 2024/06%s       Sync from June 2024 to now
   %schb sync 2025%s                   Sync all of 2025
@@ -252,6 +328,7 @@ invoices/bills/attachments (Odoo), messages (Discord), members (Stripe/Odoo)
 		f.Bold, f.Reset,
 		f.Bold, f.Reset,
 		f.Bold, f.Reset,
+		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
@@ -348,7 +425,7 @@ func PrintCalendarsHelp() {
 func PrintCalendarsSyncHelp() {
 	f := Fmt
 	fmt.Printf(`
-%schb calendars sync%s — Sync calendar sources
+%schb calendars sync%s — Sync calendar providers
 
 %sUSAGE%s
   %schb calendars sync%s [year[/month]] [options]
@@ -363,8 +440,8 @@ func PrintCalendarsSyncHelp() {
   %s--help, -h%s           Show this help
 
 %sSOURCES%s
-  • Configured calendar sources from calendars.json
-  • ICS sources use provider: "ics"
+  • Configured calendar providers from calendars.json
+  • ICS feeds use provider: "ics"
   • Room feeds reference rooms via the source room field
   • Public events are derived later by 'chb generate events'
 `,

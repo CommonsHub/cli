@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	etherscansource "github.com/CommonsHub/chb/sources/etherscan"
+	etherscansource "github.com/CommonsHub/chb/providers/etherscan"
 )
 
 // Tokens implements `chb tokens` — lists every token defined in
@@ -195,7 +195,7 @@ func tokenLastSync(state *SyncState, t TokenConfig) time.Time {
 }
 
 // tokenTxStatsResult summarises the on-chain history we have cached locally
-// for one token across every month under DATA_DIR/<year>/<month>/sources/
+// for one token across every month under DATA_DIR/<year>/<month>/providers/
 // etherscan/<chain>/<slug>.<SYMBOL>.json.
 type tokenTxStatsResult struct {
 	Count     int
@@ -203,10 +203,10 @@ type tokenTxStatsResult struct {
 	LastTxAt  time.Time
 }
 
-// tokenTxStats walks the per-month Etherscan source files for the token and
+// tokenTxStats walks the per-month Etherscan provider files for the token and
 // returns total transaction count + first/last timestamp. The aggregated
 // latest/generated/transactions.json is intentionally NOT used — it covers
-// only the rolling-window report period, so it lags behind the source files.
+// only the rolling-window report period, so it lags behind the provider files.
 func tokenTxStats(dataDir string, t TokenConfig) tokenTxStatsResult {
 	out := tokenTxStatsResult{}
 	if t.Slug == "" || t.Symbol == "" || t.Chain == "" {

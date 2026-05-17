@@ -17,8 +17,8 @@ import (
 	"strings"
 	"time"
 
-	etherscansource "github.com/CommonsHub/chb/sources/etherscan"
-	stripesource "github.com/CommonsHub/chb/sources/stripe"
+	etherscansource "github.com/CommonsHub/chb/providers/etherscan"
+	stripesource "github.com/CommonsHub/chb/providers/stripe"
 )
 
 // accountSummary holds computed balance and last tx info for an account.
@@ -3087,11 +3087,11 @@ type syncStats struct {
 	PartnersCreated    int
 	PartnersSkipped    int
 	Ambiguous          []string // "name <email>" entries
-	Charges            int      // number of charge/payment lines (all sources)
+	Charges            int      // number of charge/payment lines (all providers)
 	ChargesGross       float64  // total gross charges
 	Refunds            int      // number of refund lines
 	RefundsTotal       float64  // total refund amount (negative)
-	ChargeFees         float64  // total charge fees (from all sources)
+	ChargeFees         float64  // total charge fees (from all providers)
 	StripeFees         float64  // Stripe billing fees (separate debit lines)
 	PayoutsTotal       float64  // total payout withdrawals (negative)
 	LinesReconciled    int
@@ -4014,7 +4014,7 @@ func reportLocalImportIDCollisions(creds *OdooCredentials, uid int, acc *Account
 		sort.Slice(collisions, func(i, j int) bool { return collisions[i].ImportID < collisions[j].ImportID })
 		Warnf("  %s⚠ %s share an import_id with another local tx — Odoo can only hold one line per import_id, so the extras are silently treated as duplicates.%s",
 			Fmt.Yellow, Pluralize(len(collisions), "local tx group", ""), Fmt.Reset)
-		Warnf("  %s  Likely cause: LogIndex collision on the local side (two transfers in the same tx with logIndex=0, or the same tx loaded twice from different source files).%s",
+		Warnf("  %s  Likely cause: LogIndex collision on the local side (two transfers in the same tx with logIndex=0, or the same tx loaded twice from different provider files).%s",
 			Fmt.Yellow, Fmt.Reset)
 		for _, c := range collisions {
 			fmt.Printf("    %simport_id=%s  (%d local txs):%s\n", Fmt.Dim, c.ImportID, len(c.Txs), Fmt.Reset)
@@ -4028,7 +4028,6 @@ func reportLocalImportIDCollisions(creds *OdooCredentials, uid int, acc *Account
 		fmt.Println()
 	}
 }
-
 
 // fetchImportIDJournals returns importID → journalID for any Odoo
 // account.bank.statement.line whose unique_import_id matches one of the
@@ -4186,7 +4185,7 @@ func fetchOdooImportIDsForTransactions(creds *OdooCredentials, uid int, journalI
 	return result, nil
 }
 
-// AccountStripePayouts lists Stripe payouts derived from archived Stripe source data.
+// AccountStripePayouts lists Stripe payouts derived from archived Stripe provider data.
 func AccountStripePayouts(slug string, args []string) error {
 	monthsLimit := 0
 	for i, a := range args {
@@ -4196,12 +4195,12 @@ func AccountStripePayouts(slug string, args []string) error {
 	}
 
 	if HasFlag(args, "--refresh") {
-		fmt.Printf("\n  %sRebuilding payouts from archived Stripe source data...%s\n", Fmt.Dim, Fmt.Reset)
+		fmt.Printf("\n  %sRebuilding payouts from archived Stripe provider data...%s\n", Fmt.Dim, Fmt.Reset)
 		payouts, err := stripesource.RebuildPayoutsCacheFromTransactions(DataDir())
 		if err != nil {
 			return fmt.Errorf("failed to rebuild payouts cache: %v", err)
 		}
-		fmt.Printf("  %s%s cached from source archives%s\n", Fmt.Dim, Pluralize(len(payouts), "payout", ""), Fmt.Reset)
+		fmt.Printf("  %s%s cached from provider archives%s\n", Fmt.Dim, Pluralize(len(payouts), "payout", ""), Fmt.Reset)
 	}
 
 	cache := stripesource.LoadPayoutsCache(DataDir())

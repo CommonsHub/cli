@@ -3,7 +3,7 @@ package cmd
 import (
 	"testing"
 
-	etherscansource "github.com/CommonsHub/chb/sources/etherscan"
+	etherscansource "github.com/CommonsHub/chb/providers/etherscan"
 )
 
 func TestCountNewTokenTransfersUsesExistingCacheKeys(t *testing.T) {

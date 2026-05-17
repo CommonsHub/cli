@@ -12,13 +12,13 @@ import (
 	"time"
 
 	"github.com/CommonsHub/chb/ical"
-	discordsource "github.com/CommonsHub/chb/sources/discord"
-	etherscansource "github.com/CommonsHub/chb/sources/etherscan"
-	icssource "github.com/CommonsHub/chb/sources/ics"
-	moneriumsource "github.com/CommonsHub/chb/sources/monerium"
-	nostrsource "github.com/CommonsHub/chb/sources/nostr"
-	odoosource "github.com/CommonsHub/chb/sources/odoo"
-	stripesource "github.com/CommonsHub/chb/sources/stripe"
+	discordsource "github.com/CommonsHub/chb/providers/discord"
+	etherscansource "github.com/CommonsHub/chb/providers/etherscan"
+	icssource "github.com/CommonsHub/chb/providers/ics"
+	moneriumsource "github.com/CommonsHub/chb/providers/monerium"
+	nostrsource "github.com/CommonsHub/chb/providers/nostr"
+	odoosource "github.com/CommonsHub/chb/providers/odoo"
+	stripesource "github.com/CommonsHub/chb/providers/stripe"
 )
 
 type MonthlyReportFile struct {

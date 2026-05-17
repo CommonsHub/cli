@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/CommonsHub/chb/sources"
+	"github.com/CommonsHub/chb/providers"
 )
 
 const (
@@ -22,8 +22,8 @@ func (SourceProvider) Name() string {
 	return Source
 }
 
-func (SourceProvider) Files() []sources.File {
-	return []sources.File{
+func (SourceProvider) Files() []providers.File {
+	return []providers.File{
 		{Name: InvoicesFile, Description: "Monthly public Odoo customer invoices.", Private: false},
 		{Name: BillsFile, Description: "Monthly public Odoo vendor bills.", Private: false},
 		{Name: SubscriptionsFile, Description: "Monthly Odoo membership subscription snapshot.", Private: true},
@@ -35,7 +35,7 @@ func (SourceProvider) Files() []sources.File {
 }
 
 func RelPath(elems ...string) string {
-	parts := append([]string{"sources", Source}, elems...)
+	parts := append([]string{"providers", Source}, elems...)
 	return filepath.Join(parts...)
 }
 

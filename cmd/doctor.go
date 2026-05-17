@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	discordsource "github.com/CommonsHub/chb/sources/discord"
+	discordsource "github.com/CommonsHub/chb/providers/discord"
 )
 
 type doctorFinding struct {
@@ -35,7 +35,7 @@ type doctorScope struct {
 }
 
 var unicodeEscapePattern = regexp.MustCompile(`\\u[0-9a-fA-F]{4}`)
-var canonicalImagePathPattern = regexp.MustCompile(`^\d{4}/\d{2}/sources/discord/images/`)
+var canonicalImagePathPattern = regexp.MustCompile(`^\d{4}/\d{2}/providers/discord/images/`)
 var missingLocalFilePattern = regexp.MustCompile(`^image ([^ ]+) references missing local file "([^"]+)"$`)
 
 func Doctor(args []string) error {
@@ -315,12 +315,12 @@ func checkRoomChannelDirs(dataDir string, report *doctorReport) {
 }
 
 func checkGeneratedFiles(scope doctorScope, report *doctorReport) {
-	messagesDir := filepath.Join(scope.Path, "sources", "discord")
+	messagesDir := filepath.Join(scope.Path, "providers", "discord")
 	generatedDir := filepath.Join(scope.Path, "generated")
 	transactionSourceDirs := []string{
-		filepath.Join(scope.Path, "sources", "stripe"),
-		filepath.Join(scope.Path, "sources", "etherscan"),
-		filepath.Join(scope.Path, "sources", "monerium"),
+		filepath.Join(scope.Path, "providers", "stripe"),
+		filepath.Join(scope.Path, "providers", "etherscan"),
+		filepath.Join(scope.Path, "providers", "monerium"),
 	}
 	publicICS := filepath.Join(generatedDir, "calendars", "public.ics")
 
@@ -328,9 +328,9 @@ func checkGeneratedFiles(scope doctorScope, report *doctorReport) {
 		requireFile(scope, filepath.Join(generatedDir, "images.json"), "messages present but generated/images.json is missing", "Run: chb generate", report)
 	}
 	if hasAnyMaterialData(transactionSourceDirs...) {
-		requireFile(scope, filepath.Join(generatedDir, "transactions.json"), "transaction sources present but generated/transactions.json is missing", "Run: chb generate", report)
-		requireFile(scope, filepath.Join(generatedDir, "counterparties.json"), "transaction sources present but generated/counterparties.json is missing", "Run: chb generate", report)
-		requireFile(scope, filepath.Join(generatedDir, "summary.json"), "transaction sources present but generated/summary.json is missing", "Run: chb generate", report)
+		requireFile(scope, filepath.Join(generatedDir, "transactions.json"), "transaction provider archives present but generated/transactions.json is missing", "Run: chb generate", report)
+		requireFile(scope, filepath.Join(generatedDir, "counterparties.json"), "transaction provider archives present but generated/counterparties.json is missing", "Run: chb generate", report)
+		requireFile(scope, filepath.Join(generatedDir, "summary.json"), "transaction provider archives present but generated/summary.json is missing", "Run: chb generate", report)
 	}
 	if hasPublicEventSourceData(publicICS) {
 		requireFile(scope, filepath.Join(generatedDir, "events.json"), "calendar/event data present but generated/events.json is missing", "Run: chb calendars sync --history && chb generate events", report)

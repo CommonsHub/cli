@@ -93,7 +93,7 @@ func TestPathHasPrivateSegment(t *testing.T) {
 		want bool
 	}{
 		{"/data/2025/01/generated/private/customers.json", true},
-		{"/data/2025/01/sources/stripe/subscriptions.json", false},
+		{"/data/2025/01/providers/stripe/subscriptions.json", false},
 		{filepath.Join("data", "private", "x.json"), true},
 		{"private/x.json", true},
 		{"xprivate/x.json", false},
@@ -105,19 +105,19 @@ func TestPathHasPrivateSegment(t *testing.T) {
 	}
 }
 
-func TestPathHasSourcesSegment(t *testing.T) {
+func TestPathHasProviderArchiveSegment(t *testing.T) {
 	cases := []struct {
 		path string
 		want bool
 	}{
-		{"/org-data/2026/04/sources/stripe/balance-transactions.json", true},
-		{"/org-data/latest/sources/luma/events.json", true},
+		{"/org-data/2026/04/providers/stripe/balance-transactions.json", true},
+		{"/org-data/latest/providers/luma/events.json", true},
 		{"/org-data/data/2026/04/generated/transactions.json", false},
 		{"/org-data/2026/04/generated/sources.json", false},
 	}
 	for _, c := range cases {
-		if got := pathHasSourcesSegment(c.path); got != c.want {
-			t.Errorf("pathHasSourcesSegment(%q) = %v; want %v", c.path, got, c.want)
+		if got := pathHasProviderArchiveSegment(c.path); got != c.want {
+			t.Errorf("pathHasProviderArchiveSegment(%q) = %v; want %v", c.path, got, c.want)
 		}
 	}
 }

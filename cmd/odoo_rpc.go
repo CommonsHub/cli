@@ -3,7 +3,7 @@ package cmd
 import (
 	"encoding/json"
 
-	odoosource "github.com/CommonsHub/chb/sources/odoo"
+	odoosource "github.com/CommonsHub/chb/providers/odoo"
 )
 
 func odooDBFromURL(odooURL string) string {

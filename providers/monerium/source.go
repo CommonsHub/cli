@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/CommonsHub/chb/sources"
+	"github.com/CommonsHub/chb/providers"
 )
 
 type SourceProvider struct{}
@@ -15,14 +15,14 @@ func (SourceProvider) Name() string {
 	return Source
 }
 
-func (SourceProvider) Files() []sources.File {
-	return []sources.File{
+func (SourceProvider) Files() []providers.File {
+	return []providers.File{
 		{Name: "<account>.json", Description: "Monthly Monerium orders.", Private: true},
 	}
 }
 
 func RelPath(elems ...string) string {
-	parts := append([]string{"sources", Source}, elems...)
+	parts := append([]string{"providers", Source}, elems...)
 	return filepath.Join(parts...)
 }
 

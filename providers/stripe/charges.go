@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/CommonsHub/chb/sources"
+	"github.com/CommonsHub/chb/providers"
 )
 
 var httpClient = &http.Client{Timeout: 20 * time.Second}
@@ -46,7 +46,7 @@ func FetchCharges(apiKey, accountID string, chargeIDs []string) (map[string]*Cha
 	return FetchChargesWithProgress(apiKey, accountID, chargeIDs, nil)
 }
 
-func FetchChargesWithProgress(apiKey, accountID string, chargeIDs []string, progress sources.ProgressFunc) (map[string]*Charge, error) {
+func FetchChargesWithProgress(apiKey, accountID string, chargeIDs []string, progress providers.ProgressFunc) (map[string]*Charge, error) {
 	result := map[string]*Charge{}
 	if len(chargeIDs) == 0 {
 		return result, nil
@@ -64,7 +64,7 @@ func FetchChargesWithProgress(apiKey, accountID string, chargeIDs []string, prog
 
 	for i, chargeID := range unique {
 		if progress != nil && (i == 0 || (i+1)%10 == 0 || i+1 == len(unique)) {
-			progress(sources.ProgressEvent{
+			progress(providers.ProgressEvent{
 				Source:  Source,
 				Step:    "fetch_charges",
 				Detail:  "charge_session",

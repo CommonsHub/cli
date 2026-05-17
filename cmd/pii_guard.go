@@ -25,16 +25,16 @@ func pathHasPrivateSegment(path string) bool {
 	return false
 }
 
-// pathHasSourcesSegment reports whether the path is under a monthly or latest
-// source dump directory: <YYYY>/<MM>/sources/<source>/... or
-// latest/sources/<source>/.... Source dumps are private backups by default;
-// only generated files are expected to be public-safe.
-func pathHasSourcesSegment(path string) bool {
+// pathHasProviderArchiveSegment reports whether the path is under a monthly or
+// latest provider archive directory: <YYYY>/<MM>/providers/<provider>/... or
+// latest/providers/<provider>/.... Provider archives are private backups by
+// default; only generated files are expected to be public-safe.
+func pathHasProviderArchiveSegment(path string) bool {
 	parts := strings.FieldsFunc(path, func(r rune) bool {
 		return r == '/' || r == '\\'
 	})
 	for i, part := range parts {
-		if part != "sources" {
+		if part != "providers" {
 			continue
 		}
 		if i >= 2 && isYearSegment(parts[i-2]) && isMonthSegment(parts[i-1]) {

@@ -5,7 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/CommonsHub/chb/sources"
+	"github.com/CommonsHub/chb/providers"
 )
 
 const (
@@ -19,15 +19,15 @@ func (SourceProvider) Name() string {
 	return Source
 }
 
-func (SourceProvider) Files() []sources.File {
-	return []sources.File{
+func (SourceProvider) Files() []providers.File {
+	return []providers.File{
 		{Name: "<channel-id>/messages.json", Description: "Monthly Discord messages for a monitored channel.", Private: false},
 		{Name: "images/<attachment-id>.<ext>", Description: "Downloaded Discord image attachments referenced by generated/images.json.", Private: false},
 	}
 }
 
 func RelPath(elems ...string) string {
-	parts := append([]string{"sources", Source}, elems...)
+	parts := append([]string{"providers", Source}, elems...)
 	return filepath.Join(parts...)
 }
 

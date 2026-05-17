@@ -11,11 +11,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/CommonsHub/chb/sources"
+	"github.com/CommonsHub/chb/providers"
 )
 
 func RelPath(elems ...string) string {
-	parts := append([]string{"sources", Source}, elems...)
+	parts := append([]string{"providers", Source}, elems...)
 	return filepath.Join(parts...)
 }
 
@@ -122,7 +122,7 @@ type FetchOptions struct {
 	StopAtMonthBoundary bool
 	DataDir             string
 	Location            *time.Location
-	Progress            sources.ProgressFunc
+	Progress            providers.ProgressFunc
 }
 
 func FetchTransactions(opts FetchOptions) ([]Transaction, error) {
@@ -176,7 +176,7 @@ func FetchTransactions(opts FetchOptions) ([]Transaction, error) {
 
 		if resp.StatusCode == 429 {
 			if opts.Progress != nil {
-				opts.Progress(sources.ProgressEvent{Source: Source, Step: "fetch_transactions", Detail: "rate_limited", Current: page})
+				opts.Progress(providers.ProgressEvent{Source: Source, Step: "fetch_transactions", Detail: "rate_limited", Current: page})
 			}
 			time.Sleep(2 * time.Second)
 			continue
@@ -192,7 +192,7 @@ func FetchTransactions(opts FetchOptions) ([]Transaction, error) {
 
 		allTxs = append(allTxs, listResp.Data...)
 		if opts.Progress != nil {
-			opts.Progress(sources.ProgressEvent{
+			opts.Progress(providers.ProgressEvent{
 				Source:  Source,
 				Step:    "fetch_transactions",
 				Detail:  "page",
@@ -216,7 +216,7 @@ func FetchTransactions(opts FetchOptions) ([]Transaction, error) {
 			}
 			if localCount > 0 && countSeen == localCount {
 				if opts.Progress != nil {
-					opts.Progress(sources.ProgressEvent{
+					opts.Progress(providers.ProgressEvent{
 						Source: Source,
 						Step:   "fetch_transactions",
 						Detail: "stop_at_cached_month",

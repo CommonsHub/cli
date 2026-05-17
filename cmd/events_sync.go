@@ -2,7 +2,7 @@ package cmd
 
 // events_sync.go owns the *sync* side of the events pipeline: fetching raw
 // ICS feeds from configured calendar providers and archiving them under
-// sources/ics/<slug>.ics. The only generated artifact written here is the
+// providers/ics/<slug>.ics. The only generated artifact written here is the
 // per-month bookings archive (filtered VEVENTs we want to keep alongside the
 // raw feed). Every other derived output — events.json, public.ics, yearly
 // aggregates, CSV, markdown — lives in events_generate.go. See
@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/CommonsHub/chb/ical"
-	icssource "github.com/CommonsHub/chb/sources/ics"
+	icssource "github.com/CommonsHub/chb/providers/ics"
 )
 
 var calendarHTTPClient = &http.Client{Timeout: 20 * time.Second}
@@ -93,7 +93,7 @@ func sortedDiagnosticKinds(counts map[string]int) []string {
 // ── CalendarsSync orchestrator ──────────────────────────────────────────────
 
 // CalendarsSync fetches every configured ICS feed, archives the booking events
-// per month under sources/ics/<slug>.ics, then hands the in-memory parsed
+// per month under providers/ics/<slug>.ics, then hands the in-memory parsed
 // events over to events_generate.go to produce every derived artifact under
 // generated/.
 //

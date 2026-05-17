@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	_ "time/tzdata"
 )
+
+const defaultTimezone = "Europe/Brussels"
 
 // Event represents a parsed VEVENT from an ICS feed
 type Event struct {
@@ -22,7 +25,8 @@ type Event struct {
 
 // YearMonth returns "YYYY-MM" for this event's start date
 func (e *Event) YearMonth() string {
-	return fmt.Sprintf("%d-%02d", e.Start.Year(), e.Start.Month())
+	start := e.Start.In(defaultLocation())
+	return fmt.Sprintf("%d-%02d", start.Year(), start.Month())
 }
 
 // ParseICS parses an ICS string and returns all VEVENTs
@@ -145,7 +149,7 @@ func parseProperty(line string) (string, map[string]string, string) {
 func parseICalDate(s string, params map[string]string) (time.Time, bool) {
 	s = strings.TrimSpace(s)
 
-	loc := time.UTC
+	loc := defaultLocation()
 	if tzid := params["TZID"]; tzid != "" {
 		if l, err := time.LoadLocation(tzid); err == nil {
 			loc = l
@@ -169,6 +173,14 @@ func parseICalDate(s string, params map[string]string) (time.Time, bool) {
 	}
 
 	return time.Time{}, false
+}
+
+func defaultLocation() *time.Location {
+	loc, err := time.LoadLocation(defaultTimezone)
+	if err != nil {
+		return time.FixedZone(defaultTimezone, 3600)
+	}
+	return loc
 }
 
 func unfold(s string) string {

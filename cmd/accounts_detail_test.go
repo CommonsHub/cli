@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	etherscansource "github.com/CommonsHub/chb/sources/etherscan"
+	etherscansource "github.com/CommonsHub/chb/providers/etherscan"
 )
 
 func TestSafeBalancesURLForGnosis(t *testing.T) {

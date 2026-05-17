@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	nostrsource "github.com/CommonsHub/chb/sources/nostr"
+	nostrsource "github.com/CommonsHub/chb/providers/nostr"
 )
 
 func sumSpreadAmounts(spread []SpreadEntry) string {
@@ -71,7 +71,7 @@ func LoadInboundSpreads(dataDir, year, month string) []InboundSpread {
 }
 
 // scanAnnotationCachesForSpreads walks every existing
-// data/<Y>/<M>/sources/nostr/transaction-annotations.json file and, for each
+// data/<Y>/<M>/providers/nostr/transaction-annotations.json file and, for each
 // annotation with a non-empty Spread, emits one InboundSpread per spread entry,
 // keyed by target month. Display fields (currency, counterparty, category, …)
 // are filled in by joining with the natural-month's transactions.json — loaded

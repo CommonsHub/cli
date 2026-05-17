@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	odoosource "github.com/CommonsHub/chb/sources/odoo"
+	odoosource "github.com/CommonsHub/chb/providers/odoo"
 )
 
 type OdooVendorBillsFile struct {
@@ -410,8 +410,8 @@ func printBillsSyncHelp() {
 
 %sDATA%s
   Saves monthly vendor bill snapshots to:
-    DATA_DIR/YYYY/MM/sources/odoo/bills.json
-    DATA_DIR/YYYY/MM/sources/odoo/private/bills.json
+    DATA_DIR/YYYY/MM/providers/odoo/bills.json
+    DATA_DIR/YYYY/MM/providers/odoo/private/bills.json
 
   Each bill includes:
   • public: date, status, payment status, amounts, title, line items, VAT, categories, tags, journal, reconciled transaction

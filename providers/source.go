@@ -1,4 +1,4 @@
-package sources
+package providers
 
 type File struct {
 	Name        string
@@ -6,7 +6,7 @@ type File struct {
 	Private     bool
 }
 
-type Source interface {
+type Provider interface {
 	Name() string
 	Files() []File
 }

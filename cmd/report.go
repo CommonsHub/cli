@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	discordsource "github.com/CommonsHub/chb/sources/discord"
-	etherscansource "github.com/CommonsHub/chb/sources/etherscan"
-	stripesource "github.com/CommonsHub/chb/sources/stripe"
+	discordsource "github.com/CommonsHub/chb/providers/discord"
+	etherscansource "github.com/CommonsHub/chb/providers/etherscan"
+	stripesource "github.com/CommonsHub/chb/providers/stripe"
 )
 
 // MembersFile represents members.json

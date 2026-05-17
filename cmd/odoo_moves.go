@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	odoosource "github.com/CommonsHub/chb/sources/odoo"
+	odoosource "github.com/CommonsHub/chb/providers/odoo"
 )
 
 // preserveMoveAnnotations carries chb-authored annotations (Collective, Event,
@@ -34,7 +34,7 @@ func preserveMoveAnnotations(fresh, prev OdooOutgoingInvoice) OdooOutgoingInvoic
 type moveKind struct {
 	label          string // human label used in prompts and logs ("invoice", "bill")
 	labelPl        string // plural ("invoices", "bills")
-	relPath        string // per-month public source path, e.g. sources/odoo/invoices.json
+	relPath        string // per-month public provider path, e.g. providers/odoo/invoices.json
 	privateRelPath string // per-month private path with PII
 	model          string // Odoo model technical name
 	isBill         bool

@@ -1,12 +1,12 @@
 # Data Processors
 
-Data processors enrich generated records without mixing cross-source logic into
+Data processors enrich generated records without mixing cross-provider logic into
 the core transaction or event builders. A processor can warm a cache once per
 month, process every transaction and/or event, then flush public and private
 cache files.
 
-Provider-owned fetching belongs in `sources/<source>/`. Processors should read
-archived source data and generated records, then add derived fields, tags, or
+Provider-owned fetching belongs in `providers/<provider>/`. Processors should read
+archived provider data and generated records, then add derived fields, tags, or
 relationships.
 
 Processor-specific code should live under `processors/<processor>/` when it has
@@ -74,12 +74,12 @@ DATA_DIR/latest/processors/<processor>/private/<file>.json
 Public files must not contain PII. Private files may contain provider raw data,
 counterparty names, emails, IBANs, billing details, or other sensitive fields.
 
-## Source Boundaries
+## Provider Boundaries
 
-- Etherscan is a source. Celo, Gnosis, and Ethereum are chain scopes under
-  `sources/etherscan/<chain>/`.
-- Nostr is a source. Nostr tx/address metadata lives under `sources/nostr/`.
-- Monerium is both a source and a processor: `sources/monerium` archives orders,
+- Etherscan is a provider. Celo, Gnosis, and Ethereum are chain scopes under
+  `providers/etherscan/<chain>/`.
+- Nostr is a provider. Nostr tx/address metadata lives under `providers/nostr/`.
+- Monerium is both a provider and a processor: `providers/monerium` archives orders,
   while the Monerium processor matches those orders to generated on-chain EURe
   transactions.
 - Luma Stripe is a processor because it enriches Stripe transactions with event
@@ -112,8 +112,8 @@ add it to `registeredDataProcessors()` in `cmd/data_processors.go`.
 ## Guidelines
 
 - Keep provider raw data out of generated public files.
-- Use sources for provider APIs and archived upstream facts.
-- Use `WarmUp` to load source archives and build lookup maps.
+- Use providers for provider APIs and archived upstream facts.
+- Use `WarmUp` to load provider archives and build lookup maps.
 - Keep per-record hooks cheap; they should mostly do map lookups.
 - Make processors idempotent: rerunning generation should not duplicate tags or
   rewrite unchanged cache files.

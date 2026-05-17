@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"strconv"
 
-	"github.com/CommonsHub/chb/sources"
+	"github.com/CommonsHub/chb/providers"
 )
 
 const (
@@ -22,8 +22,8 @@ func (SourceProvider) Name() string {
 	return Source
 }
 
-func (SourceProvider) Files() []sources.File {
-	return []sources.File{
+func (SourceProvider) Files() []providers.File {
+	return []providers.File{
 		{Name: "<chain-id>/metadata.json", Description: "Monthly Nostr tx/address metadata.", Private: false},
 		{Name: "stripe-annotations.json", Description: "Monthly Nostr annotations for Stripe transaction URIs.", Private: false},
 		{Name: "transaction-annotations.json", Description: "Monthly Nostr annotations for transaction URIs.", Private: false},
@@ -31,7 +31,7 @@ func (SourceProvider) Files() []sources.File {
 }
 
 func RelPath(elems ...string) string {
-	parts := append([]string{"sources", Source}, elems...)
+	parts := append([]string{"providers", Source}, elems...)
 	return filepath.Join(parts...)
 }
 

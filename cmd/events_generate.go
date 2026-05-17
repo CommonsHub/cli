@@ -327,7 +327,7 @@ func setEventOGCacheEntryResult(entry *eventOGCacheItem, result og.FetchResult) 
 }
 
 func eventOGCachePath(dataDir string) string {
-	return filepath.Join(dataDir, "generated", "cache", "event-og-images.json")
+	return filepath.Join(dataDir, "latest", "generated", "cache", "event-og-images.json")
 }
 
 func loadEventOGCache(dataDir string) *eventOGCache {
@@ -619,10 +619,10 @@ func processMonthFromRooms(dataDir, year, month string, roomEvents []roomEvent, 
 		}
 		processed++
 
-		startAt := icsEv.Start.Format(time.RFC3339)
+		startAt := formatEventTimeBrussels(icsEv.Start)
 		endAt := ""
 		if !icsEv.End.IsZero() {
-			endAt = icsEv.End.Format(time.RFC3339)
+			endAt = formatEventTimeBrussels(icsEv.End)
 		}
 
 		// Enrich from cached/full OG metadata
@@ -853,12 +853,9 @@ func generateYearlyCSV(dataDir, year string) {
 	headers := "Event ID,Calendar Source,Date,Time,Event Name,Host,Attendance,Tickets Sold,Ticket Revenue (EUR),Fridge Income (EUR),Rental Income (EUR),Location,URL,Note"
 	var rows []string
 	for _, e := range ef.Events {
-		t, _ := time.Parse(time.RFC3339, e.StartAt)
-		if t.IsZero() {
-			t, _ = time.Parse("2006-01-02T15:04:05.000Z", e.StartAt)
-		}
-		dateStr := t.In(BrusselsTZ()).Format("02/01/2006")
-		timeStr := t.In(BrusselsTZ()).Format("15:04")
+		t := parseEventTimeBrussels(e.StartAt)
+		dateStr := t.Format("02/01/2006")
+		timeStr := t.Format("15:04")
 
 		host := ""
 		attendance := ""
@@ -926,7 +923,7 @@ func generateMarkdownFiles(dataDir string) {
 }
 
 func generateEventsMd(dataDir string) {
-	now := time.Now()
+	now := time.Now().In(BrusselsTZ())
 	var events []FullEvent
 
 	if _, err := os.Stat(dataDir); os.IsNotExist(err) {
@@ -954,10 +951,7 @@ func generateEventsMd(dataDir string) {
 				continue
 			}
 			for _, e := range ef.Events {
-				t, _ := time.Parse(time.RFC3339, e.StartAt)
-				if t.IsZero() {
-					t, _ = time.Parse("2006-01-02T15:04:05.000Z", e.StartAt)
-				}
+				t := parseEventTimeBrussels(e.StartAt)
 				if t.After(now) || t.Equal(now) {
 					events = append(events, e)
 				}
@@ -977,10 +971,7 @@ func generateEventsMd(dataDir string) {
 	} else {
 		var parts []string
 		for _, e := range events {
-			t, _ := time.Parse(time.RFC3339, e.StartAt)
-			if t.IsZero() {
-				t, _ = time.Parse("2006-01-02T15:04:05.000Z", e.StartAt)
-			}
+			t := parseEventTimeBrussels(e.StartAt)
 
 			lines := []string{fmt.Sprintf("### %s", e.Name), ""}
 			lines = append(lines, fmt.Sprintf("- **Date**: %s", FormatDateLong(t)))
@@ -988,10 +979,7 @@ func generateEventsMd(dataDir string) {
 			if !e.AllDay {
 				startTime := FormatTimeBrussels(t)
 				if e.EndAt != "" {
-					endT, _ := time.Parse(time.RFC3339, e.EndAt)
-					if endT.IsZero() {
-						endT, _ = time.Parse("2006-01-02T15:04:05.000Z", e.EndAt)
-					}
+					endT := parseEventTimeBrussels(e.EndAt)
 					if !endT.IsZero() {
 						lines = append(lines, fmt.Sprintf("- **Time**: %s - %s (Brussels time)", startTime, FormatTimeBrussels(endT)))
 					} else {
@@ -1044,6 +1032,33 @@ Want to host an event at Commons Hub Brussels? [Contact us](%s/contact) or [book
 	latestDir := filepath.Join(dataDir, "latest", "generated")
 	_ = mkdirAllManagedData(latestDir)
 	_ = writeDataFile(filepath.Join(latestDir, "events.md"), []byte(content))
+}
+
+func formatEventTimeBrussels(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.In(BrusselsTZ()).Format(time.RFC3339)
+}
+
+func parseEventTimeBrussels(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
+	}
+	if t, err := time.Parse(time.RFC3339, value); err == nil {
+		return t.In(BrusselsTZ())
+	}
+	if t, err := time.Parse(time.RFC3339Nano, value); err == nil {
+		return t.In(BrusselsTZ())
+	}
+	if t, err := time.Parse("2006-01-02T15:04:05.000Z", value); err == nil {
+		return t.In(BrusselsTZ())
+	}
+	if t, err := time.ParseInLocation("2006-01-02T15:04:05", value, BrusselsTZ()); err == nil {
+		return t.In(BrusselsTZ())
+	}
+	return time.Time{}
 }
 
 func generateRoomsMd(dataDir string) {

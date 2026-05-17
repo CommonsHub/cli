@@ -213,27 +213,13 @@ func main() {
 		} else {
 			exitWithUsage("%sUsage: chb attachments sync [options]%s", cmd.Fmt.Yellow, cmd.Fmt.Reset)
 		}
+	case "providers":
+		if err := cmd.ProvidersCommand(args[1:]); err != nil {
+			exitWithError(err)
+		}
 	case "generate":
-		sub := ""
-		rest := args[1:]
-		if len(rest) > 0 {
-			sub = rest[0]
-		}
-		var genErr error
-		switch sub {
-		case "transactions", "tx":
-			genErr = cmd.GenerateTransactions(rest[1:])
-		case "events":
-			genErr = cmd.GenerateEvents(rest[1:])
-		case "messages":
-			genErr = cmd.GenerateMessages(rest[1:])
-		case "members":
-			genErr = cmd.GenerateMembers(rest[1:])
-		default:
-			genErr = cmd.Generate(rest)
-		}
-		if genErr != nil {
-			exitWithError(genErr)
+		if err := cmd.ProvidersCommand(append([]string{"*", "generate"}, args[1:]...)); err != nil {
+			exitWithError(err)
 		}
 	case "members":
 		if len(args) > 1 && args[1] == "sync" {
@@ -325,7 +311,7 @@ func main() {
 			exitWithError(err)
 		}
 	case "sync":
-		if err := cmd.SyncAll(args[1:]); err != nil {
+		if err := cmd.ProvidersCommand(append([]string{"*", "sync"}, args[1:]...)); err != nil {
 			exitWithError(err)
 		}
 	case "report":
@@ -354,8 +340,10 @@ func needsWritableDataDir(args []string) bool {
 	}
 
 	switch args[0] {
-	case "setup", "sync":
+	case "setup", "sync", "generate":
 		return true
+	case "providers":
+		return len(args) > 2 && (strings.EqualFold(args[2], "sync") || strings.EqualFold(args[2], "generate"))
 	case "calendars", "invoices", "bills", "messages", "images", "attachments", "members", "odoo":
 		return len(args) > 1 && strings.EqualFold(args[1], "sync")
 	case "transactions":

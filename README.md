@@ -54,7 +54,7 @@ chb <command> [options]
 COMMANDS
   events              List upcoming events
   calendars           Show calendar summary
-  calendars sync      Sync calendar sources
+  calendars sync      Sync calendar providers
   events stats        Show event statistics
   rooms               List all rooms with pricing
   bookings            List upcoming room bookings
@@ -78,8 +78,8 @@ OPTIONS
 
 ```bash
 chb events                        # next 10 upcoming events
-chb calendars                     # summarize calendar sources
-chb calendars sync                # sync calendar sources
+chb calendars                     # summarize calendar providers
+chb calendars sync                # sync calendar providers
 chb calendars sync 2025/11        # sync calendars for Nov 2025
 chb sync 2025 --force             # resync everything for 2025
 chb transactions sync 2025/03     # sync transactions for Mar 2025

@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	odoosource "github.com/CommonsHub/chb/sources/odoo"
-	stripesource "github.com/CommonsHub/chb/sources/stripe"
+	odoosource "github.com/CommonsHub/chb/providers/odoo"
+	stripesource "github.com/CommonsHub/chb/providers/stripe"
 )
 
 // ── Types ───────────────────────────────────────────────────────────────────
