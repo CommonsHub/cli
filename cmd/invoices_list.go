@@ -4,12 +4,41 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
 
 	nostrsource "github.com/CommonsHub/chb/sources/nostr"
 )
+
+// structuredPaymentRefPattern matches a Belgian OGM structured reference
+// (`+++NNN/NNNN/NNNNN+++`) and similar digits-and-slashes-only strings
+// that Odoo sometimes uses as the move title. These references are
+// unique IDs but tell the human reader nothing about what the move was
+// for — so we fall back to the first useful line-item title when the
+// move title looks like one of these.
+var structuredPaymentRefPattern = regexp.MustCompile(`^\+*[\d/.\s-]+\+*$`)
+
+// moveDescription returns the most informative one-line description for
+// a move: the title, unless it's an opaque payment reference, in which
+// case the first non-empty line-item title (or product name) takes
+// over. Empty string when neither yields anything readable.
+func moveDescription(m OdooOutgoingInvoicePublic) string {
+	title := strings.TrimSpace(m.Title)
+	if title != "" && !structuredPaymentRefPattern.MatchString(title) {
+		return title
+	}
+	for _, li := range m.LineItems {
+		if t := strings.TrimSpace(li.Title); t != "" {
+			return t
+		}
+		if p := strings.TrimSpace(li.ProductName); p != "" {
+			return p
+		}
+	}
+	return title
+}
 
 const invoicesDefaultLimit = 30
 
@@ -128,10 +157,7 @@ func printMoveListTable(kind moveKind, posYear, posMonth string, rows []moveRow)
 	cells := make([][]string, 0, len(rows))
 	var totalGross, totalVAT, totalNet float64
 	for _, r := range rows {
-		desc := r.Move.Title
-		if desc == "" && len(r.Move.LineItems) > 0 {
-			desc = r.Move.LineItems[0].Title
-		}
+		desc := moveDescription(r.Move)
 		cur := r.Move.Currency
 		cells = append(cells, []string{
 			r.Move.Date,
@@ -172,10 +198,7 @@ func printMoveListCSV(kind moveKind, rows []moveRow) {
 	partner := partnerColumnLabel(kind)
 	fmt.Printf("date,%s,description,gross,vat,net,currency,collective,category,state,payment_state\n", strings.ToLower(partner))
 	for _, r := range rows {
-		desc := r.Move.Title
-		if desc == "" && len(r.Move.LineItems) > 0 {
-			desc = r.Move.LineItems[0].Title
-		}
+		desc := moveDescription(r.Move)
 		fmt.Printf("%s,%s,%s,%.2f,%.2f,%.2f,%s,%s,%s,%s,%s\n",
 			csvCell(r.Move.Date),
 			csvCell(r.Partner),

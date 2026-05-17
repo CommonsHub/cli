@@ -336,10 +336,7 @@ func (m movesTUIModel) View() string {
 		if m.selected[i] {
 			mark = "[×]"
 		}
-		desc := r.Move.Title
-		if desc == "" && len(r.Move.LineItems) > 0 {
-			desc = r.Move.LineItems[0].Title
-		}
+		desc := moveDescription(r.Move)
 		cur := r.Move.Currency
 		plain = append(plain, []string{
 			mark,
