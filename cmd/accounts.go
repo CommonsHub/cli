@@ -687,6 +687,17 @@ func AccountsCommand(args []string) {
 				if err := ImportStripeCSV(args[2]); err != nil {
 					Fatalf("%sError:%s %v", Fmt.Red, Fmt.Reset, err)
 				}
+			case "transactions", "txs", "tx":
+				// Shorthand for `chb transactions --account <slug>` with a
+				// 20-row default cap. --csv / --json imply full export; an
+				// explicit -n / --limit also wins over the default.
+				txArgs := append([]string{"--account", slug}, args[2:]...)
+				wantsFullExport := HasFlag(args[2:], "--csv") || HasFlag(args[2:], "--json")
+				explicitLimit := GetOption(args[2:], "-n", "--limit") != ""
+				if !wantsFullExport && !explicitLimit {
+					txArgs = append(txArgs, "-n", "20")
+				}
+				TransactionsBrowser(txArgs)
 			default:
 				AccountDetail(slug, args[1:])
 			}
@@ -1887,6 +1898,7 @@ func AccountOdooPush(slug string, args []string) error {
 	skipReconciliation := HasFlag(args, "--skip-reconciliation")
 	payoutFilter := GetOption(args, "--payout")
 	untilStr := GetOption(args, "--until")
+	sinceStr := GetOption(args, "--since")
 
 	// Parse --months N to limit sync window
 	monthsLimit := 0
@@ -1919,27 +1931,26 @@ func AccountOdooPush(slug string, args []string) error {
 		}
 	}
 
-	header := fmt.Sprintf("%s%s%s → journal #%d", Fmt.Bold, acc.Slug, Fmt.Reset, acc.OdooJournalID)
-	if monthsLimit > 0 {
-		header += fmt.Sprintf(" %s(last %d months)%s", Fmt.Dim, monthsLimit, Fmt.Reset)
-	}
-	if !untilDate.IsZero() {
-		header += fmt.Sprintf(" %s(until %s)%s", Fmt.Dim, untilDate.AddDate(0, 0, -1).Format("2006-01-02"), Fmt.Reset)
-	}
-	if !quietOdooContext() {
-		// Single-account invocation — print the Odoo target once here.
-		fmt.Printf("\n%s\n", header)
-		if !odooTargetAlreadyPrinted() {
-			fmt.Printf("  %sOdoo: %s (db: %s)%s\n", Fmt.Dim, creds.URL, creds.DB, Fmt.Reset)
+	// Parse --since YYYY[MM[DD]]: include only txs at/after this date.
+	// Setting --since (like --history) also enables the rule re-apply
+	// pass over already-imported lines within the window.
+	var sinceDate time.Time
+	if sinceStr != "" {
+		t, ok := ParseSinceDate(sinceStr)
+		if !ok {
+			return fmt.Errorf("invalid --since format: %s (use YYYY, YYYYMM, or YYYYMMDD)", sinceStr)
 		}
-		fmt.Println()
+		sinceDate = t
+	}
+
+	useHistory := HasFlag(args, "--history") || force
+	rescanExisting := useHistory || !sinceDate.IsZero()
+
+	if !quietOdooContext() {
+		printOdooSyncHeader(creds, acc, sinceDate, untilDate, useHistory, sinceStr != "", monthsLimit)
 	}
 
 	localBefore := accountLocalOdooSnapshot(acc, loadAccountTransactionsForOdoo(acc))
-	odooBefore, odooBeforeErr := fetchOdooJournalSnapshot(creds, uid, acc.OdooJournalID, accCurrency(acc))
-	if !quietOdooContext() {
-		printOdooSyncState("Before sync", localBefore, odooBefore, odooBeforeErr)
-	}
 
 	// --force: empty the entire journal first. Stripe handles this inside
 	// the sync itself, so we only run the global wipe for non-Stripe paths.
@@ -1955,11 +1966,27 @@ func AccountOdooPush(slug string, args []string) error {
 	if acc.Provider == "stripe" {
 		summary, syncErr = syncStripeToOdoo(acc, creds, uid, monthsLimit, dryRun, force, skipReconciliation, payoutFilter, untilDate)
 	} else {
-		useHistory := HasFlag(args, "--history") || force
 		var result blockchainOdooSyncResult
-		result, syncErr = syncBlockchainToOdoo(acc, creds, uid, monthsLimit, dryRun, skipReconciliation, untilDate, useHistory)
+		result, syncErr = syncBlockchainToOdoo(acc, creds, uid, monthsLimit, dryRun, skipReconciliation, sinceDate, untilDate, useHistory)
 		summary = result.Summary
 		syncedCount = result.Synced
+	}
+
+	// Post-sync pass: walk existing Odoo lines for this journal and
+	// reapply any rule whose partner / account differs from what's
+	// already there. Only runs when --history or --since narrows the
+	// scope — without those flags, we trust the latest-cursor sync and
+	// avoid the cost of fetching every line. Honors --dry-run.
+	reviewedCount := 0
+	updatedCount := 0
+	if syncErr == nil && rescanExisting {
+		reviewed, applied, err := applyOdooRulesToExistingLines(creds, uid, acc, sinceDate, untilDate, dryRun)
+		if err != nil {
+			Warnf("  %s⚠ rule re-apply: %v%s", Fmt.Yellow, err, Fmt.Reset)
+		} else {
+			reviewedCount = reviewed
+			updatedCount = applied
+		}
 	}
 
 	label := fmt.Sprintf("#%d %s", acc.OdooJournalID, acc.Slug)
@@ -2024,14 +2051,15 @@ func AccountOdooPush(slug string, args []string) error {
 	}
 	if !quietOdooContext() {
 		odooAfter, odooAfterErr := fetchOdooJournalSnapshot(creds, uid, acc.OdooJournalID, accCurrency(acc))
-		printOdooSyncState("After sync", localBefore, odooAfter, odooAfterErr)
-		if odooAfterErr == nil {
-			fmt.Printf("  %sSynced:%s %d tx  %sNew Odoo balance:%s %s\n\n",
-				Fmt.Dim, Fmt.Reset, syncedCount,
-				Fmt.Dim, Fmt.Reset, formatAccountDataBalance(odooAfter.Balance, odooAfter.Currency))
-		} else {
-			fmt.Printf("  %sSynced:%s %d tx\n\n", Fmt.Dim, Fmt.Reset, syncedCount)
+		// In dry-run nothing was written, so the local snapshot we
+		// captured at the top is the right "what would change against"
+		// reference. In normal mode we re-read local to reflect any
+		// post-sync state.
+		localAfter := localBefore
+		if !dryRun {
+			localAfter = accountLocalOdooSnapshot(acc, loadAccountTransactionsForOdoo(acc))
 		}
+		printOdooSyncSummary(syncedCount, reviewedCount, updatedCount, dryRun, localAfter, odooAfter, odooAfterErr)
 	}
 	return nil
 }
@@ -2167,6 +2195,119 @@ func fetchOdooJournalSnapshot(creds *OdooCredentials, uid int, journalID int, cu
 	}
 	snap.Balance = roundCents(snap.Balance)
 	return snap, nil
+}
+
+// printOdooSyncHeader prints the standardized pre-sync header for
+// `chb odoo journals <id> sync` (and the equivalent invocation via
+// AccountOdooPush). Mirrors the `chb accounts <slug> sync` style:
+// each label padded to the same column width.
+func printOdooSyncHeader(creds *OdooCredentials, acc *AccountConfig, since, until time.Time, useHistory, sinceExplicit bool, monthsLimit int) {
+	fmt.Println()
+	w := 9 // matches the longest label, "Account: " etc.
+	pad := func(label string) string { return padRight(label+":", w) }
+
+	fmt.Printf("  %s%s%s %s (db: %s)\n", Fmt.Dim, pad("Odoo DB"), Fmt.Reset, creds.URL, creds.DB)
+
+	journalName := OdooJournalName(acc.OdooJournalID)
+	if journalName == "" {
+		journalName = fmt.Sprintf("journal #%d", acc.OdooJournalID)
+	}
+	fmt.Printf("  %s%s%s %s (id: %d)\n", Fmt.Dim, pad("Journal"), Fmt.Reset, journalName, acc.OdooJournalID)
+
+	fmt.Printf("  %s%s%s %s (%s)\n", Fmt.Dim, pad("Account"), Fmt.Reset, acc.Slug, accountSourceURI(acc))
+
+	sinceLine := odooSyncSinceLabel(acc, since, useHistory, sinceExplicit, monthsLimit)
+	fmt.Printf("  %s%s%s %s\n", Fmt.Dim, pad("Since"), Fmt.Reset, sinceLine)
+	if !until.IsZero() {
+		fmt.Printf("  %s%s%s %s\n", Fmt.Dim, pad("Until"), Fmt.Reset, until.AddDate(0, 0, -1).Format("2006-01-02"))
+	}
+	fmt.Println()
+}
+
+// accountSourceURI builds a compact identifier for the account's source.
+// Stripe → "stripe:<acct id>". Etherscan → "<chain>:<symbol>:<address>".
+func accountSourceURI(acc *AccountConfig) string {
+	switch strings.ToLower(acc.Provider) {
+	case "stripe":
+		return "stripe:" + acc.AccountID
+	case "etherscan":
+		sym := ""
+		if acc.Token != nil {
+			sym = acc.Token.Symbol
+		}
+		return strings.ToLower(acc.Chain) + ":" + sym + ":" + acc.Address
+	default:
+		return acc.Provider
+	}
+}
+
+// odooSyncSinceLabel computes the "Since" line annotation. Default is
+// the latest local tx date with the "(last tx)" hint, matching the
+// cursor-based sync semantics. --history / --since / --months override.
+func odooSyncSinceLabel(acc *AccountConfig, since time.Time, useHistory, sinceExplicit bool, monthsLimit int) string {
+	if useHistory {
+		return "full history (--history)"
+	}
+	if sinceExplicit && !since.IsZero() {
+		return since.Format("2006-01-02") + " (--since)"
+	}
+	if monthsLimit > 0 {
+		cutoff := time.Now().AddDate(0, -monthsLimit, 0)
+		return cutoff.Format("2006-01-02") + fmt.Sprintf(" (--months %d)", monthsLimit)
+	}
+	if cp := latestAccountSourceCheckpoint(acc); cp.Exists && cp.Timestamp > 0 {
+		return time.Unix(cp.Timestamp, 0).In(BrusselsTZ()).Format("2006-01-02") + " (last tx)"
+	}
+	return "default recent window"
+}
+
+// printOdooSyncSummary prints the standardized post-sync summary:
+//
+//	New tx:       x
+//	Reviewed:     y          (only when --history / --since rescanned)
+//	Updated txs:  z          (always when reviewed > 0; otherwise only when z > 0)
+//
+//	Journal data: x txs between A and B, balance: ZZ EUR
+//	Local data:   x txs between A and B, balance: ZZ EUR
+//
+// In dry-run a single "(dry-run — no writes)" hint is appended below.
+func printOdooSyncSummary(synced, reviewed, updated int, dryRun bool, local, journal accountOdooSyncSnapshot, journalErr error) {
+	w := 13 // longest label, "Updated txs:"
+	pad := func(s string) string { return padRight(s, w) }
+	fmt.Printf("  %s %d\n", pad("New tx:"), synced)
+	if reviewed > 0 {
+		fmt.Printf("  %s %d\n", pad("Reviewed:"), reviewed)
+		fmt.Printf("  %s %d\n", pad("Updated txs:"), updated)
+	} else if updated > 0 {
+		fmt.Printf("  %s %d\n", pad("Updated txs:"), updated)
+	}
+	fmt.Println()
+
+	rowW := 14
+	padR := func(s string) string { return padRight(s, rowW) }
+	if journalErr != nil {
+		fmt.Printf("  %s%s%s unavailable (%v)\n", Fmt.Dim, padR("Journal data:"), Fmt.Reset, journalErr)
+	} else {
+		fmt.Printf("  %s%s%s %s\n", Fmt.Dim, padR("Journal data:"), Fmt.Reset, formatOdooSyncSnapshotLine(journal))
+	}
+	fmt.Printf("  %s%s%s %s\n", Fmt.Dim, padR("Local data:"), Fmt.Reset, formatOdooSyncSnapshotLine(local))
+	if dryRun {
+		fmt.Printf("\n  %s(dry-run — no writes)%s\n\n", Fmt.Dim, Fmt.Reset)
+	} else {
+		fmt.Println()
+	}
+}
+
+func formatOdooSyncSnapshotLine(s accountOdooSyncSnapshot) string {
+	if s.TxCount == 0 {
+		return fmt.Sprintf("0 txs, balance: %s", formatAccountDataBalance(s.Balance, s.Currency))
+	}
+	first := formatAccountDataDate(s.FirstTxAt)
+	last := formatAccountDataDate(s.LastTxAt)
+	return fmt.Sprintf("%s between %s and %s, balance: %s",
+		Pluralize(s.TxCount, "tx", ""),
+		first, last,
+		formatAccountDataBalance(s.Balance, s.Currency))
 }
 
 func printOdooSyncState(title string, local accountOdooSyncSnapshot, journal accountOdooSyncSnapshot, journalErr error) {
@@ -2716,7 +2857,7 @@ func odooJournalLineSum(creds *OdooCredentials, uid int, journalID int) (float64
 }
 
 // syncBlockchainToOdoo syncs blockchain/monerium transactions to Odoo (no statements, just lines).
-func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, monthsLimit int, dryRun bool, skipReconciliation bool, untilDate time.Time, useHistory bool) (blockchainOdooSyncResult, error) {
+func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, monthsLimit int, dryRun bool, skipReconciliation bool, sinceDate, untilDate time.Time, useHistory bool) (blockchainOdooSyncResult, error) {
 	localTxs := loadAccountTransactionsForOdoo(acc)
 	sort.SliceStable(localTxs, func(i, j int) bool {
 		if localTxs[i].Timestamp == localTxs[j].Timestamp {
@@ -2733,6 +2874,19 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 			}
 		}
 		localTxs = filtered
+	}
+	if !sinceDate.IsZero() {
+		var filtered []TransactionEntry
+		for _, tx := range localTxs {
+			if !time.Unix(tx.Timestamp, 0).Before(sinceDate) {
+				filtered = append(filtered, tx)
+			}
+		}
+		localTxs = filtered
+		// --since narrows the local window; use the full-history path
+		// to compare against Odoo so older lines in that window also
+		// surface (rather than only those newer than the cursor).
+		useHistory = true
 	}
 	if !untilDate.IsZero() {
 		var filtered []TransactionEntry
@@ -2759,7 +2913,6 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 	scopeLabel := "latest Odoo line"
 	if useHistory {
 		scopeLabel = "--history"
-		odooLog("  %sHistory mode: checking all %s.%s\n", Fmt.Dim, Pluralize(len(localTxs), "local transaction", ""), Fmt.Reset)
 	} else {
 		cursor, err := fetchLatestOdooImportCursor(creds, uid, acc.OdooJournalID)
 		if err != nil {
@@ -2768,18 +2921,14 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 		} else if cursor.Found {
 			filtered, matched := filterTransactionsAfterOdooCursor(acc, localTxs, cursor)
 			if matched {
-				odooLog("  %sLatest Odoo import:%s %s %s→ checking %s%s\n",
-					Fmt.Dim, Fmt.Reset, cursor.Date, Fmt.Dim, Pluralize(len(filtered), "newer local tx", ""), Fmt.Reset)
 				localTxs = filtered
 			} else {
 				Warnf("  %s⚠ Latest Odoo import not found locally (%s), falling back to full duplicate check%s",
 					Fmt.Yellow, cursor.UniqueImportID, Fmt.Reset)
 				useHistory = true
 			}
-		} else {
-			odooLog("  %sNo existing Odoo import found for journal #%d; checking all %s.%s\n",
-				Fmt.Dim, acc.OdooJournalID, Pluralize(len(localTxs), "local tx", ""), Fmt.Reset)
 		}
+		_ = scopeLabel
 	}
 
 	var existingIDs map[string]bool
@@ -2792,8 +2941,6 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 	if err != nil {
 		return blockchainOdooSyncResult{}, fmt.Errorf("failed to fetch existing Odoo entries: %v", err)
 	}
-	odooLog("  %sDuplicate check:%s %s, %s, %s\n",
-		Fmt.Dim, Fmt.Reset, scopeLabel, Pluralize(len(localTxs), "candidate tx", ""), Pluralize(len(existingIDs), "existing id", ""))
 
 	var missing []TransactionEntry
 	partnerUpdates := 0
@@ -2819,7 +2966,6 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 	}
 
 	if len(missing) == 0 {
-		odooLog("  %s+0 tx%s  %s(already in sync, %d local)%s\n", Fmt.Dim, Fmt.Reset, Fmt.Dim, len(localTxs), Fmt.Reset)
 		if partnerUpdates > 0 {
 			return blockchainOdooSyncResult{Summary: fmt.Sprintf("already in sync, %d partner links updated", partnerUpdates)}, nil
 		}
@@ -2839,6 +2985,7 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 	partnerCache := map[string]int{}
 	stats := &syncStats{}
 	synced, errors := 0, 0
+	odooRules, _ := LoadOdooRules()
 	for i, tx := range missing {
 		t := time.Unix(tx.Timestamp, 0).In(BrusselsTZ())
 		amt := signedOdooAmountForTransaction(acc, tx)
@@ -2849,6 +2996,11 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 		partnerBankID, partnerID := resolveOdooPartnerBankForTransaction(creds, uid, tx)
 		if partnerID == 0 {
 			partnerID = resolveOdooPartner(creds, uid, tx.Counterparty, partnerEmail, partnerCache, stats)
+		}
+
+		matchedRule := MatchOdooRule(odooRules, tx)
+		if matchedRule != nil && matchedRule.Set.PartnerID > 0 {
+			partnerID = matchedRule.Set.PartnerID
 		}
 
 		lineData := map[string]interface{}{
@@ -2891,6 +3043,13 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 		} else {
 			odooLog("    %sreconciling statement line...%s\n", Fmt.Dim, Fmt.Reset)
 			reconcileCreatedStatementLines(creds, uid, createdIDs, false, stats)
+		}
+		if matchedRule != nil && matchedRule.Set.AccountCode != "" {
+			if err := applyOdooRuleAccount(creds, uid, createdIDs, matchedRule.Set.AccountCode); err != nil {
+				Warnf("  %s⚠ rule account %s: %v%s", Fmt.Yellow, matchedRule.Set.AccountCode, err, Fmt.Reset)
+			} else {
+				odooLog("    %s↳ rule: account %s%s\n", Fmt.Dim, matchedRule.Set.AccountCode, Fmt.Reset)
+			}
 		}
 		odooLog("    %s✓ done%s\n", Fmt.Green, Fmt.Reset)
 		synced++
