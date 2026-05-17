@@ -359,7 +359,7 @@ func (f TxFilter) matches(tx TransactionEntry) bool {
 			return false
 		}
 	}
-	if f.AccountSlug != "" && !strings.EqualFold(tx.AccountSlug, f.AccountSlug) {
+	if f.AccountSlug != "" && !accountSlugMatchesTx(f.AccountSlug, tx) {
 		return false
 	}
 	if !f.Since.IsZero() && tx.Timestamp < f.Since.Unix() {
@@ -374,6 +374,47 @@ func (f TxFilter) matches(tx TransactionEntry) bool {
 		}
 	}
 	return true
+}
+
+// accountSlugMatchesTx returns true when a user-supplied --account value
+// matches the transaction. The literal match against tx.AccountSlug
+// handles the common case (e.g. "savings"), but Stripe transactions
+// store the Stripe account ID in AccountSlug — so we also consult
+// accounts.json: if the user-supplied slug names a configured account,
+// the configured AccountID (and address) is accepted too.
+func accountSlugMatchesTx(slug string, tx TransactionEntry) bool {
+	if slug == "" {
+		return true
+	}
+	if strings.EqualFold(tx.AccountSlug, slug) {
+		return true
+	}
+	acc := findAccountConfigBySlug(slug)
+	if acc == nil {
+		return false
+	}
+	if acc.AccountID != "" && strings.EqualFold(tx.AccountSlug, acc.AccountID) {
+		return true
+	}
+	if acc.Address != "" && strings.EqualFold(tx.Account, acc.Address) {
+		return true
+	}
+	return false
+}
+
+// findAccountConfigBySlug returns a pointer to the configured account
+// whose slug matches (case-insensitive), or nil. Loaded fresh each call —
+// transactions filtering is short-lived, and accounts.json is small.
+func findAccountConfigBySlug(slug string) *AccountConfig {
+	if slug == "" {
+		return nil
+	}
+	for _, acc := range LoadAccountConfigs() {
+		if strings.EqualFold(acc.Slug, slug) {
+			return &acc
+		}
+	}
+	return nil
 }
 
 // ── Build table rows ──
@@ -2387,6 +2428,78 @@ func createRuleFromBrowser(allTxs []TransactionEntry) {
 
 // ── Command ──
 
+// printTransactionsCSV emits one row per transaction with the same
+// columns as the table (date, account, collective, category,
+// counterparty, description, amount, currency).
+func printTransactionsCSV(txs []TransactionEntry) {
+	fmt.Println("date,account,collective,category,counterparty,description,amount,currency")
+	tz := BrusselsTZ()
+	for _, tx := range txs {
+		date := time.Unix(tx.Timestamp, 0).In(tz).Format("2006-01-02")
+		amt := txAmount(tx)
+		if tx.IsOutgoing() {
+			amt = -math.Abs(amt)
+		} else {
+			amt = math.Abs(amt)
+		}
+		fmt.Printf("%s,%s,%s,%s,%s,%s,%.2f,%s\n",
+			csvCell(date),
+			csvCell(txSource(tx)),
+			csvCell(txDisplayCollective(tx)),
+			csvCell(txDisplayCategory(tx)),
+			csvCell(txDisplayCounterparty(tx)),
+			csvCell(txDisplayDescription(tx)),
+			amt,
+			csvCell(tx.Currency),
+		)
+	}
+}
+
+// printTransactionsTable renders a non-interactive, plain-text table to
+// stdout — the default output for `chb transactions`. The interactive
+// browser is only opened when -i/--interactive is passed.
+func printTransactionsTable(filter TxFilter, txs []TransactionEntry) {
+	if len(txs) == 0 {
+		fmt.Printf("\n%sNo transactions match the filter%s\n\n", Fmt.Dim, Fmt.Reset)
+		return
+	}
+
+	showAccountColumn := filter.AccountSlug == ""
+	cols := transactionTableColumns(showAccountColumn, false)
+
+	headers := txColumnHeaders(cols)
+	rightAlign := map[int]bool{}
+	for i, col := range cols {
+		if col.Kind == txColumnAmount {
+			rightAlign[i] = true
+		}
+	}
+
+	rows := make([][]string, 0, len(txs))
+	for _, tx := range txs {
+		row := make([]string, len(cols))
+		for i, col := range cols {
+			cell := transactionCellValue(tx, col.Kind, nil, false)
+			switch col.Kind {
+			case txColumnCounterparty:
+				cell = Truncate(cell, 28)
+			case txColumnDescription:
+				cell = Truncate(cell, 40)
+			case txColumnCollective, txColumnCategory:
+				cell = Truncate(cell, 14)
+			case txColumnSource:
+				cell = Truncate(cell, 14)
+			}
+			row[i] = cell
+		}
+		rows = append(rows, row)
+	}
+
+	totalRow := make([]string, len(cols))
+	totalRow[0] = Pluralize(len(txs), "transaction", "")
+	renderTicketsTable(headers, rows, totalRow, rightAlign)
+}
+
 func TransactionsBrowser(args []string) {
 	if HasFlag(args, "--help", "-h", "help") {
 		printTransactionsBrowserHelp()
@@ -2405,6 +2518,19 @@ func TransactionsBrowser(args []string) {
 
 	if JSONMode(args) {
 		emitTransactionsJSON(filter, n, skip, HasFlag(args, "--with-pii"))
+		return
+	}
+
+	if HasFlag(args, "--csv") {
+		txs := applyOffsetLimit(loadFilteredTransactions(filter), skip, n)
+		printTransactionsCSV(txs)
+		return
+	}
+
+	interactive := HasFlag(args, "-i", "--interactive")
+	if !interactive {
+		txs := applyOffsetLimit(loadFilteredTransactions(filter), skip, n)
+		printTransactionsTable(filter, txs)
 		return
 	}
 
@@ -2567,15 +2693,16 @@ func emitTransactionsJSON(f TxFilter, limit, skip int, includePII bool) {
 func printTransactionsBrowserHelp() {
 	f := Fmt
 	fmt.Printf(`
-%schb transactions%s [filters] — Browse transactions interactively
+%schb transactions%s [filters] — List transactions (table by default, TUI with -i)
 
 %sUSAGE%s
-  %schb transactions%s                                  Browse all transactions
-  %schb transactions --account savings%s                Browse one account
-  %schb transactions --application luma%s                Browse Luma transactions
-  %schb transactions --event evt-2gc6B12TEyRNRqN%s       Browse one event
-  %schb transactions --tag '#color:red'%s                Browse by Nostr-style tag
-  %schb transactions --currency EUR%s                   Browse EUR-family transactions
+  %schb transactions%s                                  Print all transactions as a table
+  %schb transactions -i%s                               Open the interactive browser
+  %schb transactions --account savings%s                Filter to one account
+  %schb transactions --application luma%s                Filter to Luma transactions
+  %schb transactions --event evt-2gc6B12TEyRNRqN%s       Filter to one event
+  %schb transactions --tag '#color:red'%s                Filter by Nostr-style tag
+  %schb transactions --currency EUR%s                   Filter to EUR-family transactions
   %schb transactions --since 20260101 --until 20260131%s   Date range (inclusive)
   %schb transactions -n 50 --skip 100%s                 Paginate
   %schb transactions --json%s                           Print matching txs as JSON
@@ -2617,6 +2744,7 @@ func printTransactionsBrowserHelp() {
 `,
 		f.Bold, f.Reset, // heading
 		f.Bold, f.Reset, // USAGE
+		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
