@@ -227,6 +227,9 @@ func describeRuleMatch(m RuleMatch) string {
 	if m.Application != "" {
 		parts = append(parts, "application="+m.Application)
 	}
+	if m.PaymentLink != "" {
+		parts = append(parts, "paymentLink="+m.PaymentLink)
+	}
 	if len(parts) == 0 {
 		return "(empty — would match every tx)"
 	}

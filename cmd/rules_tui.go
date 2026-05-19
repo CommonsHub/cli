@@ -278,6 +278,7 @@ func (m *ruleEditorModel) showMenu() {
 		{"currency", "currency", m.rule.Match.Currency},
 		{"direction", "direction", m.rule.Match.Direction},
 		{"application", "application", m.rule.Match.Application},
+		{"paymentLink", "paymentLink", m.rule.Match.PaymentLink},
 	}
 	for _, f := range fields {
 		label := "WHEN " + f.key
@@ -319,7 +320,7 @@ func (m *ruleEditorModel) hasConditions() bool {
 	r := m.rule.Match
 	return r.Sender != "" || r.Recipient != "" || r.Description != "" ||
 		r.Account != "" || r.Provider != "" || r.Currency != "" ||
-		r.Direction != "" || r.Application != ""
+		r.Direction != "" || r.Application != "" || r.PaymentLink != ""
 }
 
 func (m *ruleEditorModel) startFieldEdit(field string) {
@@ -338,6 +339,8 @@ func (m *ruleEditorModel) startFieldEdit(field string) {
 		m.editValue = m.rule.Match.Account
 	case "currency":
 		m.editValue = m.rule.Match.Currency
+	case "paymentLink":
+		m.editValue = m.rule.Match.PaymentLink
 	}
 
 	var formField huh.Field
@@ -383,6 +386,7 @@ func (m *ruleEditorModel) startFieldEdit(field string) {
 			"description": "Description pattern (* for wildcards)",
 			"account":     "Account slug",
 			"currency":    "Currency (EUR, EURe, EURb, CHT)",
+			"paymentLink": "Stripe payment link ID",
 		}
 		title := titles[field]
 		if title == "" {
@@ -412,6 +416,8 @@ func (m *ruleEditorModel) applyFieldValue(field string) {
 		m.rule.Match.Direction = m.editValue
 	case "application":
 		m.rule.Match.Application = m.editValue
+	case "paymentLink":
+		m.rule.Match.PaymentLink = m.editValue
 	case "category":
 		m.rule.Assign.Category = m.editValue
 	case "collective":
@@ -674,6 +680,7 @@ func (m ruleEditorModel) renderRulePanel() string {
 	addCond("currency", m.rule.Match.Currency)
 	addCond("direction", m.rule.Match.Direction)
 	addCond("application", m.rule.Match.Application)
+	addCond("paymentLink", m.rule.Match.PaymentLink)
 
 	if len(whenLines) == 2 {
 		whenLines = append(whenLines, ruleDimStyle.Render("  (no conditions)"))
@@ -876,6 +883,7 @@ func printRulePreview(r *Rule) {
 	addCond("currency", r.Match.Currency)
 	addCond("direction", r.Match.Direction)
 	addCond("application", r.Match.Application)
+	addCond("paymentLink", r.Match.PaymentLink)
 	if !hasMatch {
 		lines = append(lines, ruleDimStyle.Render("  (no conditions set)"))
 	}
@@ -910,8 +918,10 @@ func printRulesHelp() {
   %saccount%s       Account slug (fridge, coffee, savings)
   %sprovider%s      Provider (stripe, etherscan, monerium)
   %scurrency%s      Currency code (EUR, EURe, CHT)
+  %samount%s        Exact signed amount, rounded to cents
   %sdirection%s     "in" or "out"
   %sapplication%s   Stripe Connect app (Luma, Open Collective)
+  %spaymentLink%s   Stripe Checkout payment link ID
 
 %sINTERACTIVE KEYS%s
   %s↑↓%s       Navigate rules
@@ -927,6 +937,8 @@ func printRulesHelp() {
 		f.Bold, f.Reset,
 		f.Cyan, f.Reset,
 		f.Bold, f.Reset,
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,

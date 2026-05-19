@@ -1,10 +1,87 @@
 [
   {
     "match": {
-      "description": "*subscription*"
+      "provider": "stripe",
+      "currency": "EUR",
+      "amount": 10,
+      "direction": "in",
+      "paymentLink": "plink_1R7tuJFAhaWeDyowGmrFTAYd"
     },
     "assign": {
-      "category": "membership"
+      "category": "donation",
+      "collective": "openletter"
+    }
+  },
+  {
+    "match": {
+      "provider": "stripe",
+      "direction": "in",
+      "paymentLink": "plink_1TGev1FAhaWeDyowQqEek3mT"
+    },
+    "assign": {
+      "category": "donation",
+      "collective": "openletter"
+    }
+  },
+  {
+    "match": {
+      "provider": "stripe",
+      "direction": "in",
+      "description": "*Daily pass*"
+    },
+    "assign": {
+      "category": "coworking",
+      "collective": "commonshub"
+    }
+  },
+  {
+    "match": {
+      "provider": "stripe",
+      "direction": "in",
+      "description": "*10-day pass*"
+    },
+    "assign": {
+      "category": "coworking",
+      "collective": "commonshub"
+    }
+  },
+  {
+    "match": {
+      "provider": "stripe",
+      "currency": "EUR",
+      "amount": 10,
+      "direction": "in",
+      "description": "Subscription create*"
+    },
+    "assign": {
+      "category": "membership",
+      "collective": "commonshub"
+    }
+  },
+  {
+    "match": {
+      "provider": "stripe",
+      "currency": "EUR",
+      "amount": 10,
+      "direction": "in",
+      "description": "Subscription creation*"
+    },
+    "assign": {
+      "category": "membership",
+      "collective": "commonshub"
+    }
+  },
+  {
+    "match": {
+      "provider": "stripe",
+      "currency": "EUR",
+      "amount": 10,
+      "direction": "in",
+      "description": "Subscription update*"
+    },
+    "assign": {
+      "category": "membership",
+      "collective": "commonshub"
     }
   },
   {

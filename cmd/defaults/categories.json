@@ -15,6 +15,11 @@
     "direction": "income"
   },
   {
+    "slug": "coworking",
+    "label": "Coworking",
+    "direction": "income"
+  },
+  {
     "slug": "fridge",
     "label": "Fridge",
     "direction": "income"

@@ -10,15 +10,17 @@ import (
 
 // RuleMatch defines what a rule matches against.
 type RuleMatch struct {
-	Sender      string `json:"sender,omitempty"`      // glob on counterparty for incoming (IBAN, 0xaddr, name)
-	Recipient   string `json:"recipient,omitempty"`   // glob on counterparty for outgoing (IBAN, 0xaddr, name)
-	Description string `json:"description,omitempty"` // glob on tx description/memo
-	IBAN        string `json:"iban,omitempty"`        // exact match on counterparty IBAN (spaces stripped, case-insensitive)
-	Account     string `json:"account,omitempty"`     // account slug (fridge, coffee, stripe, savings)
-	Provider    string `json:"provider,omitempty"`    // stripe, etherscan, monerium
-	Currency    string `json:"currency,omitempty"`    // EUR, EURe, EURb, CHT
-	Direction   string `json:"direction,omitempty"`   // "in" or "out"
-	Application string `json:"application,omitempty"` // stripe connect app: luma, opencollective, etc.
+	Sender      string   `json:"sender,omitempty"`      // glob on counterparty for incoming (IBAN, 0xaddr, name)
+	Recipient   string   `json:"recipient,omitempty"`   // glob on counterparty for outgoing (IBAN, 0xaddr, name)
+	Description string   `json:"description,omitempty"` // glob on tx description/memo
+	IBAN        string   `json:"iban,omitempty"`        // exact match on counterparty IBAN (spaces stripped, case-insensitive)
+	Account     string   `json:"account,omitempty"`     // account slug (fridge, coffee, stripe, savings)
+	Provider    string   `json:"provider,omitempty"`    // stripe, etherscan, monerium
+	Currency    string   `json:"currency,omitempty"`    // EUR, EURe, EURb, CHT
+	Amount      *float64 `json:"amount,omitempty"`      // exact signed amount, rounded to cents
+	Direction   string   `json:"direction,omitempty"`   // "in" or "out"
+	Application string   `json:"application,omitempty"` // stripe connect app: luma, opencollective, etc.
+	PaymentLink string   `json:"paymentLink,omitempty"` // Stripe Checkout payment link ID
 }
 
 // RuleAssign defines what a matching rule assigns.
@@ -71,7 +73,6 @@ func SaveRules(rules []Rule) error {
 	return os.WriteFile(rulesPath(), data, 0644)
 }
 
-
 // MatchesTransaction checks if a rule matches a transaction.
 func (r *Rule) MatchesTransaction(tx TransactionEntry) bool {
 	m := r.Match
@@ -94,6 +95,12 @@ func (r *Rule) MatchesTransaction(tx TransactionEntry) bool {
 		}
 	}
 
+	if m.Amount != nil {
+		if roundCents(signedOdooAmountForTransaction(&AccountConfig{Provider: tx.Provider}, tx)) != roundCents(*m.Amount) {
+			return false
+		}
+	}
+
 	if m.Direction != "" {
 		if m.Direction == "in" && !tx.IsIncoming() {
 			return false
@@ -111,6 +118,13 @@ func (r *Rule) MatchesTransaction(tx TransactionEntry) bool {
 			}
 		}
 		if !strings.EqualFold(m.Application, txApp) {
+			return false
+		}
+	}
+
+	if m.PaymentLink != "" {
+		txPaymentLink := firstNonEmptyStripeMetadata(tx.Metadata, "paymentLink", "payment_link")
+		if !strings.EqualFold(m.PaymentLink, txPaymentLink) {
 			return false
 		}
 	}
@@ -182,11 +196,17 @@ func (r *Rule) RuleSummary() string {
 	if r.Match.Currency != "" {
 		parts = append(parts, fmt.Sprintf("currency: %s", r.Match.Currency))
 	}
+	if r.Match.Amount != nil {
+		parts = append(parts, fmt.Sprintf("amount: %.2f", *r.Match.Amount))
+	}
 	if r.Match.Direction != "" {
 		parts = append(parts, fmt.Sprintf("direction: %s", r.Match.Direction))
 	}
 	if r.Match.Application != "" {
 		parts = append(parts, fmt.Sprintf("app: %s", r.Match.Application))
+	}
+	if r.Match.PaymentLink != "" {
+		parts = append(parts, fmt.Sprintf("paymentLink: %s", r.Match.PaymentLink))
 	}
 	if r.Match.IBAN != "" {
 		parts = append(parts, fmt.Sprintf("iban: %s", r.Match.IBAN))

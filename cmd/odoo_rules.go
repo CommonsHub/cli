@@ -648,7 +648,7 @@ func lookupCounterpartMoveLine(creds *OdooCredentials, uid int, moveID int) (int
 // each just-created bank statement line to use the chart-of-accounts
 // account named by the rule. Same pattern as the internal-transfer
 // marker: draft → write account_id on the non-bank leg → repost.
-func applyOdooRuleAccount(creds *OdooCredentials, uid int, lineIDs []int, accountCode string) error {
+func applyOdooRuleAccount(creds *OdooCredentials, uid int, lineIDs []int, accountCode string, progress ...*statusLine) error {
 	if len(lineIDs) == 0 || accountCode == "" {
 		return nil
 	}
@@ -657,7 +657,14 @@ func applyOdooRuleAccount(creds *OdooCredentials, uid int, lineIDs []int, accoun
 		return err
 	}
 
-	for _, lineID := range lineIDs {
+	var status *statusLine
+	if len(progress) > 0 {
+		status = progress[0]
+	}
+	for i, lineID := range lineIDs {
+		if status != nil && (i == 0 || (i+1)%10 == 0 || i+1 == len(lineIDs)) {
+			status.Update("Applying account %s to line %d/%d...", accountCode, i+1, len(lineIDs))
+		}
 		line, err := readStatementLineForReconcile(creds, uid, lineID)
 		if err != nil {
 			return fmt.Errorf("read line #%d: %v", lineID, err)
