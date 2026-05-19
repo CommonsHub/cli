@@ -509,6 +509,8 @@ func TransactionsSync(args []string) (int, error) {
 									if name != "" || email != "" {
 										customers.Customers[tx.ID] = &stripesource.CustomerPII{Name: name, Email: email}
 									}
+								} else if tx.CustomerName != "" || tx.CustomerEmail != "" {
+									customers.Customers[tx.ID] = &stripesource.CustomerPII{Name: tx.CustomerName, Email: tx.CustomerEmail}
 								}
 							}
 							if len(customers.Customers) > 0 {

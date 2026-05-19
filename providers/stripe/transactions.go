@@ -153,7 +153,7 @@ func FetchTransactions(opts FetchOptions) ([]Transaction, error) {
 	page := 0
 	for {
 		page++
-		url := fmt.Sprintf("https://api.stripe.com/v1/balance_transactions?limit=%d&created[gte]=%d&created[lt]=%d",
+		url := fmt.Sprintf("https://api.stripe.com/v1/balance_transactions?limit=%d&created[gte]=%d&created[lt]=%d&expand[]=data.source",
 			pageSize, createdGte, createdLt)
 		if startingAfter != "" {
 			url += "&starting_after=" + startingAfter
@@ -190,6 +190,10 @@ func FetchTransactions(opts FetchOptions) ([]Transaction, error) {
 			return nil, fmt.Errorf("failed to decode stripe response: %w", err)
 		}
 
+		for i := range listResp.Data {
+			EnrichTransaction(&listResp.Data[i])
+			listResp.Data[i].Source = StripSourceToID(listResp.Data[i].Source)
+		}
 		allTxs = append(allTxs, listResp.Data...)
 		if opts.Progress != nil {
 			opts.Progress(providers.ProgressEvent{
@@ -301,6 +305,8 @@ func EnrichTransaction(tx *Transaction) {
 		Object         string `json:"object"`
 		ID             string `json:"id"`
 		Description    string `json:"description"`
+		Application    string `json:"application"`
+		ReceiptEmail   string `json:"receipt_email"`
 		BillingDetails struct {
 			Name  string `json:"name"`
 			Email string `json:"email"`
@@ -312,8 +318,10 @@ func EnrichTransaction(tx *Transaction) {
 		return
 	}
 
-	if source.Object == "charge" || source.Object == "payment_intent" {
-		tx.ChargeID = source.ID
+	if source.Object == "charge" || source.Object == "payment_intent" || source.Object == "payment" {
+		if source.Object == "charge" && strings.HasPrefix(source.ID, "ch_") {
+			tx.ChargeID = source.ID
+		}
 		if custObj, ok := source.Customer.(map[string]interface{}); ok {
 			if name, ok := custObj["name"].(string); ok && name != "" {
 				tx.CustomerName = name
@@ -328,6 +336,9 @@ func EnrichTransaction(tx *Transaction) {
 		if tx.CustomerEmail == "" {
 			tx.CustomerEmail = source.BillingDetails.Email
 		}
+		if tx.CustomerEmail == "" {
+			tx.CustomerEmail = source.ReceiptEmail
+		}
 		if tx.Description == "" && source.Description != "" {
 			tx.Description = source.Description
 		}
@@ -336,6 +347,16 @@ func EnrichTransaction(tx *Transaction) {
 		}
 		for k, v := range source.Metadata {
 			tx.Metadata[k] = v
+		}
+		if source.Application != "" {
+			if tx.Metadata == nil {
+				tx.Metadata = map[string]interface{}{}
+			}
+			if name, ok := KnownApps[source.Application]; ok {
+				tx.Metadata["application"] = name
+			} else {
+				tx.Metadata["application"] = source.Application
+			}
 		}
 	}
 
