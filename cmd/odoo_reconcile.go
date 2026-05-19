@@ -10,11 +10,14 @@ import (
 	"math/big"
 	"net/http"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
 
 const odooInternalTransferAccountCode = "580000"
+
+var odooInvoiceReferencePattern = regexp.MustCompile(`\b[A-Z]+/\d{4}/\d+\b`)
 
 type odooReconcileStats struct {
 	Scanned           int
@@ -25,21 +28,26 @@ type odooReconcileStats struct {
 	NoMatch           int
 	Errors            int
 	DryRun            bool
+	Verbose           bool
 	Details           []string
 	Rows              []odooReconcileReviewRow
 }
 
 type odooStatementLineForReconcile struct {
-	ID             int
-	Date           string
-	Amount         float64
-	PaymentRef     string
-	UniqueImportID string
-	PartnerID      int
-	PartnerName    string
-	PartnerBankID  int
-	MoveID         int
-	IsReconciled   bool
+	ID                int
+	Date              string
+	Amount            float64
+	PaymentRef        string
+	Narration         string
+	UniqueImportID    string
+	PartnerID         int
+	PartnerName       string
+	PartnerBankID     int
+	StatementID       int
+	MoveID            int
+	IsReconciled      bool
+	ReconciledTo      string
+	ReconciledLineIDs []int
 }
 
 type odooMoveCandidate struct {
@@ -48,6 +56,7 @@ type odooMoveCandidate struct {
 	InvoiceDate    string
 	Date           string
 	MoveType       string
+	PartnerID      int
 	PartnerName    string
 	AmountResidual float64
 }
@@ -70,18 +79,23 @@ type odooReconcileReviewRow struct {
 	Amount         float64
 	PotentialMatch string
 	Reason         string
+	Actionable     bool
 }
 
-func odooJournalReconcile(creds *OdooCredentials, uid int, journalID int, assumeYes, dryRun bool) error {
+func odooJournalReconcile(creds *OdooCredentials, uid int, journalID int, assumeYes, dryRun, verbose bool) error {
 	lines, err := fetchJournalUnreconciledStatementLines(creds, uid, journalID)
 	if err != nil {
 		return err
 	}
-	stats := &odooReconcileStats{DryRun: dryRun}
+	stats := &odooReconcileStats{DryRun: dryRun, Verbose: verbose}
 	fmt.Printf("\n  %sReconciling journal #%d%s\n", Fmt.Bold, journalID, Fmt.Reset)
 	fmt.Printf("  %s%s%s\n\n", Fmt.Dim, Pluralize(len(lines), "unreconciled statement line", ""), Fmt.Reset)
 	if len(lines) == 0 {
 		return nil
+	}
+	referenceCandidates, err := fetchOpenMoveCandidatesByReferenceForStatementLines(creds, uid, lines)
+	if err != nil {
+		return err
 	}
 
 	if !assumeYes && !dryRun {
@@ -97,8 +111,12 @@ func odooJournalReconcile(creds *OdooCredentials, uid int, journalID int, assume
 	}
 
 	for _, line := range lines {
-		amountCandidates, amountErr := findOpenMoveCandidatesByAmountForStatementLine(creds, uid, line)
-		result := tryReconcileStatementLine(creds, uid, line, dryRun)
+		var amountCandidates []odooMoveCandidate
+		var amountErr error
+		if verbose {
+			amountCandidates, amountErr = findOpenMoveCandidatesByAmountForStatementLine(creds, uid, line)
+		}
+		result := tryReconcileStatementLineWithReferenceCandidates(creds, uid, line, dryRun, referenceCandidates[line.ID])
 		recordOdooReconcileResult(stats, line, result, amountCandidates, amountErr)
 	}
 	printOdooReconcileStats(stats)
@@ -190,12 +208,17 @@ func recordSyncReconcileResult(stats *syncStats, line odooStatementLineForReconc
 
 func recordOdooReconcileResult(stats *odooReconcileStats, line odooStatementLineForReconcile, result odooLineReconcileResult, amountCandidates []odooMoveCandidate, amountErr error) {
 	stats.Scanned++
+	potentialMatch := formatOdooPotentialMatch(amountCandidates, amountErr)
+	if potentialMatch == "-" && result.CandidateMoveName != "" {
+		potentialMatch = result.CandidateMoveName
+	}
 	stats.Rows = append(stats.Rows, odooReconcileReviewRow{
 		Date:           line.Date,
 		Counterparty:   odooStatementLineCounterparty(line),
 		Amount:         line.Amount,
-		PotentialMatch: formatOdooPotentialMatch(amountCandidates, amountErr),
+		PotentialMatch: potentialMatch,
 		Reason:         odooReconcileReason(result, amountErr),
+		Actionable:     result.Reconciled || result.InternalTransfer,
 	})
 	switch {
 	case result.Err != nil:
@@ -222,6 +245,14 @@ func recordOdooReconcileResult(stats *odooReconcileStats, line odooStatementLine
 }
 
 func tryReconcileStatementLine(creds *OdooCredentials, uid int, line odooStatementLineForReconcile, dryRun bool) odooLineReconcileResult {
+	refCandidates, err := findOpenMoveCandidatesByReferenceForStatementLine(creds, uid, line)
+	if err != nil {
+		return odooLineReconcileResult{Err: err, Message: "find invoice/bill by reference"}
+	}
+	return tryReconcileStatementLineWithReferenceCandidates(creds, uid, line, dryRun, refCandidates)
+}
+
+func tryReconcileStatementLineWithReferenceCandidates(creds *OdooCredentials, uid int, line odooStatementLineForReconcile, dryRun bool, refCandidates []odooMoveCandidate) odooLineReconcileResult {
 	if line.IsReconciled {
 		return odooLineReconcileResult{}
 	}
@@ -233,6 +264,37 @@ func tryReconcileStatementLine(creds *OdooCredentials, uid int, line odooStateme
 			return odooLineReconcileResult{Err: err, Message: "mark internal transfer"}
 		}
 		return odooLineReconcileResult{InternalTransfer: true, Message: "marked as internal transfer"}
+	}
+
+	if len(refCandidates) > 1 {
+		return odooLineReconcileResult{
+			Ambiguous:      true,
+			CandidateCount: len(refCandidates),
+			Message:        fmt.Sprintf("%d matching open invoices/bills by reference", len(refCandidates)),
+		}
+	}
+	if len(refCandidates) == 1 {
+		candidate := refCandidates[0]
+		if dryRun {
+			return odooLineReconcileResult{
+				Reconciled:        true,
+				Message:           "would reconcile by reference",
+				CandidateMoveName: candidateDisplayName(candidate),
+			}
+		}
+		if candidate.PartnerID > 0 && line.PartnerID != candidate.PartnerID {
+			_, _ = odooExec(creds.URL, creds.DB, uid, creds.Password,
+				"account.bank.statement.line", "write",
+				[]interface{}{[]interface{}{line.ID}, map[string]interface{}{"partner_id": candidate.PartnerID}}, nil)
+		}
+		if err := reconcileStatementLineWithMove(creds, uid, line, candidate); err != nil {
+			return odooLineReconcileResult{Err: err, Message: fmt.Sprintf("reconcile by reference with %s", candidateDisplayName(candidate))}
+		}
+		return odooLineReconcileResult{
+			Reconciled:        true,
+			Message:           "reconciled by reference",
+			CandidateMoveName: candidateDisplayName(candidate),
+		}
 	}
 
 	partnerID, err := partnerIDForStatementLine(creds, uid, line, !dryRun)
@@ -328,8 +390,8 @@ func readStatementLineForReconcile(creds *OdooCredentials, uid int, lineID int) 
 
 func statementLineReconcileFields() []string {
 	return []string{
-		"id", "date", "amount", "payment_ref", "unique_import_id",
-		"partner_id", "partner_bank_id", "move_id", "is_reconciled",
+		"id", "date", "amount", "payment_ref", "narration", "unique_import_id",
+		"partner_id", "partner_bank_id", "statement_id", "move_id", "is_reconciled",
 	}
 }
 
@@ -341,10 +403,12 @@ func parseStatementLineRows(rows []map[string]interface{}) []odooStatementLineFo
 			Date:           odooString(row["date"]),
 			Amount:         odooFloat(row["amount"]),
 			PaymentRef:     odooString(row["payment_ref"]),
+			Narration:      odooString(row["narration"]),
 			UniqueImportID: odooString(row["unique_import_id"]),
 			PartnerID:      odooFieldID(row["partner_id"]),
 			PartnerName:    odooFieldName(row["partner_id"]),
 			PartnerBankID:  odooFieldID(row["partner_bank_id"]),
+			StatementID:    odooFieldID(row["statement_id"]),
 			MoveID:         odooFieldID(row["move_id"]),
 			IsReconciled:   odooBool(row["is_reconciled"]),
 		})
@@ -475,9 +539,14 @@ func ensureOdooStatementLinePartnerBank(creds *OdooCredentials, uid int, journal
 }
 
 func createOdooPartner(creds *OdooCredentials, uid int, name string) (int, error) {
+	name = titleCaseName(name)
+	values := map[string]interface{}{"name": name}
+	for k, v := range odooPartnerDefaultLanguageValues(creds, uid) {
+		values[k] = v
+	}
 	result, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
 		"res.partner", "create",
-		[]interface{}{[]interface{}{map[string]interface{}{"name": name}}}, nil)
+		[]interface{}{[]interface{}{values}}, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -705,6 +774,150 @@ func findOpenMoveCandidatesByAmountForStatementLine(creds *OdooCredentials, uid 
 	return findOpenMoveCandidates(creds, uid, line, 0)
 }
 
+func fetchOpenMoveCandidatesByReferenceForStatementLines(creds *OdooCredentials, uid int, lines []odooStatementLineForReconcile) (map[int][]odooMoveCandidate, error) {
+	refsByLine := map[int][]string{}
+	refSeen := map[string]bool{}
+	var refs []string
+	for _, line := range lines {
+		lineRefs := extractOdooInvoiceReferencesFromStatementLine(line)
+		if len(lineRefs) == 0 {
+			continue
+		}
+		refsByLine[line.ID] = lineRefs
+		for _, ref := range lineRefs {
+			if refSeen[ref] {
+				continue
+			}
+			refSeen[ref] = true
+			refs = append(refs, ref)
+		}
+	}
+	out := map[int][]odooMoveCandidate{}
+	if len(refs) == 0 {
+		return out, nil
+	}
+	var rows []map[string]interface{}
+	const refChunkSize = 40
+	for start := 0; start < len(refs); start += refChunkSize {
+		end := start + refChunkSize
+		if end > len(refs) {
+			end = len(refs)
+		}
+		values := make([]interface{}, 0, end-start)
+		for _, ref := range refs[start:end] {
+			values = append(values, ref)
+		}
+		chunkRows, err := odooSearchReadAllMaps(creds, uid, "account.move",
+			[]interface{}{
+				[]interface{}{"state", "=", "posted"},
+				[]interface{}{"move_type", "in", []interface{}{"out_invoice", "in_invoice"}},
+				[]interface{}{"payment_state", "not in", []interface{}{"paid", "in_payment", "reversed"}},
+				[]interface{}{"name", "in", values},
+			},
+			[]string{"id", "name", "invoice_date", "date", "move_type", "partner_id", "amount_residual"},
+			"invoice_date desc, id desc",
+		)
+		if err != nil {
+			return nil, fmt.Errorf("fetch invoice/bill reference candidates: %v", err)
+		}
+		rows = append(rows, chunkRows...)
+	}
+	candidatesByRef := map[string][]odooMoveCandidate{}
+	for _, candidate := range parseOdooMoveCandidates(rows) {
+		ref := strings.ToUpper(strings.TrimSpace(candidate.Name))
+		if ref == "" {
+			continue
+		}
+		candidatesByRef[ref] = append(candidatesByRef[ref], candidate)
+	}
+	for _, line := range lines {
+		lineRefs := refsByLine[line.ID]
+		if len(lineRefs) == 0 {
+			continue
+		}
+		for _, ref := range lineRefs {
+			for _, candidate := range candidatesByRef[ref] {
+				if odooReferenceCandidateMatchesLine(line, candidate) {
+					out[line.ID] = append(out[line.ID], candidate)
+				}
+			}
+		}
+	}
+	return out, nil
+}
+
+func findOpenMoveCandidatesByReferenceForStatementLine(creds *OdooCredentials, uid int, line odooStatementLineForReconcile) ([]odooMoveCandidate, error) {
+	refs := extractOdooInvoiceReferencesFromStatementLine(line)
+	if len(refs) == 0 {
+		return nil, nil
+	}
+	absAmount := math.Abs(line.Amount)
+	if absAmount < 0.005 {
+		return nil, nil
+	}
+	moveTypes := []interface{}{"out_invoice"}
+	if line.Amount < 0 {
+		moveTypes = []interface{}{"in_invoice"}
+	}
+	minAmount := roundCents(absAmount - 0.01)
+	maxAmount := roundCents(absAmount + 0.01)
+	values := make([]interface{}, 0, len(refs))
+	for _, ref := range refs {
+		values = append(values, ref)
+	}
+	rows, err := odooSearchReadAllMaps(creds, uid, "account.move",
+		[]interface{}{
+			[]interface{}{"state", "=", "posted"},
+			[]interface{}{"move_type", "in", moveTypes},
+			[]interface{}{"payment_state", "not in", []interface{}{"paid", "in_payment", "reversed"}},
+			[]interface{}{"amount_residual", ">=", minAmount},
+			[]interface{}{"amount_residual", "<=", maxAmount},
+			[]interface{}{"name", "in", values},
+		},
+		[]string{"id", "name", "invoice_date", "date", "move_type", "partner_id", "amount_residual"},
+		"invoice_date desc, id desc",
+	)
+	if err != nil {
+		return nil, err
+	}
+	candidates := parseOdooMoveCandidates(rows)
+	filtered := candidates[:0]
+	for _, candidate := range candidates {
+		if odooReferenceCandidateMatchesLine(line, candidate) {
+			filtered = append(filtered, candidate)
+		}
+	}
+	return filtered, nil
+}
+
+func odooReferenceCandidateMatchesLine(line odooStatementLineForReconcile, candidate odooMoveCandidate) bool {
+	if line.Amount >= 0 && candidate.MoveType != "out_invoice" {
+		return false
+	}
+	if line.Amount < 0 && candidate.MoveType != "in_invoice" {
+		return false
+	}
+	return math.Abs(math.Abs(candidate.AmountResidual)-math.Abs(line.Amount)) <= 0.01
+}
+
+func extractOdooInvoiceReferencesFromStatementLine(line odooStatementLineForReconcile) []string {
+	text := line.PaymentRef + " " + line.Narration + " " + line.UniqueImportID
+	matches := odooInvoiceReferencePattern.FindAllString(strings.ToUpper(text), -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	seen := map[string]bool{}
+	refs := make([]string, 0, len(matches))
+	for _, ref := range matches {
+		if seen[ref] {
+			continue
+		}
+		seen[ref] = true
+		refs = append(refs, ref)
+	}
+	return refs
+}
+
 func findOpenMoveCandidates(creds *OdooCredentials, uid int, line odooStatementLineForReconcile, partnerID int) ([]odooMoveCandidate, error) {
 	lineDate, err := time.Parse("2006-01-02", line.Date)
 	if err != nil {
@@ -743,6 +956,10 @@ func findOpenMoveCandidates(creds *OdooCredentials, uid int, line odooStatementL
 	if err != nil {
 		return nil, err
 	}
+	return parseOdooMoveCandidates(rows), nil
+}
+
+func parseOdooMoveCandidates(rows []map[string]interface{}) []odooMoveCandidate {
 	candidates := make([]odooMoveCandidate, 0, len(rows))
 	for _, row := range rows {
 		candidates = append(candidates, odooMoveCandidate{
@@ -751,11 +968,12 @@ func findOpenMoveCandidates(creds *OdooCredentials, uid int, line odooStatementL
 			InvoiceDate:    odooString(row["invoice_date"]),
 			Date:           odooString(row["date"]),
 			MoveType:       odooString(row["move_type"]),
+			PartnerID:      odooFieldID(row["partner_id"]),
 			PartnerName:    odooFieldName(row["partner_id"]),
 			AmountResidual: odooFloat(row["amount_residual"]),
 		})
 	}
-	return candidates, nil
+	return candidates
 }
 
 func reconcileStatementLineWithMove(creds *OdooCredentials, uid int, line odooStatementLineForReconcile, move odooMoveCandidate) error {
@@ -990,6 +1208,9 @@ func printOdooReconcileRows(stats *odooReconcileStats) {
 	}
 	rows := make([][]string, 0, len(stats.Rows))
 	for _, row := range stats.Rows {
+		if !stats.Verbose && !row.Actionable {
+			continue
+		}
 		rows = append(rows, []string{
 			row.Date,
 			row.Counterparty,
@@ -997,6 +1218,12 @@ func printOdooReconcileRows(stats *odooReconcileStats) {
 			row.PotentialMatch,
 			row.Reason,
 		})
+	}
+	if len(rows) == 0 {
+		if !stats.Verbose {
+			fmt.Printf("  %sNo lines would be reconciled. Use --verbose to list skipped/no-match lines.%s\n", Fmt.Dim, Fmt.Reset)
+		}
+		return
 	}
 	printAlignedTable(
 		[]string{"Date", "Counterparty", "Amount", "Potential match", "Reason"},
@@ -1011,6 +1238,9 @@ func printOdooReconcileStats(stats *odooReconcileStats) {
 		label = "would reconcile"
 	}
 	printOdooReconcileRows(stats)
+	if !stats.Verbose && len(stats.Rows) > stats.Reconciled+stats.InternalTransfers {
+		fmt.Printf("  %sUse --verbose to list skipped/no-match lines.%s\n", Fmt.Dim, Fmt.Reset)
+	}
 	fmt.Printf("\n  %s── Reconciliation summary ──%s\n", Fmt.Bold, Fmt.Reset)
 	fmt.Printf("    Lines scanned:       %d\n", stats.Scanned)
 	fmt.Printf("    Lines %s:    %d\n", label, stats.Reconciled)

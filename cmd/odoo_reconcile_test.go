@@ -153,3 +153,20 @@ func TestOdooReconcileReason(t *testing.T) {
 		t.Fatalf("error got %q", got)
 	}
 }
+
+func TestExtractOdooInvoiceReferencesFromStatementLine(t *testing.T) {
+	line := odooStatementLineForReconcile{
+		PaymentRef: "Stripe payment for MEM/2026/00032",
+		Narration:  `{"invoice":"mem/2026/00032","other":"INV/2026/001"}`,
+	}
+	got := extractOdooInvoiceReferencesFromStatementLine(line)
+	want := []string{"MEM/2026/00032", "INV/2026/001"}
+	if len(got) != len(want) {
+		t.Fatalf("refs = %#v, want %#v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("refs = %#v, want %#v", got, want)
+		}
+	}
+}
