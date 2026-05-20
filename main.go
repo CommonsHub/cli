@@ -31,7 +31,11 @@ func main() {
 	defer cmd.CloseDiagnosticsLog()
 	defer cmd.PrintDiagnosticsSummary()
 
-	args := os.Args[1:]
+	// Global flags that override settings loaded from config.env. Parsed and
+	// stripped from os.Args before any command sees them so subcommand
+	// arg-parsing doesn't have to know about them. Each maps to the env var
+	// ResolveOdooCredentials reads.
+	args := applyGlobalOdooFlags(os.Args[1:])
 
 	if len(args) == 0 {
 		cmd.PrintHelp(cmd.Version)
@@ -358,11 +362,33 @@ func main() {
 		if err := cmd.Tools(args[1:]); err != nil {
 			exitWithError(err)
 		}
-	case "pull", "sync":
-		if args[0] == "sync" {
-			cmd.Warnf("%s'chb sync' is deprecated — use 'chb pull' instead%s", cmd.Fmt.Dim, cmd.Fmt.Reset)
+	case "pull":
+		if err := cmd.ProvidersCommand(append([]string{"*", "pull"}, args[1:]...)); err != nil {
+			exitWithError(err)
+		}
+	case "push":
+		// Push to every target (Odoo journals + Nostr outbox). Useful as
+		// the second half of `chb sync` and as a standalone "publish
+		// everything ready" call for cron jobs that pull continuously and
+		// push periodically.
+		if err := cmd.PushAllTargets(args[1:]); err != nil {
+			exitWithError(err)
+		}
+	case "sync":
+		// `chb sync` is the full hourly-cron loop: pull from every source,
+		// then push to every target. Equivalent to:
+		//   chb pull && chb push
+		// Designed to be safe to run unattended (push uses the
+		// auto-reconcile-when-≤20-new-lines policy so manual back-fills
+		// stay out of cron's reach).
+		if cmd.HasFlag(args[1:], "--help", "-h", "help") {
+			cmd.PrintSyncCronHelp()
+			return
 		}
 		if err := cmd.ProvidersCommand(append([]string{"*", "pull"}, args[1:]...)); err != nil {
+			exitWithError(err)
+		}
+		if err := cmd.PushAllTargets(args[1:]); err != nil {
 			exitWithError(err)
 		}
 	case "report":
@@ -374,6 +400,73 @@ func main() {
 		cmd.PrintHelp(cmd.Version)
 		exitAfterDiagnostics()
 	}
+}
+
+// applyGlobalOdooFlags consumes Odoo-targeting flags from args and applies
+// them as env-var overrides before any subcommand parses its own args.
+// Recognised forms (kebab- and snake-case both accepted):
+//
+//	--odoo-db <slug>   / --odoo_db=<slug>     → overrides ODOO_DATABASE (+ infers URL)
+//	--odoo-url <url>   / --odoo_url=<url>     → overrides ODOO_URL (+ infers DB)
+//
+// **Interchangeable**: when only one of the two is provided, the other is
+// derived using the convention `https://<db>.odoo.com`. So
+// `chb --odoo-db citizenspring-test2 ...` is enough to retarget the whole
+// session. Passing both flags pins each independently (useful for self-hosted
+// instances whose URL doesn't follow the SaaS pattern).
+//
+// Strips the consumed args so subcommands never see them.
+func applyGlobalOdooFlags(args []string) []string {
+	out := make([]string, 0, len(args))
+	dbFlag, urlFlag := "", ""
+	knownPrefixes := []string{"--odoo-db", "--odoo_db", "--odoo-url", "--odoo_url"}
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		consumed := false
+		for _, p := range knownPrefixes {
+			value := ""
+			if a == p {
+				if i+1 < len(args) {
+					value = args[i+1]
+					i++
+				}
+				consumed = true
+			} else if strings.HasPrefix(a, p+"=") {
+				value = a[len(p)+1:]
+				consumed = true
+			}
+			if !consumed {
+				continue
+			}
+			switch p {
+			case "--odoo-db", "--odoo_db":
+				dbFlag = value
+			case "--odoo-url", "--odoo_url":
+				urlFlag = value
+			}
+			break
+		}
+		if !consumed {
+			out = append(out, a)
+		}
+	}
+
+	// Derive the missing half. The convention `<db>.odoo.com` holds for
+	// every Odoo SaaS instance — operators with a self-hosted setup just
+	// pass both flags explicitly.
+	if dbFlag != "" && urlFlag == "" {
+		urlFlag = "https://" + dbFlag + ".odoo.com"
+	}
+	if urlFlag != "" && dbFlag == "" {
+		dbFlag = cmd.OdooDBFromURL(urlFlag)
+	}
+	if urlFlag != "" {
+		_ = os.Setenv("ODOO_URL", urlFlag)
+	}
+	if dbFlag != "" {
+		_ = os.Setenv("ODOO_DATABASE", dbFlag)
+	}
+	return out
 }
 
 func hasArg(args []string, target string) bool {

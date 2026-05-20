@@ -559,8 +559,18 @@ func lookupCounterpartMoveLine(creds *OdooCredentials, uid int, moveID int) (int
 
 // applyOdooMappingAccount rewrites the counterpart account.move.line of
 // each just-created bank statement line to use the chart-of-accounts
-// account named by the mapping. Same pattern as the internal-transfer
-// marker: draft → write account_id on the non-bank leg → repost.
+// account named by the mapping.
+//
+// Implementation note: Odoo's bank-statement-line create atomically
+// creates AND posts the move, so there's no draft window we can hook
+// into via plain XML-RPC. The honest answer is "draft → write → repost"
+// per move. What we *can* do is batch the three steps across many lines
+// instead of doing them per-line — for a 188-line KBC merge that's the
+// difference between ~940 RPCs and ~5.
+//
+// All callers funnel into applyOdooMappingAccountBatch, which itself
+// chunks the bulk-draft / bulk-write / bulk-post calls so even very
+// large journals stay under any single-call payload limit.
 func applyOdooMappingAccount(creds *OdooCredentials, uid int, lineIDs []int, accountCode string, progress ...*statusLine) error {
 	if len(lineIDs) == 0 || accountCode == "" {
 		return nil
@@ -574,40 +584,43 @@ func applyOdooMappingAccount(creds *OdooCredentials, uid int, lineIDs []int, acc
 	if len(progress) > 0 {
 		status = progress[0]
 	}
-	for i, lineID := range lineIDs {
-		if status != nil && (i == 0 || (i+1)%10 == 0 || i+1 == len(lineIDs)) {
-			status.Update("Applying account %s to line %d/%d...", accountCode, i+1, len(lineIDs))
-		}
-		line, err := readStatementLineForReconcile(creds, uid, lineID)
-		if err != nil {
-			return fmt.Errorf("read line #%d: %v", lineID, err)
-		}
-		if line.MoveID == 0 {
-			continue
-		}
-		counterpartID, err := findStatementCounterpartMoveLine(creds, uid, line)
-		if err != nil {
-			return fmt.Errorf("find counterpart for line #%d: %v", lineID, err)
-		}
-		if counterpartID == 0 {
-			continue
-		}
-		_, _ = odooExec(creds.URL, creds.DB, uid, creds.Password,
-			"account.move", "button_draft",
-			[]interface{}{[]interface{}{line.MoveID}}, nil)
-		_, err = odooExec(creds.URL, creds.DB, uid, creds.Password,
-			"account.move.line", "write",
-			[]interface{}{[]interface{}{counterpartID}, map[string]interface{}{"account_id": accountID}}, nil)
-		if err != nil {
-			return fmt.Errorf("write account on move line #%d: %v", counterpartID, err)
-		}
-		if _, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
-			"account.move", "action_post",
-			[]interface{}{[]interface{}{line.MoveID}}, nil); err != nil {
-			return fmt.Errorf("repost move #%d: %v", line.MoveID, err)
+	if status != nil {
+		status.Update("Resolving counterparts for %d line(s)…", len(lineIDs))
+	}
+
+	// 1. Batch-read the statement lines to learn their move_ids.
+	lineRows, err := odooReadMapsByIDs(creds, uid, "account.bank.statement.line",
+		uniquePositiveInts(lineIDs), []string{"id", "move_id"})
+	if err != nil {
+		return fmt.Errorf("read statement lines: %v", err)
+	}
+	moveIDs := make([]int, 0, len(lineRows))
+	for _, row := range lineRows {
+		if mid := odooFieldID(row["move_id"]); mid > 0 {
+			moveIDs = append(moveIDs, mid)
 		}
 	}
-	return nil
+	if len(moveIDs) == 0 {
+		return nil
+	}
+
+	// 2. Batch-resolve the non-bank counterpart move.line for each move.
+	counterpartByMoveID, err := fetchCounterpartMoveLinesByMoveID(creds, uid, moveIDs)
+	if err != nil {
+		return fmt.Errorf("find counterparts: %v", err)
+	}
+	counterpartIDs := make([]int, 0, len(counterpartByMoveID))
+	for _, info := range counterpartByMoveID {
+		if info.LineID > 0 {
+			counterpartIDs = append(counterpartIDs, info.LineID)
+		}
+	}
+	if len(counterpartIDs) == 0 {
+		return nil
+	}
+
+	// 3. One batched draft → write → post pass, chunked internally.
+	return applyOdooMappingAccountBatch(creds, uid, moveIDs, counterpartIDs, accountID, accountCode, status)
 }
 
 func printOdooMappingHelp() {

@@ -165,9 +165,12 @@ func providerCommandSpecs() []providerCommandSpec {
 		{
 			Name:        "nostr",
 			Description: "Nostr annotations and metadata archives.",
-			Commands:    []string{"sync", "generate"},
-			Sync:        NostrSync,
-			Generate:    GenerateTransactions,
+			Commands:    []string{"pull", "generate"},
+			// Pull-only here: chb pull (= run every provider's Sync) must
+			// never trigger Nostr writes. The push side is reached via
+			// `chb nostr push` / `chb push`.
+			Sync:     NostrPull,
+			Generate: GenerateTransactions,
 		},
 	}
 }

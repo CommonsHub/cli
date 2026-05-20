@@ -25,23 +25,28 @@ import (
 //     the operator can verify before committing.
 //
 // In --dry-run, no writes happen.
-func mergeKBCJournalWithCSV(creds *OdooCredentials, uid int, journalID int, acc *AccountConfig, dryRun, assumeYes, verbose bool) error {
+// mergeKBCJournalWithCSV pushes the local KBC CSV into the linked Odoo
+// journal. Returns the number of newly-created statement lines so the
+// caller can decide whether to auto-reconcile (see
+// shouldReconcileAfterPush). Returns 0 on no-op / dry-run / error.
+func mergeKBCJournalWithCSV(creds *OdooCredentials, uid int, journalID int, acc *AccountConfig, dryRun, assumeYes, verbose bool) (int, error) {
+	createdLines := 0
 	iban := kbcbrusselssource.NormalizeIBAN(acc.IBAN)
 	if iban == "" {
-		return fmt.Errorf("account '%s' has no IBAN configured", acc.Slug)
+		return 0, fmt.Errorf("account '%s' has no IBAN configured", acc.Slug)
 	}
 	rows, err := kbcbrusselssource.LoadTransactionsForIBAN(DataDir(), iban)
 	if err != nil {
-		return fmt.Errorf("load CSV: %v", err)
+		return 0, fmt.Errorf("load CSV: %v", err)
 	}
 	if len(rows) == 0 {
-		return fmt.Errorf("no CSV rows for %s under %s",
+		return 0, fmt.Errorf("no CSV rows for %s under %s",
 			iban, kbcbrusselssource.LatestDir(DataDir()))
 	}
 
 	odooLines, err := loadKBCOdooLines(creds, uid, journalID)
 	if err != nil {
-		return fmt.Errorf("fetch Odoo lines: %v", err)
+		return 0, fmt.Errorf("fetch Odoo lines: %v", err)
 	}
 
 	// Build the set of unique_import_id values already in Odoo so we can
@@ -120,7 +125,7 @@ func mergeKBCJournalWithCSV(creds *OdooCredentials, uid int, journalID int, acc 
 			}
 			fmt.Printf("  %s✓ kbc: nothing to push%s%s\n", Fmt.Green, suffix, Fmt.Reset)
 		}
-		return nil
+		return createdLines, nil
 	}
 
 	printKBCMergeSummary(plan, len(rows), len(odooLines), alreadyCanonical, iban, journalID, partnerSummary, partnerIdx != nil)
@@ -133,12 +138,12 @@ func mergeKBCJournalWithCSV(creds *OdooCredentials, uid int, journalID int, acc 
 
 	if dryRun {
 		fmt.Printf("\n  %s(dry-run — no writes)%s\n\n", Fmt.Dim, Fmt.Reset)
-		return nil
+		return createdLines, nil
 	}
 
 	if noop {
 		fmt.Printf("\n  %s✓ Nothing to do%s\n\n", Fmt.Green, Fmt.Reset)
-		return nil
+		return createdLines, nil
 	}
 
 	if !assumeYes {
@@ -149,15 +154,17 @@ func mergeKBCJournalWithCSV(creds *OdooCredentials, uid int, journalID int, acc 
 		reader := bufio.NewReader(os.Stdin)
 		resp, _ := reader.ReadString('\n')
 		if strings.ToLower(strings.TrimSpace(resp)) != "y" {
-			return fmt.Errorf("cancelled")
+			return 0, fmt.Errorf("cancelled")
 		}
 	}
 
-	if err := applyKBCMerge(creds, uid, journalID, acc, plan); err != nil {
-		return err
+	created, err := applyKBCMerge(creds, uid, journalID, acc, plan)
+	if err != nil {
+		return created, err
 	}
+	createdLines = created
 	fmt.Printf("\n  %s✓ Merge complete%s\n\n", Fmt.Green, Fmt.Reset)
-	return nil
+	return createdLines, nil
 }
 
 func deleteOrphansSuffix(n int) string {
@@ -788,7 +795,11 @@ func buildKBCImportID(iban, hash string) string {
 // import-id from the original importer and other tools may rely on it.
 // Errors abort early; merge is idempotent so re-running picks up from
 // wherever the previous attempt stopped.
-func applyKBCMerge(creds *OdooCredentials, uid int, journalID int, acc *AccountConfig, plan kbcMergePlan) error {
+//
+// Returns the number of statement lines actually created (used by the
+// caller to decide whether to auto-reconcile based on batch size).
+func applyKBCMerge(creds *OdooCredentials, uid int, journalID int, acc *AccountConfig, plan kbcMergePlan) (int, error) {
+	created := 0
 	if len(plan.ToAdd) > 0 {
 		fmt.Printf("\n  %sCreating %s in Odoo…%s\n", Fmt.Dim, Pluralize(len(plan.ToAdd), "line", ""), Fmt.Reset)
 		partnerCache := map[string]int{}
@@ -836,8 +847,9 @@ func applyKBCMerge(creds *OdooCredentials, uid int, journalID int, acc *AccountC
 		}
 		result, err := batchCreateStatementLinesWithProgressReport(creds, uid, batch, "kbc merge")
 		if err != nil {
-			return fmt.Errorf("create new lines: %v", err)
+			return created, fmt.Errorf("create new lines: %v", err)
 		}
+		created = len(result.IDs)
 		fmt.Printf("  %s✓ Created %d/%d line%s%s\n", Fmt.Green, len(result.IDs), len(batch),
 			plural(len(batch)), Fmt.Reset)
 		if len(result.Failures) > 0 {
@@ -873,7 +885,7 @@ func applyKBCMerge(creds *OdooCredentials, uid int, journalID int, acc *AccountC
 			if _, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
 				"account.bank.statement.line", "unlink",
 				[]interface{}{ifaceIDs}, nil); err != nil {
-				return fmt.Errorf("unlink orphan lines: %v", err)
+				return created, fmt.Errorf("unlink orphan lines: %v", err)
 			}
 		}
 		fmt.Printf("  %s✓ Deleted %d/%d orphan line%s%s\n",
@@ -882,7 +894,7 @@ func applyKBCMerge(creds *OdooCredentials, uid int, journalID int, acc *AccountC
 
 	UpdateSyncSource(fmt.Sprintf("odoo:journal:%d", journalID), false)
 	_ = time.Now()
-	return nil
+	return created, nil
 }
 
 func kbcMergePaymentRef(row kbcbrusselssource.Transaction) string {
@@ -1096,12 +1108,11 @@ func applyKBCRuleAccounts(creds *OdooCredentials, uid int, journalID int, accoun
 		}
 		byCode[code] = append(byCode[code], lineID)
 	}
-	// Count total work so the operator sees a sane "Applying account
-	// codes: cur/total" line — this step does ~5 RPCs per line (read,
-	// find counterpart, draft move, write account, repost) sequentially,
-	// so on a 188-line journal it can run for several minutes. Without
-	// the status line the operator sees "✓ Created 188/188 lines" and
-	// then nothing until the whole pass finishes.
+	// applyOdooMappingAccount now batches the draft → write → post pass
+	// per account-code group, so this step is ~3 RPCs per code regardless
+	// of how many lines share that code (down from the old per-line
+	// ~5 RPCs per line). On a 188-line KBC journal with ~10 distinct
+	// codes that's ~30 RPCs instead of ~940.
 	totalLines := 0
 	codes := make([]string, 0, len(byCode))
 	for code, ids := range byCode {
@@ -1112,8 +1123,8 @@ func applyKBCRuleAccounts(creds *OdooCredentials, uid int, journalID int, accoun
 	if totalLines == 0 {
 		return nil
 	}
-	fmt.Printf("  %sApplying rule-driven account codes to %d line%s (~%d RPCs)…%s\n",
-		Fmt.Dim, totalLines, plural(totalLines), totalLines*5, Fmt.Reset)
+	fmt.Printf("  %sApplying rule-driven account codes to %d line%s across %d code%s…%s\n",
+		Fmt.Dim, totalLines, plural(totalLines), len(codes), plural(len(codes)), Fmt.Reset)
 	status := newStatusLine()
 	defer status.Clear()
 	done := 0

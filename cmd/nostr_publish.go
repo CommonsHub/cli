@@ -8,7 +8,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/huh"
 	"github.com/nbd-wtf/go-nostr"
 )
 
@@ -176,15 +175,12 @@ func TransactionsPublish(args []string) error {
 	}
 
 	fmt.Println()
-
-	// Confirmation
-	var confirm bool
-	runField(huh.NewConfirm().
-		Title(fmt.Sprintf("Publish %d annotations to Nostr?", len(pending))).
-		Value(&confirm))
-
-	if !confirm {
-		fmt.Printf("\n%sCancelled.%s\n\n", Fmt.Dim, Fmt.Reset)
+	// Non-interactive: the operator already opted in by typing
+	// `chb nostr push` / `chb push` / `chb sync`. Cron-friendly. Use
+	// --dry-run earlier in the args list (handled by the caller) to
+	// preview without writing.
+	if HasFlag(args, "--dry-run") {
+		fmt.Printf("%s(dry-run — no writes)%s\n\n", Fmt.Dim, Fmt.Reset)
 		return nil
 	}
 

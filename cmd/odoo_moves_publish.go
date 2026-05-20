@@ -5,7 +5,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/charmbracelet/huh"
 	"github.com/nbd-wtf/go-nostr"
 )
 
@@ -128,12 +127,10 @@ func publishMoves(kind moveKind, args []string) error {
 	}
 	fmt.Println()
 
-	var confirm bool
-	runField(huh.NewConfirm().
-		Title(fmt.Sprintf("Publish %d %s annotations to Nostr?", len(plan), kind.label)).
-		Value(&confirm))
-	if !confirm {
-		fmt.Printf("\n%sCancelled.%s\n\n", Fmt.Dim, Fmt.Reset)
+	// Non-interactive: caller (`chb nostr push` / `chb push` / `chb sync`)
+	// has already opted in. Use --dry-run upstream to preview.
+	if HasFlag(args, "--dry-run") {
+		fmt.Printf("%s(dry-run — no writes)%s\n\n", Fmt.Dim, Fmt.Reset)
 		return nil
 	}
 

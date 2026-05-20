@@ -27,6 +27,12 @@ func odooDBFromURL(odooURL string) string {
 	return odoosource.DBFromURL(odooURL)
 }
 
+// OdooDBFromURL is the exported alias used by main.go's global-flag handler
+// to derive the DB slug from a URL when only one of the two was specified.
+func OdooDBFromURL(odooURL string) string {
+	return odoosource.DBFromURL(odooURL)
+}
+
 func odooAuth(odooURL, db, login, password string) (int, error) {
 	return odoosource.Auth(odooURL, db, login, password)
 }

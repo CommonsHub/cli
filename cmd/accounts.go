@@ -1709,7 +1709,7 @@ func AccountFetch(slug string, args []string) error {
 
 	// Snapshot before-counts so we can report "N new transactions" after.
 	countBefore := accountProviderRawCount(acc)
-	printAccountFetchHeader(acc)
+	printAccountFetchHeader(acc, args)
 
 	// Manual / CSV provider: no upstream API to call. Re-generate every
 	// month touched by the CSV so monthly transactions.json files catch
@@ -1788,6 +1788,34 @@ func AccountFetch(slug string, args []string) error {
 	return nil
 }
 
+// reconcileAutoThreshold caps the auto-reconcile-after-push behaviour. At
+// or below this many newly-created lines, the post-push reconcile runs
+// automatically; above it, the operator must pass --reconcile explicitly.
+// Calibrated for the typical hourly cron rhythm (0–5 new lines) where
+// auto-reconcile is essentially free, while keeping large back-fills
+// (initial migration, journal reset+re-push) under explicit operator
+// control to avoid accidental partner/account mass-edits.
+const reconcileAutoThreshold = 20
+
+// shouldReconcileAfterPush encodes the policy: --skip-reconcile wins
+// over everything, --reconcile forces it, and otherwise the count
+// decides. When skipped because of the threshold, prints a hint so the
+// operator knows the lines need a follow-up step.
+func shouldReconcileAfterPush(args []string, newLines int, label string) bool {
+	if HasFlag(args, "--skip-reconcile", "--skip-reconciliation") {
+		return false
+	}
+	if HasFlag(args, "--reconcile") {
+		return true
+	}
+	if newLines <= reconcileAutoThreshold {
+		return true
+	}
+	fmt.Printf("  %s↳ %d new lines exceeds the auto-reconcile threshold of %d; re-run with --reconcile to reconcile them%s\n",
+		Fmt.Dim, newLines, reconcileAutoThreshold, Fmt.Reset)
+	return false
+}
+
 // accountProviderDisplayName returns the human-friendly source label used
 // in the pull header ("Stripe", "Etherscan", "Monerium", "CSV", …).
 func accountProviderDisplayName(acc *AccountConfig) string {
@@ -1852,19 +1880,33 @@ func accountProviderRawCount(acc *AccountConfig) int {
 	return 0
 }
 
-// printAccountFetchHeader opens a per-account pull with the source label
-// and the last-fetch cursor — so the operator sees "Pulling from Stripe
-// for new transactions since 2025-05-20 11:23" before the fetch runs.
-func printAccountFetchHeader(acc *AccountConfig) {
+// printAccountFetchHeader opens a per-account pull with a header tuned
+// to what the user asked for:
+//
+//	chb accounts <slug> pull --history       → "Pulling all transactions from <Provider>"
+//	chb accounts <slug> pull --since <date>   → "Pulling new transactions since <date> from <Provider>"
+//	chb accounts <slug> pull                  → "Pulling new transactions since <last sync> from <Provider>"
+//
+// The "since" timeline matches the actual cursor the fetch will use, so
+// the operator can predict the cost of the call from the header alone.
+func printAccountFetchHeader(acc *AccountConfig, args []string) {
 	provider := accountProviderDisplayName(acc)
+	if HasFlag(args, "--history") {
+		fmt.Printf("\n%sPulling all transactions from %s%s\n", Fmt.Bold, provider, Fmt.Reset)
+		return
+	}
+	if v := GetOption(args, "--since"); v != "" {
+		fmt.Printf("\n%sPulling new transactions since %s from %s%s\n", Fmt.Bold, v, provider, Fmt.Reset)
+		return
+	}
 	last := LastSyncTime("account:" + strings.ToLower(acc.Slug))
 	if last.IsZero() {
-		fmt.Printf("\n%sPulling from %s%s %s(first sync)%s\n",
+		fmt.Printf("\n%sPulling all transactions from %s%s %s(first sync)%s\n",
 			Fmt.Bold, provider, Fmt.Reset, Fmt.Dim, Fmt.Reset)
 		return
 	}
-	fmt.Printf("\n%sPulling from %s for new transactions since %s%s\n",
-		Fmt.Bold, provider, last.In(BrusselsTZ()).Format("2006-01-02 15:04"), Fmt.Reset)
+	fmt.Printf("\n%sPulling new transactions since %s from %s%s\n",
+		Fmt.Bold, last.In(BrusselsTZ()).Format("2006-01-02 15:04"), provider, Fmt.Reset)
 }
 
 // isOdooSyntheticLine returns true for cache lines that don't correspond
@@ -2381,14 +2423,22 @@ func AccountOdooPush(slug string, args []string) error {
 
 	dryRun := HasFlag(args, "--dry-run")
 	force := HasFlag(args, "--force")
-	// Reconciliation (matching statement lines against invoices/bills) is
-	// opt-in via --reconcile. The default is import-only so a fast sync
-	// doesn't trigger expensive per-line reconciliation work; the
-	// operator can follow up with `chb odoo journals <id> reconcile`
-	// (or pass --reconcile to combine the two in one shot).
-	// --skip-reconciliation is retained as a no-op alias for callers that
-	// pinned the old default semantics.
-	_ = HasFlag(args, "--skip-reconciliation")
+	// Reconciliation policy:
+	//
+	//   --skip-reconcile           never reconcile after this push
+	//   --reconcile                always reconcile after this push (even big batches)
+	//   (default)                  reconcile when ≤ reconcileAutoThreshold new lines
+	//
+	// The threshold makes hourly cron pushes (typically 0–5 new lines)
+	// safely auto-reconcile, while large back-fills (hundreds of lines)
+	// require an explicit --reconcile so the operator stays in the loop.
+	// The inner per-line "skip reconciliation" flag controls whether the
+	// provider's inline reconcile step runs for each new line as it's
+	// created. We leave the existing semantic: skip unless --reconcile.
+	// The POST-push journal-wide reconcile is decided separately by
+	// shouldReconcileAfterPush(), which adds the auto-on-small-batches
+	// behaviour the operator asked for. --skip-reconciliation is kept as
+	// a deprecated alias for --skip-reconcile.
 	skipReconciliation := !HasFlag(args, "--reconcile")
 	if HasFlag(args, "--account") {
 		return fmt.Errorf("unknown flag --account for journal sync; use --accounts")
@@ -2519,40 +2569,66 @@ func AccountOdooPush(slug string, args []string) error {
 				summary += fmt.Sprintf(", metadata %d/%d", updated, reviewed)
 			}
 		}
-		if syncErr == nil && stages.Explicit && stages.Reconcile {
+		// Determine newLines for the reconcile auto-threshold; parse Stripe
+		// upload count first so shouldReconcileAfterPush sees the right number.
+		if stages.Transactions {
+			syncedCount = parseStripeUploadCount(summary)
+		}
+		if syncErr == nil && shouldReconcileAfterPush(args, syncedCount, "stripe") && !dryRun {
 			if err := odooJournalReconcile(creds, uid, acc.OdooJournalID, assumeYes, dryRun, false); err != nil {
 				syncErr = err
 			} else {
 				summary += ", reconcile pass complete"
 			}
 		}
-		if stages.Transactions {
-			syncedCount = parseStripeUploadCount(summary)
-		}
 	} else if acc.Provider == "kbcbrussels" {
-		// KBC has its own dedicated reconcile/push code (`merge`) that
-		// handles per-row partner+IBAN resolution, the OdooMapping lookup
-		// for account assignment, and the right payment_ref / narration
-		// from the CSV's Description / FreeReference / StandardReference
-		// fields. Routing `sync` through it ensures `--reset` + sync
+		// KBC has its own dedicated push code (`merge`) that handles
+		// per-row partner+IBAN resolution, the OdooMapping lookup for
+		// account assignment, and the right payment_ref / narration from
+		// the CSV's Description / FreeReference / StandardReference
+		// fields. Routing `push` through it ensures `--reset` + push
 		// produces the same clean state as `merge` against an empty
 		// journal — no IBAN-as-partner-name junk, no IBAN-as-payment-ref.
 		// --history is implied: merge always considers the full CSV.
-		if stages.Explicit && (!stages.Transactions || stages.Partners || stages.Accounts || stages.Metadata || stages.Reconcile) {
-			return fmt.Errorf("staged sync flags are currently supported for Stripe journals; use --transactions for this account")
+		//
+		// --reconcile is allowed (opt-in) and runs odooJournalReconcile
+		// after the merge — same shape as Stripe's --reconcile stage,
+		// for consistency. The other Stripe-only stages (--partners,
+		// --accounts, --metadata) don't have a KBC equivalent and are
+		// rejected.
+		if stages.Explicit && (!stages.Transactions || stages.Partners || stages.Accounts || stages.Metadata) {
+			return fmt.Errorf("for KBC, only --transactions and --reconcile stage flags are supported")
 		}
-		syncErr = mergeKBCJournalWithCSV(creds, uid, acc.OdooJournalID, acc, dryRun, assumeYes, false)
+		var kbcCreated int
+		kbcCreated, syncErr = mergeKBCJournalWithCSV(creds, uid, acc.OdooJournalID, acc, dryRun, assumeYes, false)
+		syncedCount = kbcCreated
 		if syncErr == nil {
 			summary = "merged from CSV"
 		}
+		if syncErr == nil && shouldReconcileAfterPush(args, syncedCount, "kbc") && !dryRun {
+			if err := odooJournalReconcile(creds, uid, acc.OdooJournalID, assumeYes, dryRun, false); err != nil {
+				syncErr = err
+			} else {
+				summary += ", reconcile pass complete"
+			}
+		}
 	} else {
-		if stages.Explicit && (!stages.Transactions || stages.Partners || stages.Accounts || stages.Metadata || stages.Reconcile) {
-			return fmt.Errorf("staged sync flags are currently supported for Stripe journals; use --transactions for this account")
+		// Same shape for blockchain accounts: --reconcile is opt-in;
+		// other Stripe-only stages are rejected.
+		if stages.Explicit && (!stages.Transactions || stages.Partners || stages.Accounts || stages.Metadata) {
+			return fmt.Errorf("for this account, only --transactions and --reconcile stage flags are supported")
 		}
 		var result blockchainOdooSyncResult
 		result, syncErr = syncBlockchainToOdoo(acc, creds, uid, monthsLimit, dryRun, skipReconciliation, sinceDate, untilDate, useHistory, previewLimit)
 		summary = result.Summary
 		syncedCount = result.Synced
+		if syncErr == nil && shouldReconcileAfterPush(args, syncedCount, acc.Slug) && !dryRun {
+			if err := odooJournalReconcile(creds, uid, acc.OdooJournalID, assumeYes, dryRun, false); err != nil {
+				syncErr = err
+			} else {
+				summary += ", reconcile pass complete"
+			}
+		}
 	}
 
 	// Mapping resolution happens at generate time (see applyOdooMapping
@@ -5823,79 +5899,94 @@ func printAccountSlugHelp(slug string) {
 		fmt.Printf("    %sList Stripe payouts with amounts and transaction counts%s\n\n", f.Dim, f.Reset)
 	}
 
-	fmt.Printf("  %s%schb accounts %s sync%s\n", f.Bold, f.Cyan, slug, f.Reset)
+	fmt.Printf("  %s%schb accounts %s pull%s\n", f.Bold, f.Cyan, slug, f.Reset)
 	if acc.Provider == "stripe" {
-		fmt.Printf("    %sSync Stripe balance transactions into the linked Odoo journal.%s\n", f.Dim, f.Reset)
-		fmt.Printf("    %sStatements are opened/closed automatically around auto-payouts.%s\n", f.Dim, f.Reset)
+		fmt.Printf("    %sPull Stripe balance transactions into the local cache.%s\n", f.Dim, f.Reset)
+	} else if acc.Provider == "kbcbrussels" {
+		fmt.Printf("    %sRe-read the local KBC CSV under latest/providers/kbcbrussels/ and regenerate.%s\n", f.Dim, f.Reset)
 	} else {
-		fmt.Printf("    %sSync transactions to linked Odoo journal%s\n", f.Dim, f.Reset)
+		fmt.Printf("    %sFetch transactions from the source provider into the local cache.%s\n", f.Dim, f.Reset)
 	}
+	fmt.Println()
+
+	fmt.Printf("  %s%schb accounts %s push%s\n", f.Bold, f.Cyan, slug, f.Reset)
+	fmt.Printf("    %sPush local transactions into the linked Odoo journal (see also: chb odoo journals <id> push)%s\n", f.Dim, f.Reset)
 	fmt.Println()
 
 	fmt.Printf("  %s%schb accounts %s link%s\n", f.Bold, f.Cyan, slug, f.Reset)
 	fmt.Printf("    %sLink this account to an Odoo bank journal%s\n", f.Dim, f.Reset)
 	fmt.Println()
 
-	// Show sync options
-	fmt.Printf("%sOPTIONS%s (for sync)\n\n", f.Bold, f.Reset)
-	fmt.Printf("  %s--dry-run%s          Preview what would be synced\n", f.Yellow, f.Reset)
-	fmt.Printf("  %s--force%s            Re-sync (delete existing data first)\n", f.Yellow, f.Reset)
-	fmt.Printf("  %s--reconcile%s        Also reconcile imported lines against invoices/bills (off by default)\n", f.Yellow, f.Reset)
-	fmt.Printf("  %s--transactions%s     Stripe-only: import statement lines/statements/fees\n", f.Yellow, f.Reset)
-	fmt.Printf("  %s--partners%s         Stripe-only: link/create partners and collective tags\n", f.Yellow, f.Reset)
-	fmt.Printf("  %s--accounts%s         Stripe-only: apply account rules to journal lines\n", f.Yellow, f.Reset)
-	fmt.Printf("  %s--metadata%s         Stripe-only: refresh descriptions and narration metadata\n", f.Yellow, f.Reset)
+	// Show pull options
+	fmt.Printf("%sPULL OPTIONS%s\n\n", f.Bold, f.Reset)
+	fmt.Printf("  %s--history%s          Pull from the earliest cached month (full re-fetch)\n", f.Yellow, f.Reset)
+	fmt.Printf("  %s--since <date>%s     Pull from this date onwards\n", f.Yellow, f.Reset)
+	fmt.Printf("  %s--force%s            Re-fetch even if cached data exists\n", f.Yellow, f.Reset)
+	fmt.Printf("  %s--verbose, -v%s      Surface inner sync progress instead of compact view\n", f.Yellow, f.Reset)
+	fmt.Println()
+
+	// Show push options
+	fmt.Printf("%sPUSH OPTIONS%s\n\n", f.Bold, f.Reset)
+	fmt.Printf("  %s--dry-run%s          Preview what would be pushed\n", f.Yellow, f.Reset)
+	fmt.Printf("  %s--force%s            Empty the journal first, then re-push everything\n", f.Yellow, f.Reset)
+	fmt.Printf("  %s--reconcile%s        Run the reconcile pass after the push (off by default)\n", f.Yellow, f.Reset)
 	fmt.Printf("  %s--until <date>%s     Stop processing at this date end\n", f.Yellow, f.Reset)
+	if acc.Provider == "stripe" {
+		fmt.Printf("  %sStripe-only stage flags:%s\n", f.Dim, f.Reset)
+		fmt.Printf("  %s--transactions%s     Import statement lines/statements/fees\n", f.Yellow, f.Reset)
+		fmt.Printf("  %s--partners%s         Link/create partners and collective tags\n", f.Yellow, f.Reset)
+		fmt.Printf("  %s--accounts%s         Apply account rules to existing journal lines\n", f.Yellow, f.Reset)
+		fmt.Printf("  %s--metadata%s         Refresh descriptions and narration metadata\n", f.Yellow, f.Reset)
+	}
 	fmt.Println()
 
 	// Show examples
 	fmt.Printf("%sEXAMPLES%s\n\n", f.Bold, f.Reset)
 	if acc.Provider == "stripe" {
 		fmt.Printf("  %s$ chb accounts %s payouts%s\n", f.Dim, slug, f.Reset)
-		fmt.Printf("  %s$ chb accounts %s sync --dry-run%s\n", f.Dim, slug, f.Reset)
-		fmt.Printf("  %s$ chb accounts %s sync --force%s\n", f.Dim, slug, f.Reset)
-	} else {
-		fmt.Printf("  %s$ chb accounts %s sync --dry-run%s\n", f.Dim, slug, f.Reset)
-		fmt.Printf("  %s$ chb accounts %s sync --force%s\n", f.Dim, slug, f.Reset)
 	}
+	fmt.Printf("  %s$ chb accounts %s pull%s\n", f.Dim, slug, f.Reset)
+	fmt.Printf("  %s$ chb accounts %s pull --since 2026-01-01%s\n", f.Dim, slug, f.Reset)
+	fmt.Printf("  %s$ chb accounts %s push --dry-run%s\n", f.Dim, slug, f.Reset)
+	fmt.Printf("  %s$ chb accounts %s push --reconcile%s\n", f.Dim, slug, f.Reset)
 	fmt.Println()
 }
 
 func printAccountsHelp() {
 	f := Fmt
 	fmt.Printf(`
-%schb accounts%s — Manage finance accounts
+%schb accounts%s — Manage finance accounts (bank/payment accounts only)
 
 %sUSAGE%s
-  %schb accounts%s                   List all accounts with balances
-  %schb accounts -r%s                Refresh on-chain balances
+  %schb accounts%s                          List all accounts with balances
+  %schb accounts -r%s                       Refresh live balances
+  %schb accounts pull%s                     Pull all accounts from their source providers
+  %schb accounts <slug> pull%s              Pull one account
+  %schb accounts <slug> pull --history%s    Pull from earliest cached month
+  %schb accounts <slug> pull --since <date>%s   Pull from a specific date onwards
+  %schb accounts <slug> push%s              Push local transactions → linked Odoo journal
+  %schb accounts <slug> push --dry-run%s    Preview what would be pushed
+  %schb accounts <slug> push --reconcile%s  Push + run reconcile pass (off by default)
+  %schb accounts <slug> push --force%s      Empty the journal first, then re-push
   %schb accounts <slug> link%s              Link account to an Odoo bank journal
-  %schb accounts <slug> sync%s              Sync transactions to linked Odoo journal
-  %schb accounts <slug> sync --dry-run%s    Show what would be synced
-  %schb accounts <slug> sync --until 2026-03%s    Stop processing at this date end
-  %schb accounts <slug> sync --force%s      Re-sync (delete + recreate)
   %schb accounts <slug> balance [YYYY[/MM[/DD]]]%s   Historical balance at end of period
   %schb accounts <slug> payouts%s           List Stripe payouts
+
+  %sNote%s: for the full loop across all accounts + targets, use 'chb sync'.
 
 %sENVIRONMENT%s
   %sODOO_URL%s            Odoo instance URL
   %sODOO_LOGIN%s          Odoo login email
   %sODOO_PASSWORD%s       Odoo password or API key
 `,
-		f.Bold, f.Reset,
-		f.Bold, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Bold, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
+		f.Bold, f.Reset, // title
+		f.Bold, f.Reset, // USAGE
+		// 13 USAGE rows
+		f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset,
+		f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset,
+		f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset,
+		f.Bold, f.Reset, // Note word
+		f.Bold, f.Reset, // ENVIRONMENT
+		f.Yellow, f.Reset, f.Yellow, f.Reset, f.Yellow, f.Reset,
 	)
 }

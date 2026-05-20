@@ -186,12 +186,20 @@ func (s *StatusLine) clear() {
 	s.lastLen = 0
 }
 
+// statusBodyWidth is the fixed printable width of the "label: subtask" body
+// column. Stable so the elapsed-time column to the right never jumps
+// horizontally as the subtask grows or shrinks.
+const statusBodyWidth = 50
+
 func (s *StatusLine) format(spinner, sub string, elapsed time.Duration) string {
 	body := s.label
 	if sub != "" {
 		body = s.label + ": " + sub
 	}
-	return fmt.Sprintf("  %s %-30s %s%s%s", spinner, body, Fmt.Dim, elapsed, Fmt.Reset)
+	return fmt.Sprintf("  %s %s  %s%s%s",
+		spinner,
+		fitWidth(body, statusBodyWidth),
+		Fmt.Dim, FormatElapsedFixed(elapsed), Fmt.Reset)
 }
 
 func (s *StatusLine) formatFinal(mark, summary string, elapsed time.Duration) string {
@@ -199,7 +207,49 @@ func (s *StatusLine) formatFinal(mark, summary string, elapsed time.Duration) st
 	if summary != "" {
 		body = s.label + ": " + summary
 	}
-	return fmt.Sprintf("  %s %-30s %s%s%s", mark, body, Fmt.Dim, elapsed, Fmt.Reset)
+	return fmt.Sprintf("  %s %s  %s%s%s",
+		mark,
+		fitWidth(body, statusBodyWidth),
+		Fmt.Dim, FormatElapsedFixed(elapsed), Fmt.Reset)
+}
+
+// FormatElapsedFixed renders a duration as "X.Ys" with always one decimal
+// digit, so the column doesn't jump from "2.0s" → "2s" → "2.1s" as
+// time.Duration.String() would naturally do. Sub-millisecond durations
+// round up to 0.0s.
+func FormatElapsedFixed(d time.Duration) string {
+	secs := d.Seconds()
+	if secs < 0 {
+		secs = 0
+	}
+	return fmt.Sprintf("%4.1fs", secs)
+}
+
+// fitWidth pads s with spaces on the right to exactly n visible columns,
+// truncating with "…" if it's wider.
+func fitWidth(s string, n int) string {
+	w := displayWidth(s)
+	if w == n {
+		return s
+	}
+	if w < n {
+		return s + strings.Repeat(" ", n-w)
+	}
+	// Truncate by display width — assume one rune per column for ASCII;
+	// status lines are short and we control their content.
+	if n <= 1 {
+		return "…"
+	}
+	out := []rune{}
+	used := 0
+	for _, r := range s {
+		if used >= n-1 {
+			break
+		}
+		out = append(out, r)
+		used++
+	}
+	return string(out) + "…"
 }
 
 // visibleLen returns the printable width of s, ignoring ANSI escape sequences.

@@ -9,7 +9,6 @@ import (
 	"time"
 
 	nostrsource "github.com/CommonsHub/chb/providers/nostr"
-	"github.com/charmbracelet/huh"
 	"github.com/nbd-wtf/go-nostr"
 )
 
@@ -236,15 +235,9 @@ func TransactionsSyncNostr(args []string) error {
 
 	fmt.Printf("  %s%d annotations to publish%s\n\n", Fmt.Yellow, len(pending), Fmt.Reset)
 
-	// Preview
-	preview := HasFlag(args, "--preview", "-p")
-	if !preview {
-		var showPreview bool
-		runField(huh.NewConfirm().
-			Title("Show preview of events to publish?").
-			Value(&showPreview))
-		preview = showPreview
-	}
+	// Preview is opt-in via --preview / -p (or --verbose). No interactive
+	// "show preview?" prompt — keeps the push path cron-friendly.
+	preview := HasFlag(args, "--preview", "-p", "--verbose", "-v")
 
 	if preview {
 		fmt.Printf("\n  %s%-40s %-14s %-14s %s%s\n",
@@ -270,14 +263,10 @@ func TransactionsSyncNostr(args []string) error {
 		fmt.Println()
 	}
 
-	// Confirmation
-	var confirm bool
-	runField(huh.NewConfirm().
-		Title(fmt.Sprintf("Publish %d annotations to Nostr?", len(pending))).
-		Value(&confirm))
-
-	if !confirm {
-		fmt.Printf("\n%sCancelled.%s\n\n", Fmt.Dim, Fmt.Reset)
+	// Non-interactive: caller (`chb nostr push` / `chb push` / `chb sync`)
+	// has already opted in. Use --dry-run to preview.
+	if HasFlag(args, "--dry-run") {
+		fmt.Printf("%s(dry-run — no writes)%s\n\n", Fmt.Dim, Fmt.Reset)
 		return nil
 	}
 

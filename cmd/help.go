@@ -22,24 +22,26 @@ func PrintHelp(version string) {
 %sCOMMANDS%s
   %sevents%s              List upcoming events
   %scalendars%s           Show calendar summary
-  %scalendars sync%s      Sync calendar providers
+  %scalendars pull%s      Pull calendar providers
   %sevents stats%s        Show event statistics
   %srooms%s               List all rooms with pricing
   %sbookings%s            List upcoming room bookings
   %sbookings stats%s      Show booking statistics
-  %stransactions sync%s   Fetch blockchain transactions
+  %stransactions pull%s   Fetch blockchain / Stripe / Monerium transactions
   %stransactions stats%s  Show transaction statistics
-  %snostr sync%s          Publish/fetch Nostr annotations
-  %sinvoices sync%s       Fetch outgoing invoices from Odoo
-  %sbills sync%s          Fetch vendor bills from Odoo
-  %sattachments sync%s    Download invoice and bill attachments from Odoo
-  %smessages sync%s       Fetch Discord messages
+  %snostr pull/push%s     Fetch/publish Nostr annotations
+  %sinvoices pull%s       Fetch outgoing invoices from Odoo
+  %sbills pull%s          Fetch vendor bills from Odoo
+  %sattachments pull%s    Download invoice and bill attachments from Odoo
+  %smessages pull%s       Fetch Discord messages
   %smessages stats%s      Show message statistics
-  %simages sync%s         Download images from Discord and Luma
+  %simages pull%s         Download images from Discord and Luma
   %sproviders%s           List providers and provider-scoped commands
-  %spull%s                Pull data from all providers (alias: sync, deprecated)
-  %sgenerate%s            Generate derived data files (contributors, images, etc.)
-  %smembers sync%s        Fetch membership data from Stripe/Odoo
+  %spull%s                Pull from every configured source
+  %sgenerate%s            Generate derived data files (transactions, events, …)
+  %spush%s                Push to every configured target (Odoo journals + Nostr)
+  %ssync%s                Full cron loop: chb pull && chb push
+  %smembers pull%s        Fetch membership data from Stripe/Odoo
   %sreport%s <date-range>  Generate monthly/yearly report
   %sstats%s               Show data directory size and breakdown
   %sdoctor%s              Audit DATA_DIR integrity and suggest fixes
@@ -48,33 +50,35 @@ func PrintHelp(version string) {
 %sOPTIONS%s
   %s--help, -h%s          Show help for a command
   %s--version, -v%s       Show version info
+  %s--odoo-db <slug>%s    Override the Odoo DB (auto-derives URL: <slug>.odoo.com)
+  %s--odoo-url <url>%s    Override the Odoo URL (auto-derives DB from hostname)
   %ssetup%s               Configure API keys interactively
   %sversion%s             Show version info
   %supdate%s              Check for updates and install latest release
   %supdate -y%s           Update without confirmation
 
 %sEXAMPLES%s
-  %s$ chb events                          # next 10 upcoming events
-  $ chb calendars sync                   # sync calendar providers
-  $ chb calendars sync 2025/11           # sync calendars for Nov 2025
-  $ chb calendars sync 2025              # sync calendars for all of 2025
-  $ chb pull 2025/11 --force             # pull everything for Nov 2025
-  $ chb pull 2025 --force                # pull everything for all of 2025
-  $ chb odoo journals push               # push generated data → Odoo journals
-  $ chb odoo journals 28 push --dry-run  # preview push for journal #28
-  $ chb transactions sync 2025/03        # sync transactions for Mar 2025
-  $ chb nostr sync transactions          # publish/fetch transaction annotations
-  $ chb invoices sync                    # sync outgoing invoices from Odoo
-  $ chb bills sync                       # sync vendor bills from Odoo
-  $ chb attachments sync                 # sync invoice/bill attachments from Odoo
-  $ chb messages sync 2025              # sync messages for all of 2025
-  $ chb providers ics generate          # generate calendar outputs
-  $ chb providers * pull 2025/11        # pull all providers for Nov 2025
-  $ chb calendars sync 2025/06           # sync calendars for Jun 2025
-  $ chb tools getUrlMetadata https://example.com/event
-  $ chb report 2025/11                   # monthly report
-  $ chb report 202511                    # monthly report
-  $ chb report 2025                      # yearly report%s
+  %s$ chb sync                               # the full loop: pull from sources, push to targets (cron-friendly)
+  $ chb pull                                # pull from every configured source
+  $ chb push                                # push to every configured target (Odoo + Nostr)
+  $ chb generate                            # rebuild generated/ outputs
+  $ chb events                              # next 10 upcoming events
+  $ chb pull 2025/11 --force                # re-pull everything for Nov 2025
+  $ chb calendars pull                      # pull calendar providers only
+  $ chb transactions pull 2025/03           # pull transactions for Mar 2025
+  $ chb accounts stripe pull                # pull one account from its source
+  $ chb odoo pull                           # fetch Odoo state (categories, partners, journal lines)
+  $ chb odoo journals push                  # push to every linked Odoo journal
+  $ chb odoo journals 28 push --dry-run     # preview push for journal #28
+  $ chb odoo journals 48 push --reconcile   # push + run reconcile pass after
+  $ chb odoo journals 48 pull               # refresh local cache for one journal
+  $ chb --odoo-db citizenspring-test2 odoo journals 48
+  $ chb nostr push                          # publish pending Nostr events
+  $ chb providers ics generate              # generate calendar outputs
+  $ chb providers * pull 2025/11            # pull all providers for Nov 2025
+  $ chb report 2025/11                      # monthly report
+  $ chb report 202511                       # monthly report
+  $ chb report 2025                         # yearly report%s
 
 %sENVIRONMENT%s
   %sAPP_DATA_DIR%s        App state directory; config is in $APP_DATA_DIR/settings (default: ~/.chb)
@@ -83,48 +87,30 @@ func PrintHelp(version string) {
   %sETHERSCAN_API_KEY%s   Etherscan/Gnosisscan API key
   %sDISCORD_BOT_TOKEN%s   Discord bot token
 `,
-		f.Bold, f.Reset, f.Dim, versionLabel, f.Reset,
-		f.Bold, f.Reset,
+		f.Bold, f.Reset, f.Dim, versionLabel, f.Reset, // chb v<version>
+		f.Bold, f.Reset, // USAGE
+		f.Cyan, f.Reset, // chb in usage
+		f.Bold, f.Reset, // COMMANDS
+		// 26 command rows (events, calendars, calendars pull, events stats,
+		// rooms, bookings, bookings stats, transactions pull, transactions stats,
+		// nostr pull/push, invoices pull, bills pull, attachments pull,
+		// messages pull, messages stats, images pull, providers, pull,
+		// generate, push, sync, members pull, report, stats, doctor, tools)
+		f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset,
+		f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset,
+		f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset,
+		f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset,
+		f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
-		f.Bold, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Bold, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
-		f.Bold, f.Reset,
-		f.Dim, f.Reset,
-		f.Bold, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
+		f.Bold, f.Reset, // OPTIONS
+		// 8 options rows
+		f.Yellow, f.Reset, f.Yellow, f.Reset, f.Yellow, f.Reset, f.Yellow, f.Reset,
+		f.Yellow, f.Reset, f.Yellow, f.Reset, f.Yellow, f.Reset, f.Yellow, f.Reset,
+		f.Bold, f.Reset, // EXAMPLES
+		f.Dim, f.Reset, // example block
+		f.Bold, f.Reset, // ENVIRONMENT
+		// 4 env vars
+		f.Yellow, f.Reset, f.Yellow, f.Reset, f.Yellow, f.Reset, f.Yellow, f.Reset,
 	)
 }
 
@@ -163,8 +149,8 @@ func PrintProvidersHelp() {
   %schb providers * generate%s
 
 %sNote%s
-  %sThe verb 'sync' is still accepted as a deprecated alias for 'pull'.
-  Pushing local data → Odoo lives under: chb odoo journals push%s
+  %sProviders are pull-only sources. Push to targets via: chb odoo journals push / chb nostr push.
+  Or run the full loop in one shot: chb sync (= chb pull && chb push).%s
 `,
 		f.Bold, f.Reset,
 		f.Cyan, f.Reset, f.Cyan, f.Reset,
@@ -292,45 +278,47 @@ func PrintDoctorHelp() {
 func PrintSyncAllHelp() {
 	f := Fmt
 	fmt.Printf(`
-%schb sync%s — Sync all providers
+%schb pull%s — Pull data from every configured provider (remote → local)
 
-%sProviders:%s calendars (room bookings and public events), transactions (Gnosis/Stripe),
-invoices/bills/attachments (Odoo), messages (Discord), members (Stripe/Odoo)
+%sProviders:%s calendars (room bookings and public events), transactions (Gnosis/Stripe/Monerium),
+invoices/bills/attachments (Odoo), messages (Discord), members (Stripe/Odoo), images (Discord/Luma).
+For the full loop (pull + push), use: chb sync.
 
 %sUSAGE%s
-  %schb sync%s [year[/month]] [options]
-  %schb providers * sync%s [year[/month]] [options]
-  %schb calendars sync%s [year[/month]] [options]
-  %schb transactions sync%s [year[/month]] [options]
-  %schb invoices sync%s [year[/month]] [options]
-  %schb bills sync%s [year[/month]] [options]
-  %schb attachments sync%s [year[/month]] [options]
-  %schb messages sync%s [year[/month]] [options]
-  %schb members sync%s [options]
+  %schb pull%s [year[/month]] [options]
+  %schb providers * pull%s [year[/month]] [options]
+  %schb calendars pull%s [year[/month]] [options]
+  %schb transactions pull%s [year[/month]] [options]
+  %schb invoices pull%s [year[/month]] [options]
+  %schb bills pull%s [year[/month]] [options]
+  %schb attachments pull%s [year[/month]] [options]
+  %schb messages pull%s [year[/month]] [options]
+  %schb members pull%s [options]
 
 %sTIME RANGE%s
-  %s(no args)%s            Sync previous month + current month (and future events)
-  %s<date-range>%s         Sync a date/month/year range (e.g. 2025/11, 2025/Q4)
-  %s--since%s <date>       Sync from a date to now
-  %s--history%s            Sync from earliest cached month (or 2024/01 if fresh)
+  %s(no args)%s            Pull from the last successful sync until now
+  %s<date-range>%s         Pull a date/month/year range (e.g. 2025/11, 2025/Q4)
+  %s--since%s <date>       Pull from a date to now
+  %s--history%s            Pull from earliest cached month (or 2024/01 if fresh)
 
 %sOPTIONS%s
   %s--force%s              Re-fetch even if cached data exists
+  %s--verbose, -v%s        Show per-step progress instead of the compact view
   %s--help, -h%s           Show this help
 
 %sEXAMPLES%s
-  %schb sync%s                        Sync latest data (all providers)
-  %schb sync --history%s              Sync history from where cache left off
-  %schb sync --since 2024/06%s       Sync from June 2024 to now
-  %schb sync 2025%s                   Sync all of 2025
-  %schb sync 2025/11%s                Sync November 2025
-  %schb sync 2025/11 --force%s        Resync November 2025 (overwrite cache)
-  %schb calendars sync%s              Sync calendars only (latest)
-  %schb calendars sync --history%s    Sync calendar history
-  %schb transactions sync --since 202401%s  Sync transactions from Jan 2024
-  %schb invoices sync%s               Sync outgoing invoices (latest)
-  %schb bills sync%s                  Sync vendor bills (latest)
-  %schb attachments sync%s            Sync Odoo attachments (latest)
+  %schb pull%s                        Pull latest data (all providers)
+  %schb pull --history%s              Pull history from where cache left off
+  %schb pull --since 2024/06%s        Pull from June 2024 to now
+  %schb pull 2025%s                   Pull all of 2025
+  %schb pull 2025/11%s                Pull November 2025
+  %schb pull 2025/11 --force%s        Re-pull November 2025 (overwrite cache)
+  %schb calendars pull%s              Pull calendars only (latest)
+  %schb calendars pull --history%s    Pull calendar history
+  %schb transactions pull --since 202401%s  Pull transactions from Jan 2024
+  %schb invoices pull%s               Pull outgoing invoices (latest)
+  %schb bills pull%s                  Pull vendor bills (latest)
+  %schb attachments pull%s            Pull Odoo attachments (latest)
 `,
 		f.Bold, f.Reset,
 		f.Bold, f.Reset,
@@ -349,22 +337,15 @@ invoices/bills/attachments (Odoo), messages (Discord), members (Stripe/Odoo)
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
-		f.Bold, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
-		f.Bold, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
-		f.Cyan, f.Reset,
+		f.Bold, f.Reset, // OPTIONS
+		f.Yellow, f.Reset, // --force
+		f.Yellow, f.Reset, // --verbose
+		f.Yellow, f.Reset, // --help
+		f.Bold, f.Reset, // EXAMPLES
+		f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset, // pull / --history / --since
+		f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset, // 2025 / 2025/11 / 2025/11 --force
+		f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset, // calendars / --history / transactions --since
+		f.Cyan, f.Reset, f.Cyan, f.Reset, f.Cyan, f.Reset, // invoices / bills / attachments
 	)
 }
 

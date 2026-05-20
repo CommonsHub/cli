@@ -571,11 +571,12 @@ func OdooJournals(args []string) error {
 			if acc.Provider != "kbcbrussels" {
 				return fmt.Errorf("`merge` is only implemented for kbcbrussels journals — for provider '%s' use `sync`", acc.Provider)
 			}
-			return mergeKBCJournalWithCSV(creds, uid, journalID, acc,
+			_, err := mergeKBCJournalWithCSV(creds, uid, journalID, acc,
 				HasFlag(args, "--dry-run"),
 				HasFlag(args, "--yes", "-y"),
 				HasFlag(args, "--verbose", "-v"),
 			)
+			return err
 		}
 		if len(args) >= 2 && args[1] == "categorize" {
 			acc := linkedAccountForJournal(journalID)
@@ -3039,32 +3040,43 @@ func printOdooTargetLine(creds *OdooCredentials) {
 // PrintOdooHelp shows the top-level odoo command help.
 func PrintOdooHelp() {
 	f := Fmt
-	fmt.Printf("\n%schb odoo%s — Odoo integration\n\n", f.Bold, f.Reset)
+	fmt.Printf("\n%schb odoo%s — Odoo integration (Odoo is a target: pull + push + pending)\n\n", f.Bold, f.Reset)
 	fmt.Printf("%sCOMMANDS%s\n\n", f.Bold, f.Reset)
-	fmt.Printf("  %s%schb odoo sync%s\n", f.Bold, f.Cyan, f.Reset)
-	fmt.Printf("    %sFetch Odoo provider data and sync linked journals%s\n\n", f.Dim, f.Reset)
-	fmt.Printf("  %s%schb odoo partners sync%s\n", f.Bold, f.Cyan, f.Reset)
-	fmt.Printf("    %sFetch Odoo partners into the local provider cache%s\n\n", f.Dim, f.Reset)
+	fmt.Printf("  %s%schb odoo pull%s\n", f.Bold, f.Cyan, f.Reset)
+	fmt.Printf("    %sFetch Odoo data into local provider archives (categories, partners, invoices, bills, journal lines)%s\n\n", f.Dim, f.Reset)
+	fmt.Printf("  %s%schb odoo journals push%s\n", f.Bold, f.Cyan, f.Reset)
+	fmt.Printf("    %sPush local transactions into every linked Odoo journal%s\n\n", f.Dim, f.Reset)
+	fmt.Printf("  %s%schb odoo mapping%s\n", f.Bold, f.Cyan, f.Reset)
+	fmt.Printf("    %sList / add / edit the category → Odoo account+partner mapping (odoo_mapping.json)%s\n\n", f.Dim, f.Reset)
 	fmt.Printf("  %s%schb odoo journals%s\n", f.Bold, f.Cyan, f.Reset)
 	fmt.Printf("    %sList Odoo journals linked to accounts%s\n\n", f.Dim, f.Reset)
 	fmt.Printf("  %s%schb odoo journals <id>%s\n", f.Bold, f.Cyan, f.Reset)
-	fmt.Printf("    %sShow journal details (statements, line counts)%s\n\n", f.Dim, f.Reset)
-	fmt.Printf("  %s%schb odoo journals <id> sync%s\n", f.Bold, f.Cyan, f.Reset)
-	fmt.Printf("    %sSync the linked account's transactions into the journal%s\n", f.Dim, f.Reset)
-	fmt.Printf("    %sBy default starts after the latest Odoo import; use --history for a full duplicate check%s\n", f.Dim, f.Reset)
-	fmt.Printf("    %sUse --skip-reconciliation for fast imports; reconcile later with `chb odoo journals <id> reconcile`%s\n\n", f.Dim, f.Reset)
-	fmt.Printf("  %s%schb odoo get <ref>%s\n", f.Bold, f.Cyan, f.Reset)
-	fmt.Printf("    %sInspect an Odoo statement line by unique_import_id%s\n\n", f.Dim, f.Reset)
-	fmt.Printf("  %s%schb odoo reconcile <journalId> --from-journal <id>%s\n", f.Bold, f.Cyan, f.Reset)
-	fmt.Printf("    %sMove reconciliations from an old journal onto matching lines in another journal%s\n\n", f.Dim, f.Reset)
+	fmt.Printf("    %sShow journal details + count of local txs not yet pushed (--verbose lists them all)%s\n\n", f.Dim, f.Reset)
+	fmt.Printf("  %s%schb odoo journals <id> push%s\n", f.Bold, f.Cyan, f.Reset)
+	fmt.Printf("    %sPush local transactions into one journal. Add --reconcile to also run the reconcile pass.%s\n", f.Dim, f.Reset)
+	fmt.Printf("    %sUse --dry-run to preview, --history for a full duplicate check%s\n\n", f.Dim, f.Reset)
+	fmt.Printf("  %s%schb odoo journals <id> pull%s\n", f.Bold, f.Cyan, f.Reset)
+	fmt.Printf("    %sRefresh the local journal-lines cache for one journal (cheaper than full chb odoo pull)%s\n\n", f.Dim, f.Reset)
+	fmt.Printf("  %s%schb odoo journals <id> categorize%s\n", f.Bold, f.Cyan, f.Reset)
+	fmt.Printf("    %sRe-apply the OdooMapping account_code + analytic distribution onto existing lines%s\n\n", f.Dim, f.Reset)
+	fmt.Printf("  %s%schb odoo journals <id> reconcile%s\n", f.Bold, f.Cyan, f.Reset)
+	fmt.Printf("    %sReconcile this journal's lines against open A/R / A/P move lines%s\n\n", f.Dim, f.Reset)
 	fmt.Printf("  %s%schb odoo journals <id> check%s\n", f.Bold, f.Cyan, f.Reset)
 	fmt.Printf("    %sReport statements whose running balance is invalid%s\n\n", f.Dim, f.Reset)
 	fmt.Printf("  %s%schb odoo journals <id> fix%s\n", f.Bold, f.Cyan, f.Reset)
 	fmt.Printf("    %sSet balance_end_real = running balance on invalid statements%s\n\n", f.Dim, f.Reset)
 	fmt.Printf("  %s%schb odoo journals <id> --reset%s\n", f.Bold, f.Cyan, f.Reset)
 	fmt.Printf("    %sEmpty a journal (delete all statements and lines)%s\n\n", f.Dim, f.Reset)
+	fmt.Printf("  %s%schb odoo journals <src> --merge-with <target>%s\n", f.Bold, f.Cyan, f.Reset)
+	fmt.Printf("    %sMerge one journal into another (move reconciliations + entries, then delete the source)%s\n\n", f.Dim, f.Reset)
+	fmt.Printf("  %s%schb odoo get <ref>%s\n", f.Bold, f.Cyan, f.Reset)
+	fmt.Printf("    %sInspect an Odoo statement line by unique_import_id%s\n\n", f.Dim, f.Reset)
 	fmt.Printf("  %s%schb odoo backup%s\n", f.Bold, f.Cyan, f.Reset)
 	fmt.Printf("    %sDownload a full database backup (zip of SQL dump + filestore)%s\n\n", f.Dim, f.Reset)
+	fmt.Printf("%sGLOBAL FLAGS%s\n\n", f.Bold, f.Reset)
+	fmt.Printf("  %s--odoo-db <slug>%s   Override the Odoo DB (auto-derives URL: <slug>.odoo.com)\n", f.Yellow, f.Reset)
+	fmt.Printf("  %s--odoo-url <url>%s   Override the Odoo URL (auto-derives DB from hostname)\n\n", f.Yellow, f.Reset)
+	fmt.Printf("  %sNote%s: for the full loop, use the top-level 'chb sync' (= chb pull && chb push).\n\n", f.Bold, f.Reset)
 }
 
 func printOdooSyncHelp() {
