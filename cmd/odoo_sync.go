@@ -509,8 +509,12 @@ func OdooJournals(args []string) error {
 		return fmt.Errorf("Odoo authentication failed: %v", err)
 	}
 
-	// `chb odoo journals sync` → push local → Odoo for every linked journal
-	if len(args) >= 1 && args[0] == "sync" {
+	// `chb odoo journals push` (alias: `sync`) → push local → Odoo
+	// for every linked journal.
+	if len(args) >= 1 && (args[0] == "push" || args[0] == "sync") {
+		if args[0] == "sync" {
+			Warnf("%s'chb odoo journals sync' is deprecated — use 'chb odoo journals push' instead%s", Fmt.Dim, Fmt.Reset)
+		}
 		return odooJournalsSyncAll(args[1:])
 	}
 
@@ -523,7 +527,10 @@ func OdooJournals(args []string) error {
 		if targetArg := GetOption(args, "--merge-with"); targetArg != "" {
 			return odooJournalMerge(creds, uid, journalID, targetArg, HasFlag(args, "--dry-run"), HasFlag(args, "--verbose", "-v"), HasFlag(args, "--yes", "-y"))
 		}
-		if len(args) >= 2 && args[1] == "sync" {
+		if len(args) >= 2 && (args[1] == "push" || args[1] == "sync") {
+			if args[1] == "sync" {
+				Warnf("%s'chb odoo journals <id> sync' is deprecated — use 'chb odoo journals <id> push' instead%s", Fmt.Dim, Fmt.Reset)
+			}
 			syncArgs := args[2:]
 			if HasFlag(syncArgs, "--reset") {
 				if odooSyncStageFlagsExplicit(syncArgs) && !HasFlag(syncArgs, "--transactions") {
@@ -570,6 +577,17 @@ func OdooJournals(args []string) error {
 				HasFlag(args, "--verbose", "-v"),
 			)
 		}
+		if len(args) >= 2 && args[1] == "categorize" {
+			acc := linkedAccountForJournal(journalID)
+			if acc == nil {
+				return fmt.Errorf("journal #%d has no linked account", journalID)
+			}
+			return categorizeOdooJournal(creds, uid, journalID, acc,
+				HasFlag(args, "--dry-run"),
+				HasFlag(args, "--yes", "-y"),
+				HasFlag(args, "--verbose", "-v"),
+			)
+		}
 		if len(args) >= 2 && args[1] == "reconcile" {
 			if HasFlag(args[2:], "--from-journal") {
 				reconcileArgs := append([]string{args[0]}, args[2:]...)
@@ -587,6 +605,7 @@ func OdooJournals(args []string) error {
 			printOdooTargetLine(creds)
 			return odooJournalReset(creds, uid, journalID, HasFlag(args, "--yes", "-y") || HasFlag(args, "--force"))
 		}
+		odooJournalDetailVerbose = HasFlag(args, "--verbose", "-v")
 		return odooJournalDetail(creds, uid, journalID)
 	}
 
@@ -694,8 +713,8 @@ func OdooJournals(args []string) error {
 	fmt.Printf("    %sList recent statement lines (date, description, partner, account, amount)%s\n\n", Fmt.Dim, Fmt.Reset)
 	fmt.Printf("  %s%schb odoo journals <id|slug> statements [-n N] [--skip N] [--csv]%s\n", Fmt.Bold, Fmt.Cyan, Fmt.Reset)
 	fmt.Printf("    %sList statements (date, name, # lines, start/end balance), newest first%s\n\n", Fmt.Dim, Fmt.Reset)
-	fmt.Printf("  %s%schb odoo journals <id|slug> sync%s\n", Fmt.Bold, Fmt.Cyan, Fmt.Reset)
-	fmt.Printf("    %sSync the linked account's transactions into the journal%s\n\n", Fmt.Dim, Fmt.Reset)
+	fmt.Printf("  %s%schb odoo journals <id|slug> push%s\n", Fmt.Bold, Fmt.Cyan, Fmt.Reset)
+	fmt.Printf("    %sPush the linked account's local transactions into the journal (alias: sync)%s\n\n", Fmt.Dim, Fmt.Reset)
 	fmt.Printf("  %s%schb odoo journals <id|slug> check%s\n", Fmt.Bold, Fmt.Cyan, Fmt.Reset)
 	fmt.Printf("    %sReport statements whose running balance is invalid%s\n\n", Fmt.Dim, Fmt.Reset)
 	fmt.Printf("  %s%schb odoo journals <id|slug> fix%s\n", Fmt.Bold, Fmt.Cyan, Fmt.Reset)
@@ -876,20 +895,20 @@ func printOdooJournalsContextualHelp(args []string) {
 	if len(clean) >= 2 {
 		sub = clean[1]
 	} else if len(clean) == 1 {
-		// `chb odoo journals sync --help` — no <id> in front.
-		if clean[0] == "sync" {
+		// `chb odoo journals push --help` — no <id> in front.
+		if clean[0] == "push" || clean[0] == "sync" {
 			sub = "sync-all"
 		}
 	}
 
 	f := Fmt
 	switch sub {
-	case "sync":
+	case "push", "sync":
 		fmt.Printf(`
-%schb odoo journals <id|slug> sync%s — Push local transactions for the linked
-account into the Odoo journal (creates new lines, applies any matched
-%schb odoo rules%s, then walks existing lines and re-applies rules to keep
-them in sync).
+%schb odoo journals <id|slug> push%s — Push local transactions for the linked
+account into the Odoo journal. Reads the resolved category /
+collective / accountCode / partnerId from each tx (written by
+%schb generate%s) and applies them to created Odoo lines.
 
 %sOPTIONS%s
   %s--dry-run%s              Preview only; no writes to Odoo
@@ -930,8 +949,9 @@ them in sync).
 		)
 	case "sync-all":
 		fmt.Printf(`
-%schb odoo journals sync%s — Push every linked account's local transactions
-into its Odoo journal. Same flags as the per-journal form.
+%schb odoo journals push%s — Push every linked account's local transactions
+into its Odoo journal. Alias: 'sync' (deprecated). Same flags as the
+per-journal form.
 
 %sOPTIONS%s
   %s--dry-run%s              Preview only; no writes to Odoo
@@ -1053,7 +1073,7 @@ referencing the source journal are listed and can be moved too.
 %sSUBCOMMANDS%s
   %slines%s        Recent statement lines  (chb odoo journals <id> lines --help)
   %sstatements%s   Bank statements         (chb odoo journals <id> statements --help)
-  %ssync%s         Push local → Odoo       (chb odoo journals <id> sync --help)
+  %spush%s         Push local → Odoo       (chb odoo journals <id> push --help)
   %scheck%s        Report invalid balances
   %sfix%s          Repair the journal      (chb odoo journals <id> fix --help)
   %sreconcile%s    Match lines vs. invoices/bills (chb odoo journals <id> reconcile --help)
@@ -1078,7 +1098,7 @@ referencing the source journal are listed and can be moved too.
 %sCOMMANDS%s
   %schb odoo journals <id|slug>%s              Show details for one journal
   %schb odoo journals <id|slug> <subcommand>%s See per-subcommand --help
-  %schb odoo journals sync%s                   Sync every linked journal
+  %schb odoo journals push%s                   Push every linked journal (alias: sync)
 `,
 				f.Bold, f.Reset,
 				f.Bold, f.Reset,
@@ -1184,6 +1204,12 @@ func odooJournalStatements(creds *OdooCredentials, uid int, journalID int, args 
 	return nil
 }
 
+// odooJournalDetailVerbose is set by the caller of odooJournalDetail to
+// switch the missing-tx preview between truncated (default) and full list.
+// Threaded as a package-level flag rather than threading it through every
+// helper signature — narrow scope, single read.
+var odooJournalDetailVerbose bool
+
 func odooJournalDetail(creds *OdooCredentials, uid int, journalID int) error {
 	linkedAccount := linkedAccountForJournal(journalID)
 	currency := "EUR"
@@ -1264,8 +1290,8 @@ func odooJournalDetail(creds *OdooCredentials, uid int, journalID int) error {
 		Fmt.Dim, stmtCount, Fmt.Dim, journalID, Fmt.Reset)
 
 	if linkedAccount != nil {
-		if missing, err := findLocalTxsMissingFromOdoo(creds, uid, journalID, linkedAccount); err == nil && len(missing) > 0 {
-			printMissingLocalTxs(missing, linkedAccount, journalID)
+		if missing, err := findLocalTxsMissingFromOdoo(journalID, linkedAccount); err == nil && len(missing) > 0 {
+			printMissingLocalTxs(missing, linkedAccount, journalID, odooJournalDetailVerbose)
 		}
 		fmt.Printf("  %sLinked account%s\n", Fmt.Bold, Fmt.Reset)
 		printAccountDetailSummary(linkedAccount, nil)
@@ -1290,14 +1316,23 @@ type missingLocalTx struct {
 }
 
 // findLocalTxsMissingFromOdoo returns every local transaction for the
-// linked account whose unique_import_id is absent from the Odoo journal.
-// This is the inverse of orphan detection (Odoo lines not in local) and
-// surfaces transactions that the cursor-based sync would skip because
-// they pre-date the latest Odoo line.
-func findLocalTxsMissingFromOdoo(creds *OdooCredentials, uid int, journalID int, acc *AccountConfig) ([]missingLocalTx, error) {
-	odooIDs, err := fetchOdooImportIDs(creds.URL, creds.DB, uid, creds.Password, journalID)
-	if err != nil {
-		return nil, err
+// linked account whose unique_import_id is absent from the Odoo journal
+// — computed purely from local cache (no RPC). Reads the journal-lines
+// cache populated by `chb odoo pull`; if it's missing, the operator gets
+// pointed at the right command instead of a silent fallback.
+func findLocalTxsMissingFromOdoo(journalID int, acc *AccountConfig) ([]missingLocalTx, error) {
+	cached, ok := loadLatestOdooJournalLinesCache(acc.OdooJournalID)
+	if !ok {
+		return nil, fmt.Errorf("no local cache for journal #%d — run `chb odoo pull` first", journalID)
+	}
+	odooIDs := map[string]bool{}
+	for _, ln := range cached {
+		if isOdooSyntheticLine(ln) {
+			continue
+		}
+		if ln.UniqueImportID != "" {
+			odooIDs[ln.UniqueImportID] = true
+		}
 	}
 	localTxs := loadAccountTransactionsForOdoo(acc)
 	var missing []missingLocalTx
@@ -1318,10 +1353,25 @@ func findLocalTxsMissingFromOdoo(creds *OdooCredentials, uid int, journalID int,
 	return missing, nil
 }
 
-func printMissingLocalTxs(missing []missingLocalTx, acc *AccountConfig, journalID int) {
+// printMissingLocalTxs prints a summary count + a preview of local txs not
+// yet in Odoo. Default shows the first previewN (most recent first since
+// they're typically the ones the operator's looking for); --verbose shows
+// the full list.
+func printMissingLocalTxs(missing []missingLocalTx, acc *AccountConfig, journalID int, verbose bool) {
+	const previewN = 5
 	currency := accCurrency(acc)
-	fmt.Printf("  %s⚠ %s missing from Odoo:%s\n", Fmt.Yellow, Pluralize(len(missing), "local tx", ""), Fmt.Reset)
-	for _, m := range missing {
+	total := len(missing)
+	fmt.Printf("  %s⚠ %s missing from Odoo:%s\n", Fmt.Yellow, Pluralize(total, "local tx", ""), Fmt.Reset)
+
+	// Show most recent first — most likely to be the operator's interest.
+	display := make([]missingLocalTx, total)
+	copy(display, missing)
+	sort.Slice(display, func(i, j int) bool { return display[i].Date > display[j].Date })
+	limit := total
+	if !verbose && limit > previewN {
+		limit = previewN
+	}
+	for _, m := range display[:limit] {
 		ref := m.Counterparty
 		if ref == "" {
 			ref = m.TxHash
@@ -1331,7 +1381,11 @@ func printMissingLocalTxs(missing []missingLocalTx, acc *AccountConfig, journalI
 			formatAccountDataBalance(m.Amount, currency),
 			truncate(ref, 60))
 	}
-	fmt.Printf("\n  %sPush them: chb odoo journals %d sync%s\n\n", Fmt.Dim, journalID, Fmt.Reset)
+	if !verbose && total > previewN {
+		fmt.Printf("    %s… and %d more (run with --verbose to see all)%s\n",
+			Fmt.Dim, total-previewN, Fmt.Reset)
+	}
+	fmt.Printf("\n  %sPush them: chb odoo journals %d push%s\n\n", Fmt.Dim, journalID, Fmt.Reset)
 }
 
 type odooOwnedLineSync struct {
@@ -2710,6 +2764,10 @@ func setStatementBalanceStart(creds *OdooCredentials, uid int, stmtID int, value
 //
 // Per-step failures are reported but do not abort the overall run.
 func OdooSyncAll(args []string) error {
+	if HasFlag(args, "--help", "-h", "help") {
+		printOdooSyncHelp()
+		return nil
+	}
 	if creds, err := ResolveOdooCredentials(); err == nil {
 		fmt.Printf("\n%s🔄 Odoo sync%s  %s%s (db: %s)%s\n\n",
 			Fmt.Bold, Fmt.Reset, Fmt.Dim, creds.URL, creds.DB, Fmt.Reset)
@@ -2733,12 +2791,20 @@ func OdooSyncAll(args []string) error {
 			odooSyncLine(label, fmt.Sprintf("%s✗ %v%s", Fmt.Red, err, Fmt.Reset))
 		}
 	}
+	// `chb odoo sync` is strictly Odoo→local fetch. The push side
+	// (local → Odoo journals) lives under `chb odoo journals sync` /
+	// `chb odoo journals <id> sync`. Keeping the two phases on
+	// different commands is the same contract as `chb sync` (fetch
+	// only) vs `chb generate` (local transform) vs `chb odoo journals
+	// sync` (push). It also lets the operator inspect the freshly
+	// fetched data (and re-run `chb generate`) before deciding to push.
 	step("categories", func() error { _, err := OdooAnalyticSync(args); return err })
+	step("analytic plans", func() error { _, err := OdooAnalyticPlansSync(args); return err })
 	step("partners", func() error { _, err := OdooPartnersSync(args); return err })
 	step("invoices", func() error { _, err := InvoicesSync(args); return err })
 	step("bills", func() error { _, err := BillsSync(args); return err })
-	step("journals", func() error { return odooJournalsSyncAll(args) })
-	fmt.Println()
+	step("journal lines", func() error { return refreshAllOdooJournalLineCaches() })
+	fmt.Printf("\n  %sTo push local changes to Odoo: chb odoo journals push%s\n\n", Fmt.Dim, Fmt.Reset)
 	return nil
 }
 
@@ -2746,6 +2812,10 @@ func OdooSyncAll(args []string) error {
 // local provider archives; journal pushes remain under `chb odoo sync` and
 // `chb odoo journals ... sync`.
 func OdooProviderSync(args []string) error {
+	if HasFlag(args, "--help", "-h", "help") {
+		printOdooSyncHelp()
+		return nil
+	}
 	if creds, err := ResolveOdooCredentials(); err == nil {
 		fmt.Printf("\n%s🔄 Odoo provider sync%s  %s%s (db: %s)%s\n\n",
 			Fmt.Bold, Fmt.Reset, Fmt.Dim, creds.URL, creds.DB, Fmt.Reset)
@@ -2759,10 +2829,45 @@ func OdooProviderSync(args []string) error {
 		}
 	}
 	step("categories", func() error { _, err := OdooAnalyticSync(args); return err })
+	step("analytic plans", func() error { _, err := OdooAnalyticPlansSync(args); return err })
 	step("partners", func() error { _, err := OdooPartnersSync(args); return err })
 	step("invoices", func() error { _, err := InvoicesSync(args); return err })
 	step("bills", func() error { _, err := BillsSync(args); return err })
+	step("journal lines", func() error { return refreshAllOdooJournalLineCaches() })
 	fmt.Println()
+	return nil
+}
+
+// refreshAllOdooJournalLineCaches walks every linked-journal account and
+// refreshes its providers/odoo/journals/<id>.json cache. Moves the previously
+// lazy-fetch-on-first-push read into pull, so `chb odoo journals push` can
+// rely on local cache and never has to fetch journal lines itself. The
+// per-write target-state read (fetchOdooImportIDs to dedupe) is small and
+// stays at push time — it has to reflect concurrent edits to be safe.
+func refreshAllOdooJournalLineCaches() error {
+	creds, err := ResolveOdooCredentials()
+	if err != nil {
+		return err
+	}
+	uid, err := odooAuth(creds.URL, creds.DB, creds.Login, creds.Password)
+	if err != nil || uid == 0 {
+		return fmt.Errorf("authenticate: %v", err)
+	}
+	seen := map[int]bool{}
+	var failures []string
+	for _, acc := range LoadAccountConfigs() {
+		if acc.OdooJournalID == 0 || seen[acc.OdooJournalID] {
+			continue
+		}
+		seen[acc.OdooJournalID] = true
+		if _, err := writeOdooJournalLinesCache(creds, uid, acc.OdooJournalID); err != nil {
+			failures = append(failures, fmt.Sprintf("#%d %s: %v", acc.OdooJournalID, acc.Slug, err))
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("%d of %d cache refresh(es) failed: %s", len(failures), len(seen), strings.Join(failures, "; "))
+	}
+	odooSyncLine("journal lines", fmt.Sprintf("%d journals cached", len(seen)))
 	return nil
 }
 
@@ -2936,40 +3041,42 @@ func PrintOdooHelp() {
 func printOdooSyncHelp() {
 	f := Fmt
 	fmt.Printf(`
-%schb odoo sync%s — Fetch analytic categories from Odoo
+%schb odoo pull%s — Fetch data from Odoo (alias: sync, deprecated)
 
 %sUSAGE%s
-  %schb odoo sync%s
+  %schb odoo pull%s
 
 %sDESCRIPTION%s
-  Reads analytic data from your Odoo instance and builds category
-  enrichment for transactions. It fetches:
+  Pulls every Odoo-side dataset chb cares about into local provider
+  archives. Strictly read-only on the Odoo side. Fetches:
 
-  - Analytic plans and accounts (your categorization dimensions)
-  - Analytic lines (actual categorized postings linked to journal entries)
-  - Payment transactions (Stripe references for matching)
-  - Bank statement lines (blockchain tx references for matching)
+  - Analytic plans and accounts (categorization dimensions, ensures
+    plans 3/8/Income exist and creates one analytic.account per
+    category and per collective)
+  - Partners (cached for IBAN/name lookups during merge/push)
+  - Invoices and bills (with private attachments)
+  - Analytic enrichment lines (Odoo-side categorized postings)
 
-  The enrichment is used during 'chb generate' to automatically
-  categorize transactions based on Odoo's analytic accounting.
+  The pulled data feeds %schb generate%s, which writes the resolved
+  category / collective / accountCode / partnerId onto each
+  transactions.json. To push that local data into Odoo journals, use
+  %schb odoo journals push%s.
 
-  Run %schb setup odoo%s first to configure credentials and category mapping.
-
-%sPRIORITY CHAIN%s
-  Nostr annotations > Odoo analytics > Local rules > Uncategorized
+  Run %schb setup odoo%s first to configure credentials.
 
 %sENVIRONMENT%s
   %sODOO_URL%s            Odoo instance URL
   %sODOO_LOGIN%s          Odoo login email
   %sODOO_PASSWORD%s       Odoo password or API key
 `,
-		f.Bold, f.Reset,
-		f.Bold, f.Reset,
-		f.Cyan, f.Reset,
-		f.Bold, f.Reset,
-		f.Cyan, f.Reset,
-		f.Bold, f.Reset,
-		f.Bold, f.Reset,
+		f.Bold, f.Reset, // title
+		f.Bold, f.Reset, // USAGE
+		f.Cyan, f.Reset, // chb odoo pull
+		f.Bold, f.Reset, // DESCRIPTION
+		f.Cyan, f.Reset, // chb generate
+		f.Cyan, f.Reset, // chb odoo journals push
+		f.Cyan, f.Reset, // chb setup odoo
+		f.Bold, f.Reset, // ENVIRONMENT
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,

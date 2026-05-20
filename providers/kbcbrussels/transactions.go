@@ -8,11 +8,69 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 	"time"
 )
+
+// cardPaymentPrefixRe matches the KBC boilerplate prefix:
+//
+//	"PAYMENT VIA DEBIT MASTERCARD 08-12 07-12-2025 AT 05.05 TIME"
+//	"PAYMENT VIA MASTERCARD 08-12 AT 05.05 TIME"
+//	"PAYMENT VIA BANCONTACT 08-12 07-12-2025 AT 05.05 TIME"
+//
+// "DEBIT" before the card brand is optional. The "TIME" tail is sometimes
+// followed by additional descriptive text (the merchant name and city),
+// which we want to KEEP — we only strip the prefix up to and including
+// "TIME".
+var cardPaymentPrefixRe = regexp.MustCompile(`(?i)payment via (?:debit\s+)?(?:mastercard|bancontact|maestro|visa)\s+\d{1,2}-\d{1,2}(?:\s+\d{1,2}-\d{1,2}-\d{4})?\s+at\s+\d{1,2}\.\d{2}\s+time\s*`)
+
+// CleanDescription strips KBC boilerplate (card-payment date/time prefix)
+// from a raw description so the remaining text is the merchant + city.
+// Exported so the chb side can apply it both at description-formatting
+// time and when matching merchant names.
+func CleanDescription(desc string) string {
+	cleaned := cardPaymentPrefixRe.ReplaceAllString(desc, "")
+	cleaned = strings.TrimSpace(cleaned)
+	return cleaned
+}
+
+// merchantPatterns maps a regex (matched against the cleaned description,
+// case-insensitive) to a canonical partner name. Order matters: the first
+// match wins. Longest-pattern-first to avoid e.g. "amzn" stealing "amzn
+// mktp" matches.
+var merchantPatterns = []struct {
+	re   *regexp.Regexp
+	name string
+}{
+	{regexp.MustCompile(`(?i)\bnotion labs\b`), "Notion Labs"},
+	{regexp.MustCompile(`(?i)\bpostmarkapp\.com\b|\bpostmark\b`), "Postmarkapp.com"},
+	{regexp.MustCompile(`(?i)\bisabel nv\b|\bisabel sa\b`), "Isabel NV"},
+	{regexp.MustCompile(`(?i)\bheroku\b`), "Heroku"},
+	{regexp.MustCompile(`(?i)\bhetzner\b`), "Hetzner"},
+	{regexp.MustCompile(`(?i)\bbol\.com\b`), "Bol.com"},
+	{regexp.MustCompile(`(?i)\bamzn\b|\bamazon\b`), "Amazon"},
+	{regexp.MustCompile(`(?i)\bodoo\b`), "Odoo"},
+	{regexp.MustCompile(`(?i)\bcoolblue\b`), "Coolblue"},
+	{regexp.MustCompile(`(?i)\bvistaprint\b`), "Vistaprint"},
+	{regexp.MustCompile(`(?i)\bproximus\b`), "Proximus"},
+	{regexp.MustCompile(`(?i)\bdeliveroo\b`), "Deliveroo"},
+}
+
+// MerchantFromDescription scans the description for a known merchant
+// name and returns its canonical form (e.g. "POSTMARKAPP.COM US60602..."
+// → "Postmarkapp.com"). Returns "" when no merchant is recognized.
+func MerchantFromDescription(desc string) string {
+	cleaned := CleanDescription(desc)
+	for _, p := range merchantPatterns {
+		if p.re.MatchString(cleaned) {
+			return p.name
+		}
+	}
+	return ""
+}
 
 // Column indexes in the CSV header. KBC keeps the same column order
 // across exports; if that ever changes we'd see parse errors loudly.
@@ -268,9 +326,9 @@ func PreferredDescription(tx Transaction) string {
 		return s
 	}
 	if s := extractAfterReference(tx.Description); s != "" {
-		return s
+		return CleanDescription(s)
 	}
-	return strings.TrimSpace(tx.Description)
+	return CleanDescription(tx.Description)
 }
 
 // extractAfterReference returns the substring that follows the first

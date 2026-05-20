@@ -93,7 +93,7 @@ func mergeKBCJournalWithCSV(creds *OdooCredentials, uid int, journalID int, acc 
 	// roundtrip) so they're cheap.
 	ctx := newKBCMergeContext(acc)
 	for i := range plan.ToAdd {
-		annotateKBCMergeRowWithRule(&plan.ToAdd[i], acc, &ctx)
+		annotateKBCMergeRowWithMapping(&plan.ToAdd[i], acc, &ctx)
 	}
 
 	// Pre-compute the partner create/update split using the local Odoo
@@ -103,6 +103,24 @@ func mergeKBCJournalWithCSV(creds *OdooCredentials, uid int, journalID int, acc 
 	partnerSummary, err := computeKBCPartnerSummary(creds, uid, plan.ToAdd, partnerIdx)
 	if err != nil {
 		Warnf("  %s⚠ partner pre-flight: %v%s", Fmt.Yellow, err, Fmt.Reset)
+	}
+
+	// Short-circuit when there's nothing to push. Skips the full merge
+	// summary + preview tables that would otherwise scroll past every
+	// run of `chb odoo journals push` even on a no-op KBC journal. The
+	// dry-run is still allowed to short-circuit — the answer is "nothing
+	// would happen" and the empty table doesn't add information. --verbose
+	// still gets the detailed view in case the user is debugging matching.
+	noop := len(plan.ToAdd) == 0 && len(plan.ToDelete) == 0
+	if noop && !verbose {
+		if !quietOdooContext() {
+			suffix := ""
+			if dryRun {
+				suffix = " (dry-run)"
+			}
+			fmt.Printf("  %s✓ kbc: nothing to push%s%s\n", Fmt.Green, suffix, Fmt.Reset)
+		}
+		return nil
 	}
 
 	printKBCMergeSummary(plan, len(rows), len(odooLines), alreadyCanonical, iban, journalID, partnerSummary, partnerIdx != nil)
@@ -118,7 +136,7 @@ func mergeKBCJournalWithCSV(creds *OdooCredentials, uid int, journalID int, acc 
 		return nil
 	}
 
-	if len(plan.ToAdd) == 0 && len(plan.ToDelete) == 0 {
+	if noop {
 		fmt.Printf("\n  %s✓ Nothing to do%s\n\n", Fmt.Green, Fmt.Reset)
 		return nil
 	}
@@ -161,18 +179,18 @@ type kbcMergeCSVRow struct {
 	Row      kbcbrusselssource.Transaction
 	ImportID string
 	// Category / AccountCode / AccountName are filled in by the planning
-	// step using the same categorizer + OdooRule chain that the create
-	// step uses, so --dry-run / --verbose can preview the assignments
-	// without hitting Odoo.
+	// step using the same categorizer + OdooMapping lookup that the
+	// create step uses, so --dry-run / --verbose can preview the
+	// assignments without hitting Odoo.
 	Category    string
 	Collective  string
 	AccountCode string
 	AccountName string
-	// RulePartnerID is the partner id baked into a matching OdooRule
-	// (e.g. "all donations go to Anonymous Donor"). Zero when no rule
+	// MappingPartnerID is the partner id baked into a matching OdooMapping
+	// (e.g. "all donations go to Anonymous Donor"). Zero when no mapping
 	// pins a partner; the dynamic IBAN→partner lookup happens in apply.
-	RulePartnerID   int
-	RulePartnerName string
+	MappingPartnerID   int
+	MappingPartnerName string
 }
 
 type kbcMergeOdooLine struct {
@@ -462,8 +480,8 @@ func computeKBCPartnerSummary(creds *OdooCredentials, uid int, toAdd []kbcMergeC
 }
 
 func printKBCMergeSummary(plan kbcMergePlan, csvCount, odooCount, alreadyCanonical int, iban string, journalID int, partners kbcPartnerSummary, partnerIdxLoaded bool) {
-	fmt.Printf("\n  %sMerge plan for journal #%d (%s)%s\n", Fmt.Bold, journalID, iban, Fmt.Reset)
-	fmt.Printf("  %sMatch passes: strict (date, IBAN, amount) → exact-date by amount → ±1/3/7 day fuzzy by amount; reconciled Odoo lines win on duplicate%s\n\n",
+	fmt.Printf("\n  %sPush plan for KBC journal #%d (%s)%s\n", Fmt.Bold, journalID, iban, Fmt.Reset)
+	fmt.Printf("  %sCSV-to-Odoo match passes: strict (date, IBAN, amount) → exact-date by amount → ±1/3/7 day fuzzy by amount; reconciled Odoo lines win on duplicate%s\n\n",
 		Fmt.Dim, Fmt.Reset)
 	fmt.Printf("    %sCSV rows:%s            %d\n", Fmt.Dim, Fmt.Reset, csvCount)
 	fmt.Printf("    %sOdoo lines:%s          %d\n", Fmt.Dim, Fmt.Reset, odooCount)
@@ -499,58 +517,28 @@ func printKBCMergeSummary(plan kbcMergePlan, csvCount, odooCount, alreadyCanonic
 	}
 }
 
+// kbcShortPreviewTag returns a compact " [category | collective | account]"
+// suffix for the short-preview lines. Skips empty fields and returns ""
+// when nothing was resolved.
+func kbcShortPreviewTag(p kbcMergeCSVRow) string {
+	parts := make([]string, 0, 3)
+	if p.Category != "" {
+		parts = append(parts, p.Category)
+	}
+	if p.Collective != "" {
+		parts = append(parts, "@"+p.Collective)
+	}
+	if p.AccountCode != "" {
+		parts = append(parts, p.AccountCode)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return fmt.Sprintf(" %s[%s]%s", Fmt.Cyan, strings.Join(parts, " · "), Fmt.Reset)
+}
+
 func printKBCMergePreviews(plan kbcMergePlan, acc *AccountConfig, journalID int, baseURL string) {
-	currency := accCurrency(acc)
-	if len(plan.ToAdd) > 0 {
-		fmt.Printf("\n  %sTo add (first %d of %d):%s\n", Fmt.Bold, kbcMergePreviewLimit(len(plan.ToAdd)), len(plan.ToAdd), Fmt.Reset)
-		preview := plan.ToAdd
-		if len(preview) > kbcMergePreviewLimit(len(preview)) {
-			preview = preview[:kbcMergePreviewLimit(len(preview))]
-		}
-		for _, p := range preview {
-			row := p.Row
-			cp := row.CounterpartyName
-			if cp == "" {
-				cp = row.CounterpartyIBAN
-			}
-			fmt.Printf("    %s  %s  %s  %s%s%s\n",
-				row.Date,
-				formatAccountDataBalance(row.Amount, currency),
-				cp,
-				Fmt.Dim, truncateRunes(row.Description, 60), Fmt.Reset)
-		}
-	}
-	if len(plan.ToDelete) > 0 {
-		fmt.Printf("\n  %sTo delete (first %d of %d):%s\n", Fmt.Bold, kbcMergePreviewLimit(len(plan.ToDelete)), len(plan.ToDelete), Fmt.Reset)
-		preview := plan.ToDelete
-		if len(preview) > kbcMergePreviewLimit(len(preview)) {
-			preview = preview[:kbcMergePreviewLimit(len(preview))]
-		}
-		for _, line := range preview {
-			cp := line.CounterpartyName
-			if cp == "" {
-				cp = line.CounterpartyIBAN
-			}
-			reconciledMark := ""
-			if line.IsReconciled {
-				reconciledMark = " " + Fmt.Yellow + "[reconciled]" + Fmt.Reset
-			}
-			fmt.Printf("    #%-7d %s  %s  %s%s  %s%s%s\n",
-				line.ID,
-				line.Date,
-				formatAccountDataBalance(line.Amount, currency),
-				cp, reconciledMark,
-				Fmt.Dim, truncateRunes(line.PaymentRef, 60), Fmt.Reset)
-		}
-		if baseURL != "" {
-			fmt.Printf("\n    %sInspect: %s%s\n",
-				Fmt.Dim, OdooBankReconciliationURL(baseURL, journalID), Fmt.Reset)
-		}
-	}
-	if plan.Ambiguous > 0 {
-		fmt.Printf("\n  %sTip: ambiguous keys mean multiple txs share the same (date, IBAN, amount).%s\n", Fmt.Dim, Fmt.Reset)
-		fmt.Printf("  %sGreedy pairing may pair the wrong sibling; inspect the to-add/to-delete previews.%s\n", Fmt.Dim, Fmt.Reset)
-	}
+	renderKBCMergeTables(plan, acc, journalID, baseURL, 15)
 }
 
 func kbcMergePreviewLimit(n int) int {
@@ -560,17 +548,32 @@ func kbcMergePreviewLimit(n int) int {
 	return n
 }
 
-// printKBCMergeTables renders the full add / delete sets as tables, in
-// the same style as `chb odoo journals X sync --dry-run`. Used when the
-// operator passes --verbose.
+// printKBCMergeTables renders the full add / delete sets as tables.
+// Used by --verbose; the short preview path calls renderKBCMergeTables
+// with a row limit instead.
 func printKBCMergeTables(plan kbcMergePlan, acc *AccountConfig, journalID int, baseURL string) {
+	renderKBCMergeTables(plan, acc, journalID, baseURL, 0)
+}
+
+// renderKBCMergeTables prints the to-add and to-delete tables. limit=0
+// shows all rows; limit>0 caps each table at that many rows and adds a
+// "first N of M" header. Totals always reflect the full plan, not the
+// truncated preview, so the operator can spot a balance mismatch even
+// in the short preview.
+func renderKBCMergeTables(plan kbcMergePlan, acc *AccountConfig, journalID int, baseURL string, limit int) {
 	currency := accCurrency(acc)
 	if len(plan.ToAdd) > 0 {
-		fmt.Printf("\n  %sTo add (%d):%s\n", Fmt.Bold, len(plan.ToAdd), Fmt.Reset)
+		title := fmt.Sprintf("To add (%d)", len(plan.ToAdd))
+		preview := plan.ToAdd
+		if limit > 0 && len(preview) > limit {
+			preview = preview[:limit]
+			title = fmt.Sprintf("To add (first %d of %d)", limit, len(plan.ToAdd))
+		}
+		fmt.Printf("\n  %s%s:%s\n", Fmt.Bold, title, Fmt.Reset)
 		headers := []string{"Date", "Amount", "Counterparty", "IBAN", "Description", "Category", "Collective", "Account"}
-		rows := make([][]string, 0, len(plan.ToAdd))
-		var amountTotal float64
-		for _, p := range plan.ToAdd {
+		rows := make([][]string, 0, len(preview))
+		var previewTotal, fullTotal float64
+		for _, p := range preview {
 			r := p.Row
 			cp := r.CounterpartyName
 			if cp == "" {
@@ -600,23 +603,39 @@ func printKBCMergeTables(plan kbcMergePlan, acc *AccountConfig, journalID int, b
 				Truncate(coll, 14),
 				Truncate(acct, 26),
 			})
-			amountTotal += r.Amount
+			previewTotal += r.Amount
+		}
+		for _, p := range plan.ToAdd {
+			fullTotal += p.Row.Amount
 		}
 		total := []string{
 			"",
-			formatBalancePlain(amountTotal, currency),
+			formatBalancePlain(fullTotal, currency),
 			"", "", "", "", "", "",
 		}
 		renderTicketsTable(headers, rows, total, map[int]bool{1: true})
+		if limit > 0 && len(plan.ToAdd) > limit {
+			fmt.Printf("  %s(preview total: %s of %s)%s\n",
+				Fmt.Dim,
+				formatBalancePlain(previewTotal, currency),
+				formatBalancePlain(fullTotal, currency),
+				Fmt.Reset)
+		}
 		fmt.Println()
 	}
 	if len(plan.ToDelete) > 0 {
-		fmt.Printf("\n  %sTo delete (%d):%s\n", Fmt.Bold, len(plan.ToDelete), Fmt.Reset)
+		title := fmt.Sprintf("To delete (%d)", len(plan.ToDelete))
+		preview := plan.ToDelete
+		if limit > 0 && len(preview) > limit {
+			preview = preview[:limit]
+			title = fmt.Sprintf("To delete (first %d of %d)", limit, len(plan.ToDelete))
+		}
+		fmt.Printf("\n  %s%s:%s\n", Fmt.Bold, title, Fmt.Reset)
 		headers := []string{"Odoo #", "Date", "Amount", "Counterparty", "IBAN", "Description", "Reconciled"}
-		rows := make([][]string, 0, len(plan.ToDelete))
-		var amountTotal float64
+		rows := make([][]string, 0, len(preview))
+		var previewTotal, fullTotal float64
 		reconciled := 0
-		for _, line := range plan.ToDelete {
+		for _, line := range preview {
 			cp := line.CounterpartyName
 			if cp == "" {
 				cp = "-"
@@ -624,7 +643,6 @@ func printKBCMergeTables(plan kbcMergePlan, acc *AccountConfig, journalID int, b
 			rec := ""
 			if line.IsReconciled {
 				rec = "yes"
-				reconciled++
 			}
 			rows = append(rows, []string{
 				fmt.Sprintf("#%d", line.ID),
@@ -635,7 +653,13 @@ func printKBCMergeTables(plan kbcMergePlan, acc *AccountConfig, journalID int, b
 				Truncate(line.PaymentRef, 50),
 				rec,
 			})
-			amountTotal += line.Amount
+			previewTotal += line.Amount
+		}
+		for _, line := range plan.ToDelete {
+			fullTotal += line.Amount
+			if line.IsReconciled {
+				reconciled++
+			}
 		}
 		recLabel := ""
 		if reconciled > 0 {
@@ -644,10 +668,17 @@ func printKBCMergeTables(plan kbcMergePlan, acc *AccountConfig, journalID int, b
 		total := []string{
 			"",
 			"",
-			formatBalancePlain(amountTotal, currency),
+			formatBalancePlain(fullTotal, currency),
 			"", "", "", recLabel,
 		}
 		renderTicketsTable(headers, rows, total, map[int]bool{2: true})
+		if limit > 0 && len(plan.ToDelete) > limit {
+			fmt.Printf("  %s(preview total: %s of %s)%s\n",
+				Fmt.Dim,
+				formatBalancePlain(previewTotal, currency),
+				formatBalancePlain(fullTotal, currency),
+				Fmt.Reset)
+		}
 		if baseURL != "" {
 			fmt.Printf("\n    %sInspect: %s%s\n", Fmt.Dim, OdooBankReconciliationURL(baseURL, journalID), Fmt.Reset)
 		}
@@ -770,8 +801,8 @@ func applyKBCMerge(creds *OdooCredentials, uid int, journalID int, acc *AccountC
 			if err != nil {
 				Warnf("    %s⚠ partner lookup for %s: %v%s", Fmt.Yellow, kbcMergePaymentRef(p.Row), err, Fmt.Reset)
 			}
-			if p.RulePartnerID > 0 {
-				partnerID = p.RulePartnerID
+			if p.MappingPartnerID > 0 {
+				partnerID = p.MappingPartnerID
 			}
 
 			line := map[string]interface{}{
@@ -785,7 +816,11 @@ func applyKBCMerge(creds *OdooCredentials, uid int, journalID int, acc *AccountC
 			if p.Row.CounterpartyIBAN != "" {
 				line["account_number"] = p.Row.CounterpartyIBAN
 			}
-			if name := p.Row.CounterpartyName; name != "" {
+			name := strings.TrimSpace(p.Row.CounterpartyName)
+			if name == "" {
+				name = kbcbrusselssource.MerchantFromDescription(p.Row.Description)
+			}
+			if name != "" {
 				line["partner_name"] = name
 			}
 			if partnerID > 0 {
@@ -892,25 +927,25 @@ func plural(n int) string {
 	return "s"
 }
 
-// kbcMergeContext bundles the per-merge shared state (rules, categorizer,
-// partner cache, internal-account set) so each row processing call has
-// everything it needs without re-loading the same files.
+// kbcMergeContext bundles the per-merge shared state (mappings,
+// categorizer, partner cache, internal-account set) so each row processing
+// call has everything it needs without re-loading the same files.
 type kbcMergeContext struct {
-	odooRules    []OdooRule
+	odooMappings []OdooMapping
 	categorizer  *Categorizer
 	partnerCache map[string]int
 	// internalIBANs holds normalized IBANs of every CHB-linked account
 	// other than the one we're merging into. A CSV row whose counterparty
 	// IBAN appears here is a transfer between two accounts the operator
 	// owns — category becomes "internal_transfer" so the matching Odoo
-	// rule routes it to account 580001.
+	// mapping routes it to account 580001.
 	internalIBANs map[string]bool
 }
 
 func newKBCMergeContext(acc *AccountConfig) kbcMergeContext {
-	rules, _ := LoadOdooRules()
+	mappings, _ := LoadOdooMappings()
 	ctx := kbcMergeContext{
-		odooRules:     rules,
+		odooMappings:  mappings,
 		categorizer:   NewCategorizer(nil),
 		partnerCache:  map[string]int{},
 		internalIBANs: map[string]bool{},
@@ -926,26 +961,30 @@ func newKBCMergeContext(acc *AccountConfig) kbcMergeContext {
 	return ctx
 }
 
-// annotateKBCMergeRowWithRule resolves the matched OdooRule for a row
-// and writes the resulting category/account/partner onto the row in
-// place. Safe to call multiple times — overwrites the previous values
-// with the freshly-computed ones.
-func annotateKBCMergeRowWithRule(row *kbcMergeCSVRow, acc *AccountConfig, ctx *kbcMergeContext) {
+// annotateKBCMergeRowWithMapping resolves the matched OdooMapping for a
+// row and writes the resulting category/account/partner onto the row in
+// place. Mirrors what `chb generate` does for transactions.json — the
+// load-bearing fields (Category/Collective/AccountCode/PartnerID) go
+// through applyOdooMapping so KBC merge produces the same values
+// generate would write. The matched lookup that follows is only used to
+// pull the cosmetic AccountName / PartnerName labels for the preview
+// table.
+func annotateKBCMergeRowWithMapping(row *kbcMergeCSVRow, acc *AccountConfig, ctx *kbcMergeContext) {
 	ruleTx := kbcRowToTransactionEntry(*acc, row.Row)
 	ctx.categorizer.Apply(&ruleTx)
 	if ctx.isInternalTransfer(row.Row) {
 		ruleTx.Category = "internal_transfer"
 	}
+	applyOdooMapping(ctx.odooMappings, &ruleTx)
 	row.Category = ruleTx.Category
 	row.Collective = ruleTx.Collective
-	matched := MatchOdooRule(ctx.odooRules, ruleTx)
-	if matched == nil {
-		return
+	row.AccountCode = ruleTx.AccountCode
+	row.MappingPartnerID = ruleTx.PartnerID
+	// Cosmetic labels for the --verbose table only.
+	if matched := LookupOdooMapping(ctx.odooMappings, ruleTx); matched != nil {
+		row.AccountName = matched.Set.AccountName
+		row.MappingPartnerName = matched.Set.PartnerName
 	}
-	row.AccountCode = matched.Set.AccountCode
-	row.AccountName = matched.Set.AccountName
-	row.RulePartnerID = matched.Set.PartnerID
-	row.RulePartnerName = matched.Set.PartnerName
 }
 
 func (c *kbcMergeContext) isInternalTransfer(row kbcbrusselssource.Transaction) bool {
@@ -970,11 +1009,20 @@ func (c *kbcMergeContext) isInternalTransfer(row kbcbrusselssource.Transaction) 
 func resolveOrCreateKBCPartnerBank(creds *OdooCredentials, uid int, row kbcbrusselssource.Transaction, cache *map[string]int) (int, int, error) {
 	iban := kbcbrusselssource.NormalizeIBAN(row.CounterpartyIBAN)
 	name := strings.TrimSpace(row.CounterpartyName)
+	if name == "" {
+		// Card-payment rows arrive with no counterparty name. Recover the
+		// merchant from the description so we can still link/create a
+		// real partner instead of dropping the line on the floor.
+		name = kbcbrusselssource.MerchantFromDescription(row.Description)
+	}
 	if iban == "" && name == "" {
 		return 0, 0, nil
 	}
 
 	// 1. IBAN already in Odoo → reuse the partner_bank and its partner.
+	// This is the canonical path: when the bank account is known, the
+	// linked partner WINS over name-matching. Names are noisy (KBC
+	// shortens them, capitalises differently, etc.); the IBAN is stable.
 	if iban != "" {
 		bankID, partnerID, err := findOdooPartnerBankByAccountNumber(creds, uid, iban)
 		if err != nil {
@@ -982,6 +1030,12 @@ func resolveOrCreateKBCPartnerBank(creds *OdooCredentials, uid int, row kbcbruss
 		}
 		if bankID > 0 && partnerID > 0 {
 			return bankID, partnerID, nil
+		}
+		// Bank row exists but with no partner — extremely rare. Fall
+		// through to name resolution but skip the create-bank step so
+		// we don't trip the unique (partner, acc_number) constraint.
+		if bankID > 0 && partnerID == 0 {
+			return bankID, 0, nil
 		}
 	}
 
@@ -1042,10 +1096,35 @@ func applyKBCRuleAccounts(creds *OdooCredentials, uid int, journalID int, accoun
 		}
 		byCode[code] = append(byCode[code], lineID)
 	}
+	// Count total work so the operator sees a sane "Applying account
+	// codes: cur/total" line — this step does ~5 RPCs per line (read,
+	// find counterpart, draft move, write account, repost) sequentially,
+	// so on a 188-line journal it can run for several minutes. Without
+	// the status line the operator sees "✓ Created 188/188 lines" and
+	// then nothing until the whole pass finishes.
+	totalLines := 0
+	codes := make([]string, 0, len(byCode))
 	for code, ids := range byCode {
-		if err := applyOdooRuleAccount(creds, uid, ids, code); err != nil {
+		totalLines += len(ids)
+		codes = append(codes, code)
+	}
+	sort.Strings(codes)
+	if totalLines == 0 {
+		return nil
+	}
+	fmt.Printf("  %sApplying rule-driven account codes to %d line%s (~%d RPCs)…%s\n",
+		Fmt.Dim, totalLines, plural(totalLines), totalLines*5, Fmt.Reset)
+	status := newStatusLine()
+	defer status.Clear()
+	done := 0
+	for _, code := range codes {
+		ids := byCode[code]
+		status.Update("  account %s — line %d/%d total", code, done, totalLines)
+		if err := applyOdooMappingAccount(creds, uid, ids, code, status); err != nil {
 			return fmt.Errorf("set account %s on %d line(s): %v", code, len(ids), err)
 		}
+		done += len(ids)
+		status.Update("  account %s done (%d/%d total)", code, done, totalLines)
 	}
 	return nil
 }

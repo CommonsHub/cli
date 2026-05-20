@@ -198,6 +198,7 @@ func TransactionsSync(args []string) (int, error) {
 					}
 
 					existingKeys := existingTokenTransferKeys(acc)
+					Progress(fmt.Sprintf("fetching %s transfers (%s)", acc.Token.Symbol, acc.Name))
 					transfers, err := etherscansource.FetchTokenTransfers(etherscanAccount(acc), apiKey)
 					if err != nil {
 						Errorf("    %s✗ Error: %v%s", Fmt.Red, err, Fmt.Reset)
@@ -329,6 +330,22 @@ func TransactionsSync(args []string) (int, error) {
 					// archive update. Fetch from the requested recent range and stop
 					// once we reach a cached month whose transaction count matches.
 					stopAtMonthBoundary := !force && !isSince && !posFound && monthFilter == ""
+
+					// Incremental cursor: when no explicit range was asked for,
+					// limit the Stripe API request to BTs strictly newer than
+					// the latest one we already have locally for this account.
+					// Stripe BTs are append-only (no retroactive insertion), so
+					// this is safe; it turns a multi-month re-fetch into a
+					// constant-time "what's new since last pull" call.
+					var createdAfter *time.Time
+					if !force && !isSince && !posFound && monthFilter == "" {
+						if latest := stripesource.LatestLocalTransactionTime(DataDir(), acc.AccountID); latest > 0 {
+							// +1s avoids re-fetching the boundary tx itself
+							t := time.Unix(latest+1, 0)
+							createdAfter = &t
+						}
+					}
+
 					status.Update("Fetching transactions from Stripe...")
 					stripeTxs, err := stripesource.FetchTransactions(stripesource.FetchOptions{
 						APIKey:              stripeKey,
@@ -337,6 +354,7 @@ func TransactionsSync(args []string) (int, error) {
 						EndMonth:            endMonth,
 						Limit:               fetchLimit,
 						StopAtMonthBoundary: stopAtMonthBoundary,
+						CreatedAfter:        createdAfter,
 						DataDir:             DataDir(),
 						Location:            BrusselsTZ(),
 						Progress:            stripeTransactionProgress(status),
@@ -581,6 +599,7 @@ func TransactionsSync(args []string) (int, error) {
 							fmt.Printf("  %s%s%s (%s)\n", Fmt.Bold, acc.Name, Fmt.Reset, acc.Address)
 						}
 
+						Progress(fmt.Sprintf("fetching Monerium orders (%s)", acc.Name))
 						orders, err := moneriumsource.FetchOrders(token, acc.Address, moneriumEnv)
 						if err != nil {
 							Errorf("    %s✗ Error: %v%s", Fmt.Red, err, Fmt.Reset)
@@ -696,6 +715,7 @@ func TransactionsSync(args []string) (int, error) {
 				addresses = append(addresses, a)
 			}
 
+			Progress(fmt.Sprintf("fetching Nostr metadata (%s)", acc.Name))
 			txMeta, txErr := FetchNostrTxMetadata(acc.ChainID, txHashes, nostrSince)
 			addrMeta, addrErr := FetchNostrAddressMetadata(acc.ChainID, addresses)
 			if txErr != nil || addrErr != nil {

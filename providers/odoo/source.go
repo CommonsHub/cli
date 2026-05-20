@@ -15,6 +15,7 @@ const (
 	PartnersFile           = "partners.json"
 	SubscriptionsFile      = "subscriptions.json"
 	AnalyticEnrichmentFile = "analytic-enrichment.json"
+	AnalyticPlansFile      = "analytic-plans.json"
 )
 
 type SourceProvider struct{}

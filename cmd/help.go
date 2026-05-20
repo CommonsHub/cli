@@ -37,7 +37,7 @@ func PrintHelp(version string) {
   %smessages stats%s      Show message statistics
   %simages sync%s         Download images from Discord and Luma
   %sproviders%s           List providers and provider-scoped commands
-  %ssync%s                Sync all providers
+  %spull%s                Pull data from all providers (alias: sync, deprecated)
   %sgenerate%s            Generate derived data files (contributors, images, etc.)
   %smembers sync%s        Fetch membership data from Stripe/Odoo
   %sreport%s <date-range>  Generate monthly/yearly report
@@ -58,8 +58,10 @@ func PrintHelp(version string) {
   $ chb calendars sync                   # sync calendar providers
   $ chb calendars sync 2025/11           # sync calendars for Nov 2025
   $ chb calendars sync 2025              # sync calendars for all of 2025
-  $ chb sync 2025/11 --force             # resync everything for Nov 2025
-  $ chb sync 2025 --force                # resync everything for all of 2025
+  $ chb pull 2025/11 --force             # pull everything for Nov 2025
+  $ chb pull 2025 --force                # pull everything for all of 2025
+  $ chb odoo journals push               # push generated data → Odoo journals
+  $ chb odoo journals 28 push --dry-run  # preview push for journal #28
   $ chb transactions sync 2025/03        # sync transactions for Mar 2025
   $ chb nostr sync transactions          # publish/fetch transaction annotations
   $ chb invoices sync                    # sync outgoing invoices from Odoo
@@ -67,7 +69,7 @@ func PrintHelp(version string) {
   $ chb attachments sync                 # sync invoice/bill attachments from Odoo
   $ chb messages sync 2025              # sync messages for all of 2025
   $ chb providers ics generate          # generate calendar outputs
-  $ chb providers * sync 2025/11        # sync all providers for Nov 2025
+  $ chb providers * pull 2025/11        # pull all providers for Nov 2025
   $ chb calendars sync 2025/06           # sync calendars for Jun 2025
   $ chb tools getUrlMetadata https://example.com/event
   $ chb report 2025/11                   # monthly report
@@ -133,7 +135,7 @@ func PrintProvidersHelp() {
 
 %sUSAGE%s
   %schb providers%s
-  %schb providers%s <provider|*> <sync|generate> [year[/month]] [options]
+  %schb providers%s <provider|*> <pull|generate> [year[/month]] [options]
 
 %sPROVIDERS%s
 `,
@@ -151,14 +153,18 @@ func PrintProvidersHelp() {
 	}
 	fmt.Printf(`
 %sALIASES%s
-  %schb sync%s       Same as %schb providers * sync%s
+  %schb pull%s       Same as %schb providers * pull%s
   %schb generate%s   Same as %schb providers * generate%s
 
 %sEXAMPLES%s
-  %schb providers ics sync%s 2025/11
+  %schb providers ics pull%s 2025/11
   %schb providers ics generate%s
-  %schb providers stripe sync%s --since 2025/01
+  %schb providers stripe pull%s --since 2025/01
   %schb providers * generate%s
+
+%sNote%s
+  %sThe verb 'sync' is still accepted as a deprecated alias for 'pull'.
+  Pushing local data → Odoo lives under: chb odoo journals push%s
 `,
 		f.Bold, f.Reset,
 		f.Cyan, f.Reset, f.Cyan, f.Reset,
@@ -168,6 +174,8 @@ func PrintProvidersHelp() {
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
+		f.Bold, f.Reset,
+		f.Dim, f.Reset,
 	)
 }
 
@@ -177,11 +185,11 @@ func PrintProviderHelp(spec providerCommandSpec) {
 %schb providers %s%s — %s
 
 %sUSAGE%s
-  %schb providers %s sync%s [year[/month]] [options]
+  %schb providers %s pull%s [year[/month]] [options]
   %schb providers %s generate%s [year[/month]] [options]
 
 %sCOMMANDS%s
-  %ssync%s       Fetch provider data into the monthly archive
+  %spull%s       Pull provider data into the monthly archive (alias: sync)
   %sgenerate%s   Transform archived provider data into generated outputs
 `,
 		f.Bold, spec.Name, f.Reset, spec.Description,

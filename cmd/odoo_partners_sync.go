@@ -61,7 +61,10 @@ func refreshOdooPartnersCache(args []string) (int, error) {
 }
 
 func odooPartnersSync(args []string, printSummary bool) (int, error) {
-	_ = args
+	if HasFlag(args, "--help", "-h", "help") {
+		printOdooSyncHelp()
+		return 0, nil
+	}
 	creds, err := ResolveOdooCredentials()
 	if err != nil {
 		return 0, err

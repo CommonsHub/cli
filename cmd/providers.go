@@ -228,7 +228,10 @@ func ProvidersCommand(args []string) error {
 	switch provider {
 	case "*":
 		switch action {
-		case "sync":
+		case "pull", "sync":
+			if action == "sync" {
+				Warnf("%s'sync' is deprecated — use 'pull' instead%s", Fmt.Dim, Fmt.Reset)
+			}
 			if HasFlag(rest, "--help", "-h", "help") {
 				PrintSyncAllHelp()
 				return nil
@@ -257,9 +260,12 @@ func ProvidersCommand(args []string) error {
 			return fmt.Errorf("unknown provider %q", args[0])
 		}
 		switch action {
-		case "sync":
+		case "pull", "sync":
+			if action == "sync" {
+				Warnf("%s'sync' is deprecated — use 'pull' instead%s", Fmt.Dim, Fmt.Reset)
+			}
 			if spec.Sync == nil {
-				return fmt.Errorf("provider %q does not support sync", provider)
+				return fmt.Errorf("provider %q does not support pull", provider)
 			}
 			return spec.Sync(rest)
 		case "generate":
@@ -271,7 +277,7 @@ func ProvidersCommand(args []string) error {
 			PrintProviderHelp(spec)
 			return nil
 		default:
-			return fmt.Errorf("unknown provider action %q; expected sync or generate", action)
+			return fmt.Errorf("unknown provider action %q; expected pull or generate", action)
 		}
 	}
 }
@@ -279,7 +285,7 @@ func ProvidersCommand(args []string) error {
 func providerActionIndex(args []string) int {
 	for i, arg := range args {
 		switch strings.ToLower(strings.TrimSpace(arg)) {
-		case "sync", "generate":
+		case "pull", "sync", "generate":
 			return i
 		}
 	}
@@ -296,12 +302,34 @@ func providerSpec(name string) (providerCommandSpec, bool) {
 }
 
 func runAllProviderSync(args []string) error {
+	verbose := HasFlag(args, "--verbose", "-v") || HasFlag(args, "--debug")
 	for _, spec := range providerCommandSpecs() {
 		if spec.Sync == nil {
 			continue
 		}
-		fmt.Printf("\n%s━━━ %s ━━━%s\n", Fmt.Bold, providerDisplayName(spec.Name), Fmt.Reset)
-		if err := spec.Sync(args); err != nil {
+		display := providerDisplayName(spec.Name)
+		if verbose {
+			fmt.Printf("\n%s━━━ %s ━━━%s\n", Fmt.Bold, display, Fmt.Reset)
+			if err := spec.Sync(args); err != nil {
+				return err
+			}
+			continue
+		}
+		// Compact: live status line on stderr, swallow stdout chatter.
+		sl := NewStatusLine(display)
+		SetActiveStatusLine(sl)
+		restore := silenceStdout()
+		err := spec.Sync(args)
+		restore()
+		SetActiveStatusLine(nil)
+		mark := Fmt.Green + "✓" + Fmt.Reset
+		summary := ""
+		if err != nil {
+			mark = Fmt.Red + "✗" + Fmt.Reset
+			summary = "error: " + truncErr(err)
+		}
+		sl.Final(mark, summary)
+		if err != nil {
 			return err
 		}
 	}

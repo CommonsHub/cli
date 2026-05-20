@@ -254,6 +254,52 @@ func LocalTransactionCount(filePath string) int {
 	return len(cache.Transactions)
 }
 
+// LatestLocalTransactionTime walks every cached month under dataDir
+// for the given accountID and returns the highest `Created` Unix
+// timestamp it finds. Returns 0 when there is no local cache. Used
+// by the sync to set CreatedAfter so the Stripe API only ships
+// transactions strictly newer than what we already have — turning a
+// full-window re-fetch into a fast cursor-based pull. Returns 0 when
+// accountID is empty (caller must pass an explicit account so we
+// don't cross-pollute cursors across multiple Stripe accounts).
+func LatestLocalTransactionTime(dataDir, accountID string) int64 {
+	if dataDir == "" || accountID == "" {
+		return 0
+	}
+	years, err := os.ReadDir(dataDir)
+	if err != nil {
+		return 0
+	}
+	var latest int64
+	for _, y := range years {
+		if !y.IsDir() || len(y.Name()) != 4 {
+			continue
+		}
+		months, err := os.ReadDir(filepath.Join(dataDir, y.Name()))
+		if err != nil {
+			continue
+		}
+		for _, m := range months {
+			if !m.IsDir() || len(m.Name()) != 2 {
+				continue
+			}
+			cache, ok := LoadCache(TransactionCachePath(dataDir, y.Name(), m.Name()))
+			if !ok {
+				continue
+			}
+			if cache.AccountID != "" && !strings.EqualFold(accountID, cache.AccountID) {
+				continue
+			}
+			for _, tx := range cache.Transactions {
+				if tx.Created > latest {
+					latest = tx.Created
+				}
+			}
+		}
+	}
+	return latest
+}
+
 func MergeTransactions(existing, incoming []Transaction) []Transaction {
 	byID := make(map[string]Transaction, len(existing)+len(incoming))
 	for _, tx := range existing {

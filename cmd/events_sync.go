@@ -186,6 +186,7 @@ func CalendarsSync(args []string) (int, int, error) {
 		}
 
 		fmt.Printf("  Fetching %s calendar...\n", cs.Slug)
+		Progress(fmt.Sprintf("fetching %s calendar", cs.Slug))
 		icsData, err := fetchURL(cs.URL)
 		if err != nil {
 			diagnostics.Warn("fetch calendar failed", "%s: %v", cs.Slug, err)

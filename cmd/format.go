@@ -21,9 +21,55 @@ func Pluralize(n int, singular, plural string) string {
 		return fmt.Sprintf("%d %s", n, singular)
 	}
 	if plural == "" {
-		plural = singular + "s"
+		plural = defaultPlural(singular)
 	}
 	return fmt.Sprintf("%d %s", n, plural)
+}
+
+// pluralIrregulars holds short abbreviations and other words whose English
+// plural doesn't follow the spelling rules. "tx" looks like it should
+// become "txes" by the x→es rule, but the convention is "txs" (it's an
+// abbreviation for "transaction", not a word in its own right).
+var pluralIrregulars = map[string]string{
+	"tx": "txs",
+}
+
+// defaultPlural applies the common English plural rules:
+//   - consonant + y → ies (category → categories, party → parties)
+//   - vowel + y → s (day → days, key → keys, relay → relays)
+//   - ends in s/x/z/sh/ch → es (box → boxes, fetch → fetches)
+//   - otherwise → s
+//
+// Common abbreviations that break the rules (e.g. "tx" → "txs") are in
+// pluralIrregulars. Caller can always pass an explicit plural to override
+// (e.g. for "person" → "people").
+func defaultPlural(singular string) string {
+	if singular == "" {
+		return ""
+	}
+	if p, ok := pluralIrregulars[singular]; ok {
+		return p
+	}
+	last := singular[len(singular)-1]
+	if last == 'y' && len(singular) >= 2 {
+		prev := singular[len(singular)-2]
+		switch prev {
+		case 'a', 'e', 'i', 'o', 'u':
+			return singular + "s"
+		default:
+			return singular[:len(singular)-1] + "ies"
+		}
+	}
+	if last == 's' || last == 'x' || last == 'z' {
+		return singular + "es"
+	}
+	if len(singular) >= 2 {
+		tail := singular[len(singular)-2:]
+		if tail == "sh" || tail == "ch" {
+			return singular + "es"
+		}
+	}
+	return singular + "s"
 }
 
 const TIMEZONE = "Europe/Brussels"

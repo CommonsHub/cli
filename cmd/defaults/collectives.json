@@ -1,7 +1,8 @@
 {
   "commonshub": {
     "name": "Commons Hub",
-    "icon": "/favicon.png"
+    "icon": "/favicon.png",
+    "aliases": ["commonshub-brussels"]
   },
   "genesis": {
     "name": "Genesis",

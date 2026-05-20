@@ -235,8 +235,13 @@ func main() {
 			subcmd = args[1]
 		}
 		switch subcmd {
-		case "sync":
-			// Meta-command: run invoices + bills + journals sync in order.
+		case "pull", "sync":
+			if subcmd == "sync" {
+				cmd.Warnf("%s'chb odoo sync' is deprecated — use 'chb odoo pull' instead%s", cmd.Fmt.Dim, cmd.Fmt.Reset)
+			}
+			// Fetch-only: invoices + bills + partners + analytic plans
+			// + categories. Pushing to journals lives under
+			// `chb odoo journals push` (see below).
 			if err := cmd.OdooSyncAll(args[2:]); err != nil {
 				exitWithError(err)
 			}
@@ -285,8 +290,13 @@ func main() {
 			if err := cmd.OdooGet(args[2:]); err != nil {
 				exitWithError(err)
 			}
+		case "mapping", "mappings":
+			if err := cmd.OdooMappingCommand(args[2:]); err != nil {
+				exitWithError(err)
+			}
 		case "rules":
-			if err := cmd.OdooRulesCommand(args[2:]); err != nil {
+			cmd.Warnf("%s'chb odoo rules' is deprecated — use 'chb odoo mapping' instead%s", cmd.Fmt.Dim, cmd.Fmt.Reset)
+			if err := cmd.OdooMappingCommand(args[2:]); err != nil {
 				exitWithError(err)
 			}
 		case "accounts":
@@ -301,12 +311,34 @@ func main() {
 			cmd.PrintOdooHelp()
 		}
 	case "nostr":
-		if len(args) > 1 && args[1] == "sync" {
+		if len(args) <= 1 {
+			exitWithUsage("%sUsage: chb nostr <pull|push|pending|sync> [scope] [options]%s", cmd.Fmt.Yellow, cmd.Fmt.Reset)
+		}
+		switch args[1] {
+		case "pull":
+			if err := cmd.NostrPull(args[2:]); err != nil {
+				exitWithError(err)
+			}
+		case "push":
+			if err := cmd.NostrPush(args[2:]); err != nil {
+				exitWithError(err)
+			}
+		case "publish":
+			cmd.Warnf("%s'chb nostr publish' is deprecated — use 'chb nostr push' instead%s", cmd.Fmt.Dim, cmd.Fmt.Reset)
+			if err := cmd.NostrPush(args[2:]); err != nil {
+				exitWithError(err)
+			}
+		case "pending":
+			if err := cmd.NostrPending(args[2:]); err != nil {
+				exitWithError(err)
+			}
+		case "sync":
+			cmd.Warnf("%s'chb nostr sync' is deprecated — use 'chb nostr pull' / 'chb nostr push' instead%s", cmd.Fmt.Dim, cmd.Fmt.Reset)
 			if err := cmd.NostrSync(args[2:]); err != nil {
 				exitWithError(err)
 			}
-		} else {
-			exitWithUsage("%sUsage: chb nostr sync [scope] [options]%s", cmd.Fmt.Yellow, cmd.Fmt.Reset)
+		default:
+			exitWithUsage("%sUsage: chb nostr <pull|push|pending|sync> [scope] [options]%s", cmd.Fmt.Yellow, cmd.Fmt.Reset)
 		}
 	case "rules":
 		if len(args) > 1 && args[1] == "add" {
@@ -326,8 +358,11 @@ func main() {
 		if err := cmd.Tools(args[1:]); err != nil {
 			exitWithError(err)
 		}
-	case "sync":
-		if err := cmd.ProvidersCommand(append([]string{"*", "sync"}, args[1:]...)); err != nil {
+	case "pull", "sync":
+		if args[0] == "sync" {
+			cmd.Warnf("%s'chb sync' is deprecated — use 'chb pull' instead%s", cmd.Fmt.Dim, cmd.Fmt.Reset)
+		}
+		if err := cmd.ProvidersCommand(append([]string{"*", "pull"}, args[1:]...)); err != nil {
 			exitWithError(err)
 		}
 	case "report":

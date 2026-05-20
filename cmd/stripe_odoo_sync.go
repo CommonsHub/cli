@@ -164,7 +164,7 @@ func syncStripeChronological(
 	partnerCollectiveTagWarnings := map[string]bool{}
 	localPartnerIndex := loadLatestOdooPartnerIndex(DataDir())
 	categorizer := NewCategorizer(nil)
-	odooRules, _ := LoadOdooRules()
+	odooMappings, _ := LoadOdooMappings()
 	var batch []map[string]interface{}
 	var batchAccountCodes []string
 	feeCents := int64(0)
@@ -217,7 +217,7 @@ func syncStripeChronological(
 		}
 		accountCode := ""
 		if inlineAccounts {
-			accountCode = stripeFeeOdooAccountCode(odooRules)
+			accountCode = stripeFeeOdooAccountCode(odooMappings)
 		}
 		if dryRun {
 			addDryRunPlan("create", date, paymentRef, "", accountCode, amount, importID)
@@ -313,7 +313,7 @@ func syncStripeChronological(
 			paymentRef := stripeOdooPaymentRef(bt, ruleTx)
 			accountCode := ""
 			if inlineAccounts {
-				accountCode = stripeOdooAccountCode(bt, ruleTx, odooRules)
+				accountCode = stripeOdooAccountCode(bt, ruleTx, odooMappings)
 			}
 			update := map[string]interface{}{}
 			if row := existingRows[importID]; row != nil {
@@ -333,7 +333,14 @@ func syncStripeChronological(
 					}
 				} else if row := existingRows[importID]; row != nil {
 					if lineID := odooInt(row["id"]); lineID > 0 {
-						if err := updateStatementLineFields(creds, uid, lineID, update); err != nil {
+						// Use the metadata-aware wrapper so posted moves get
+						// drafted → written → reposted. The bare write fails
+						// with Odoo's UserError ("can't modify a validated
+						// accounting entry") whenever the bank-statement
+						// line's account.move is in 'posted' state, which
+						// happens for every reconciled Stripe line.
+						moveID := odooFieldID(row["move_id"])
+						if err := updateStatementLineFieldsForMetadata(creds, uid, lineID, moveID, update); err != nil {
 							Warnf("  %s⚠ Failed to update Stripe line %s: %v%s", Fmt.Yellow, importID, err, Fmt.Reset)
 						} else {
 							existingUpdates++
@@ -348,7 +355,7 @@ func syncStripeChronological(
 			} else if inlineAccounts && !dryRun && stripeBTIsFee(bt) && accountCode != "" {
 				if row := existingRows[importID]; row != nil {
 					if lineID := odooInt(row["id"]); lineID > 0 {
-						if err := applyOdooRuleAccount(creds, uid, []int{lineID}, accountCode); err != nil {
+						if err := applyOdooMappingAccount(creds, uid, []int{lineID}, accountCode); err != nil {
 							Warnf("  %s⚠ Failed to set fee account on %s: %v%s", Fmt.Yellow, importID, err, Fmt.Reset)
 						} else {
 							existingUpdates++
@@ -371,7 +378,7 @@ func syncStripeChronological(
 		paymentRef := stripeOdooPaymentRef(bt, ruleTx)
 		accountCode := ""
 		if inlineAccounts {
-			accountCode = stripeOdooAccountCode(bt, ruleTx, odooRules)
+			accountCode = stripeOdooAccountCode(bt, ruleTx, odooMappings)
 		}
 		if dryRun {
 			dryRunCreates++
@@ -522,10 +529,13 @@ func syncStripeChronological(
 		if dryRun {
 			runningBalance += addAmount
 			resetFeeAccumulator()
-		} else if existingID, existingAmount, err := fetchOdooLineByImportID(creds, uid, acc.OdooJournalID, importID); err == nil && existingID > 0 {
+		} else if existingID, existingAmount, existingMoveID, err := fetchOdooLineByImportID(creds, uid, acc.OdooJournalID, importID); err == nil && existingID > 0 {
 			newAmount := existingAmount + addAmount
 			runningBalance += addAmount
-			if werr := updateStatementLineFields(creds, uid, existingID, stripeOpenStatementFeeLineUpdateVals(
+			// Same posted-move dance as the per-tx update path: the bank
+			// statement line's account.move locks once posted, so we draft
+			// → write → repost via updateStatementLineFieldsForMetadata.
+			if werr := updateStatementLineFieldsForMetadata(creds, uid, existingID, existingMoveID, stripeOpenStatementFeeLineUpdateVals(
 				acc, importID, newAmount, feeCents, feeBTs, feeStartDate, feeEndDate,
 			)); werr != nil {
 				Warnf("  %s⚠ Failed to update open-statement fee line #%d: %v%s", Fmt.Yellow, existingID, werr, Fmt.Reset)
@@ -773,21 +783,27 @@ func stripeOdooLocalSnapshot(acc *AccountConfig) (accountOdooSyncSnapshot, bool)
 	return snap, true
 }
 
-func stripeOdooAccountCode(bt stripesource.Transaction, tx TransactionEntry, odooRules []OdooRule) string {
-	if matchedRule := MatchOdooRule(odooRules, tx); matchedRule != nil {
-		return matchedRule.Set.AccountCode
+func stripeOdooAccountCode(bt stripesource.Transaction, tx TransactionEntry, odooMappings []OdooMapping) string {
+	// Prefer the resolved value from `chb generate`; fall back to a
+	// live mapping lookup only when transactions.json predates the
+	// AccountCode field (older fixtures).
+	if tx.AccountCode != "" {
+		return tx.AccountCode
+	}
+	if matched := LookupOdooMapping(odooMappings, tx); matched != nil {
+		return matched.Set.AccountCode
 	}
 	return ""
 }
 
-func stripeFeeOdooAccountCode(odooRules []OdooRule) string {
+func stripeFeeOdooAccountCode(odooMappings []OdooMapping) string {
 	tx := TransactionEntry{
 		Provider: "stripe",
 		Type:     "DEBIT",
 		Category: "stripe_fees",
 	}
-	if matchedRule := MatchOdooRule(odooRules, tx); matchedRule != nil {
-		return matchedRule.Set.AccountCode
+	if matched := LookupOdooMapping(odooMappings, tx); matched != nil {
+		return matched.Set.AccountCode
 	}
 	return ""
 }
@@ -1308,11 +1324,11 @@ func syncStripeOdooAccountsStage(creds *OdooCredentials, uid int, acc *AccountCo
 	if !quietOdooContext() {
 		printStripeOdooAccountStageHeader(creds, acc, since, until)
 	}
-	rules, err := LoadOdooRules()
+	mappings, err := LoadOdooMappings()
 	if err != nil {
 		return 0, 0, err
 	}
-	if len(rules) == 0 {
+	if len(mappings) == 0 {
 		if !quietOdooContext() {
 			status.Clear()
 			fmt.Printf("  %s %d\n", padRight("Lines to process:", 17), 0)
@@ -1384,18 +1400,18 @@ func syncStripeOdooAccountsStage(creds *OdooCredentials, uid int, acc *AccountCo
 			continue
 		}
 		tx := stripeOdooLineRuleTransaction(acc, line)
-		rule := MatchOdooRule(rules, tx)
-		if rule == nil || rule.Set.AccountCode == "" {
+		matched := LookupOdooMapping(mappings, tx)
+		if matched == nil || matched.Set.AccountCode == "" {
 			continue
 		}
 		reviewed++
-		accountID, ok := accountIDs[rule.Set.AccountCode]
+		accountID, ok := accountIDs[matched.Set.AccountCode]
 		if !ok {
-			accountID, err = findOdooAccountIDByCode(creds, uid, rule.Set.AccountCode)
+			accountID, err = findOdooAccountIDByCode(creds, uid, matched.Set.AccountCode)
 			if err != nil {
 				return reviewed, updated, err
 			}
-			accountIDs[rule.Set.AccountCode] = accountID
+			accountIDs[matched.Set.AccountCode] = accountID
 		}
 		currentAccountID := line.AccountID
 		if currentAccountID == 0 && line.MoveID > 0 {
@@ -1407,12 +1423,12 @@ func syncStripeOdooAccountsStage(creds *OdooCredentials, uid int, acc *AccountCo
 		if currentAccountID == accountID {
 			continue
 		}
-		updatesByAccount[rule.Set.AccountCode] = append(updatesByAccount[rule.Set.AccountCode], line.ID)
+		updatesByAccount[matched.Set.AccountCode] = append(updatesByAccount[matched.Set.AccountCode], line.ID)
 		if line.CounterpartID > 0 {
-			counterpartsByAccount[rule.Set.AccountCode] = append(counterpartsByAccount[rule.Set.AccountCode], line.CounterpartID)
+			counterpartsByAccount[matched.Set.AccountCode] = append(counterpartsByAccount[matched.Set.AccountCode], line.CounterpartID)
 		}
 		if line.MoveID > 0 {
-			movesByAccount[rule.Set.AccountCode] = append(movesByAccount[rule.Set.AccountCode], line.MoveID)
+			movesByAccount[matched.Set.AccountCode] = append(movesByAccount[matched.Set.AccountCode], line.MoveID)
 		}
 		if line.MoveID > 0 {
 			plannedMoveAccountUpdates[line.MoveID] = accountID
@@ -1429,11 +1445,11 @@ func syncStripeOdooAccountsStage(creds *OdooCredentials, uid int, acc *AccountCo
 			moveIDs := uniquePositiveInts(movesByAccount[accountCode])
 			accountID := accountIDs[accountCode]
 			if len(counterpartIDs) == len(lineIDs) && len(moveIDs) > 0 && accountID > 0 {
-				if err := applyOdooRuleAccountBatch(creds, uid, moveIDs, counterpartIDs, accountID, accountCode, status); err != nil {
+				if err := applyOdooMappingAccountBatch(creds, uid, moveIDs, counterpartIDs, accountID, accountCode, status); err != nil {
 					return reviewed, applied, err
 				}
 			} else {
-				if err := applyOdooRuleAccount(creds, uid, lineIDs, accountCode, status); err != nil {
+				if err := applyOdooMappingAccount(creds, uid, lineIDs, accountCode, status); err != nil {
 					return reviewed, applied, err
 				}
 			}
@@ -1815,7 +1831,7 @@ func applyStripeBatchAccountCodes(creds *OdooCredentials, uid int, createdIDs []
 		if showProgress && (done == 1 || done%10 == 0 || done == total) {
 			status.Update("Stripe: applying account rules %d/%d...", done, total)
 		}
-		if err := applyOdooRuleAccount(creds, uid, []int{createdIDs[i]}, accountCode); err != nil {
+		if err := applyOdooMappingAccount(creds, uid, []int{createdIDs[i]}, accountCode); err != nil {
 			Warnf("    %s⚠ rule account %s: %v%s", Fmt.Yellow, accountCode, err, Fmt.Reset)
 		}
 	}
@@ -2528,28 +2544,25 @@ func openStatementFeeImportID(accountID string, openStmtID int) string {
 
 // fetchOdooLineByImportID looks up a single statement line by its unique
 // import id. Returns (0, 0, nil) when no line matches.
-func fetchOdooLineByImportID(creds *OdooCredentials, uid int, journalID int, importID string) (int, float64, error) {
+func fetchOdooLineByImportID(creds *OdooCredentials, uid int, journalID int, importID string) (int, float64, int, error) {
 	result, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
 		"account.bank.statement.line", "search_read",
 		[]interface{}{[]interface{}{
 			[]interface{}{"journal_id", "=", journalID},
 			[]interface{}{"unique_import_id", "=", importID},
 		}},
-		map[string]interface{}{"fields": []string{"id", "amount"}, "limit": 1})
+		map[string]interface{}{"fields": []string{"id", "amount", "move_id"}, "limit": 1})
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
-	var rows []struct {
-		ID     int     `json:"id"`
-		Amount float64 `json:"amount"`
-	}
+	var rows []map[string]interface{}
 	if err := json.Unmarshal(result, &rows); err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	if len(rows) == 0 {
-		return 0, 0, nil
+		return 0, 0, 0, nil
 	}
-	return rows[0].ID, rows[0].Amount, nil
+	return odooInt(rows[0]["id"]), odooFloat(rows[0]["amount"]), odooFieldID(rows[0]["move_id"]), nil
 }
 
 // updateStatementLineFields writes arbitrary fields onto an existing
@@ -2652,7 +2665,7 @@ func fetchCounterpartMoveLinesByMoveID(creds *OdooCredentials, uid int, moveIDs 
 	return result, nil
 }
 
-func applyOdooRuleAccountBatch(creds *OdooCredentials, uid int, moveIDs, counterpartIDs []int, accountID int, accountCode string, status *statusLine) error {
+func applyOdooMappingAccountBatch(creds *OdooCredentials, uid int, moveIDs, counterpartIDs []int, accountID int, accountCode string, status *statusLine) error {
 	moveIDs = uniquePositiveInts(moveIDs)
 	counterpartIDs = uniquePositiveInts(counterpartIDs)
 	if len(moveIDs) == 0 || len(counterpartIDs) == 0 || accountID <= 0 {

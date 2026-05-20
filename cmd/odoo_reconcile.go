@@ -558,6 +558,33 @@ func createOdooPartner(creds *OdooCredentials, uid int, name string) (int, error
 }
 
 func createOdooPartnerBank(creds *OdooCredentials, uid int, partnerID int, accountNumber string) (int, error) {
+	// Pre-check: if this (partner, IBAN) row already exists, reuse it.
+	// Odoo enforces a (acc_number, partner_id, company_id) unique
+	// constraint, and the SAME IBAN can also already be linked to a
+	// DIFFERENT partner in the same company — in that case we surface a
+	// clear error instead of letting the unique-violation bubble up. The
+	// merge step expects callers to have already tried IBAN→partner
+	// lookup; this is the last line of defense.
+	normalized := normalizeBankAccountNumber(accountNumber)
+	if normalized != "" {
+		rows, err := odooSearchReadAllMaps(creds, uid, "res.partner.bank",
+			[]interface{}{[]interface{}{"sanitized_acc_number", "=", normalized}},
+			[]string{"id", "partner_id"},
+			"id asc",
+		)
+		if err == nil {
+			for _, row := range rows {
+				pid := odooFieldID(row["partner_id"])
+				if pid == partnerID {
+					return odooInt(row["id"]), nil
+				}
+			}
+			if len(rows) > 0 {
+				existingPID := odooFieldID(rows[0]["partner_id"])
+				return 0, fmt.Errorf("IBAN %s already linked to partner #%d (caller asked for #%d); reuse that partner instead", accountNumber, existingPID, partnerID)
+			}
+		}
+	}
 	result, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
 		"res.partner.bank", "create",
 		[]interface{}{[]interface{}{map[string]interface{}{
@@ -640,6 +667,15 @@ func findOdooPartnerBankByAccountNumber(creds *OdooCredentials, uid int, account
 	if normalized == "" {
 		return 0, 0, nil
 	}
+	// Try sanitized first, then a fuzzier ilike on the raw acc_number.
+	// We accept any number of matches: if multiple banks exist for the
+	// same IBAN (sometimes possible when partners get merged or archived
+	// records are kept), we still want to reuse one rather than slip
+	// through to "create" and trip the unique (partner, account)
+	// constraint. Prefer the active one with the lowest id for
+	// determinism. We do NOT include archived banks here — the create
+	// path further down already handles that case by catching the
+	// duplicate-create error.
 	rows, err := odooSearchReadAllMaps(creds, uid, "res.partner.bank",
 		[]interface{}{[]interface{}{"sanitized_acc_number", "=", normalized}},
 		[]string{"id", "partner_id", "acc_number", "sanitized_acc_number"},
@@ -658,8 +694,16 @@ func findOdooPartnerBankByAccountNumber(creds *OdooCredentials, uid int, account
 			return 0, 0, err
 		}
 	}
-	if len(rows) != 1 {
+	if len(rows) == 0 {
 		return 0, 0, nil
+	}
+	// Pick the first row that has a partner. Filtering by partner_id > 0
+	// guards against orphaned bank rows (rare but they exist).
+	for _, row := range rows {
+		pid := odooFieldID(row["partner_id"])
+		if pid > 0 {
+			return odooInt(row["id"]), pid, nil
+		}
 	}
 	return odooInt(rows[0]["id"]), odooFieldID(rows[0]["partner_id"]), nil
 }

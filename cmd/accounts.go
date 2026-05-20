@@ -672,8 +672,12 @@ func AccountsCommand(args []string) {
 		return
 	}
 
-	// `chb accounts sync` → fetch source → local, for all accounts.
-	if len(args) >= 1 && args[0] == "sync" {
+	// `chb accounts pull` (alias: deprecated `sync`) → fetch source → local,
+	// for all accounts. Same verb contract as `chb pull` and `chb odoo pull`.
+	if len(args) >= 1 && (args[0] == "pull" || args[0] == "sync") {
+		if args[0] == "sync" {
+			Warnf("%s'chb accounts sync' is deprecated — use 'chb accounts pull' instead%s", Fmt.Dim, Fmt.Reset)
+		}
 		if _, err := AccountsFetchAll(args[1:]); err != nil {
 			Fatalf("%sError:%s %v", Fmt.Red, Fmt.Reset, err)
 		}
@@ -697,9 +701,12 @@ func AccountsCommand(args []string) {
 				action = args[1]
 			}
 			switch action {
-			case "sync":
+			case "pull", "sync":
 				// Pure source→local fetch for one account. Use `chb odoo
-				// journals <id> sync` to push into Odoo afterward.
+				// journals <id> push` to push into Odoo afterward.
+				if action == "sync" {
+					Warnf("%s'chb accounts %s sync' is deprecated — use 'chb accounts %s pull' instead%s", Fmt.Dim, slug, slug, Fmt.Reset)
+				}
 				if err := AccountFetch(slug, args[2:]); err != nil {
 					Fatalf("%sError:%s %v", Fmt.Red, Fmt.Reset, err)
 				}
@@ -1601,7 +1608,7 @@ func AccountOdooLink(slug string, args []string) error {
 
 	uid, err := odooAuth(creds.URL, creds.DB, creds.Login, creds.Password)
 	if err != nil || uid == 0 {
-		return fmt.Errorf("Odoo authentication failed: %v", err)
+		return wrapOdooAuthError(err)
 	}
 
 	// Fetch bank journals
@@ -1698,46 +1705,336 @@ func AccountFetch(slug string, args []string) error {
 	if acc == nil {
 		return fmt.Errorf("account '%s' not found", slug)
 	}
+	verbose := HasFlag(args, "--verbose", "-v") || HasFlag(args, "--debug")
+
+	// Snapshot before-counts so we can report "N new transactions" after.
+	countBefore := accountProviderRawCount(acc)
+	printAccountFetchHeader(acc)
+
 	// Manual / CSV provider: no upstream API to call. Re-generate every
 	// month touched by the CSV so monthly transactions.json files catch
 	// up with anything the operator dropped under latest/providers/.
 	if acc.Provider == "kbcbrussels" {
-		if err := syncKBCAccount(acc); err != nil {
-			return err
+		var kbcErr error
+		if verbose {
+			kbcErr = syncKBCAccount(acc)
+		} else {
+			restore := silenceStdout()
+			kbcErr = syncKBCAccount(acc)
+			restore()
+		}
+		if kbcErr != nil {
+			return kbcErr
 		}
 		UpdateSyncSource("account:"+strings.ToLower(slug), true)
 		refreshAndPersistAccountBalance(acc)
-		fmt.Printf("%sSync done%s in %s\n\n", Fmt.Green, Fmt.Reset, time.Since(startedAt).Round(time.Millisecond))
+		newTxs := accountProviderRawCount(acc) - countBefore
+		if newTxs < 0 {
+			newTxs = 0
+		}
+		printAccountFetchSummary(acc, newTxs, time.Since(startedAt), verbose)
 		return nil
 	}
 	checkpoint := latestAccountSourceCheckpoint(acc)
 	beforeSourceMonths := accountSourceMonthFingerprints(acc)
 	fetchArgs := accountFetchArgsForCheckpoint(*acc, args, checkpoint)
-	if acc.Provider == "etherscan" {
+	if verbose && acc.Provider == "etherscan" {
 		for _, line := range accountSyncPlanLines(acc, accountTransactionSource(*acc), checkpoint, accountFetchArgsHasExplicitRange(args)) {
 			fmt.Printf("  %s\n", line)
 		}
 		fmt.Println()
 	}
-	if _, err := TransactionsSync(fetchArgs); err != nil {
-		return err
+	// Default to quiet: capture the inner sync chatter so the operator
+	// gets a focused summary at the end. --verbose surfaces the per-page
+	// progress for diagnostics.
+	var syncErr error
+	if verbose {
+		_, syncErr = TransactionsSync(fetchArgs)
+	} else {
+		restore := silenceStdout()
+		_, syncErr = TransactionsSync(fetchArgs)
+		restore()
+	}
+	if syncErr != nil {
+		return syncErr
 	}
 	touchedMonths := accountChangedSourceMonths(acc, beforeSourceMonths)
 	if len(touchedMonths) > 0 {
-		if err := GenerateTransactionsForMonths(touchedMonths); err != nil {
-			return fmt.Errorf("generate transactions after fetch: %v", err)
+		if verbose {
+			if err := GenerateTransactionsForMonths(touchedMonths); err != nil {
+				return fmt.Errorf("generate transactions after fetch: %v", err)
+			}
+		} else {
+			restore := silenceStdout()
+			err := GenerateTransactionsForMonths(touchedMonths)
+			restore()
+			if err != nil {
+				return fmt.Errorf("generate transactions after fetch: %v", err)
+			}
 		}
 	}
 	UpdateSyncSource("account:"+strings.ToLower(slug), accountSyncIsFull(args))
-	// Refresh the persisted live-balance cache so a subsequent
-	// `chb accounts <slug>` shows the current on-chain balance without
-	// requiring a separate --refresh call.
+	// Refresh the persisted live-balance cache so the summary below can
+	// print the live balance alongside the local total.
 	refreshAndPersistAccountBalance(acc)
-	if verification := verifyAccountLocalAgainstOnchainCache(acc, nil); verification != nil {
+	if verification := verifyAccountLocalAgainstOnchainCache(acc, nil); verification != nil && verbose {
 		printAccountSyncVerification(verification)
 	}
-	fmt.Printf("%sSync done%s in %s\n\n", Fmt.Green, Fmt.Reset, time.Since(startedAt).Round(time.Millisecond))
+	newTxs := accountProviderRawCount(acc) - countBefore
+	if newTxs < 0 {
+		newTxs = 0
+	}
+	printAccountFetchSummary(acc, newTxs, time.Since(startedAt), verbose)
 	return nil
+}
+
+// accountProviderDisplayName returns the human-friendly source label used
+// in the pull header ("Stripe", "Etherscan", "Monerium", "CSV", …).
+func accountProviderDisplayName(acc *AccountConfig) string {
+	if acc == nil {
+		return ""
+	}
+	switch acc.Provider {
+	case "stripe":
+		return "Stripe"
+	case "etherscan":
+		return "Etherscan"
+	case "monerium":
+		return "Monerium"
+	case "kbcbrussels":
+		return "CSV"
+	}
+	return strings.Title(acc.Provider)
+}
+
+// accountProviderRawCount counts the transactions sitting in the raw
+// provider cache for this account. After a fresh pull this is what the
+// upstream provider currently has, which is the right number to compare
+// local + Odoo against.
+func accountProviderRawCount(acc *AccountConfig) int {
+	if acc == nil {
+		return 0
+	}
+	dataDir := DataDir()
+	switch acc.Provider {
+	case "stripe":
+		n := 0
+		years, _ := os.ReadDir(dataDir)
+		for _, y := range years {
+			if !y.IsDir() || len(y.Name()) != 4 {
+				continue
+			}
+			months, _ := os.ReadDir(filepath.Join(dataDir, y.Name()))
+			for _, m := range months {
+				if !m.IsDir() || len(m.Name()) != 2 {
+					continue
+				}
+				cache, ok := stripesource.LoadCache(stripesource.TransactionCachePath(dataDir, y.Name(), m.Name()))
+				if !ok || !strings.EqualFold(cache.AccountID, acc.AccountID) {
+					continue
+				}
+				n += len(cache.Transactions)
+			}
+		}
+		return n
+	case "etherscan", "monerium":
+		return len(loadAccountOnchainTransfers(acc))
+	case "kbcbrussels":
+		if acc.IBAN == "" {
+			return 0
+		}
+		rows, err := kbcbrusselssource.LoadTransactionsForIBAN(dataDir, acc.IBAN)
+		if err != nil {
+			return 0
+		}
+		return len(rows)
+	}
+	return 0
+}
+
+// printAccountFetchHeader opens a per-account pull with the source label
+// and the last-fetch cursor — so the operator sees "Pulling from Stripe
+// for new transactions since 2025-05-20 11:23" before the fetch runs.
+func printAccountFetchHeader(acc *AccountConfig) {
+	provider := accountProviderDisplayName(acc)
+	last := LastSyncTime("account:" + strings.ToLower(acc.Slug))
+	if last.IsZero() {
+		fmt.Printf("\n%sPulling from %s%s %s(first sync)%s\n",
+			Fmt.Bold, provider, Fmt.Reset, Fmt.Dim, Fmt.Reset)
+		return
+	}
+	fmt.Printf("\n%sPulling from %s for new transactions since %s%s\n",
+		Fmt.Bold, provider, last.In(BrusselsTZ()).Format("2006-01-02 15:04"), Fmt.Reset)
+}
+
+// isOdooSyntheticLine returns true for cache lines that don't correspond
+// to a single upstream transaction — fee-allocation entries chb itself
+// creates to balance the Stripe gross-vs-net booking pattern:
+//
+//   - import_id ending in ":fees" — per-payout fee deduction
+//   - import_id starting with "open:" — aggregate open-statement fee line
+//
+// These are bookkeeping artifacts, not real transactions, so they're
+// excluded from the count when comparing against the upstream provider.
+// The balance still includes them, since the journal's actual balance
+// does include their amounts.
+func isOdooSyntheticLine(ln OdooCacheLine) bool {
+	iid := strings.ToLower(ln.UniqueImportID)
+	if strings.HasSuffix(iid, ":fees") {
+		return true
+	}
+	if strings.HasPrefix(iid, "open:") {
+		return true
+	}
+	return false
+}
+
+// printAccountFetchSummary prints the aligned 3-row comparison block after
+// a per-account pull:
+//
+//	  0 new transactions
+//	  Stripe:           3,593 txs  balance:    982.62 EUR
+//	  Local:            3,593 txs  balance:    982.62 EUR  ✓
+//	  Odoo journal #48: 3,593 txs  balance:    983.60 EUR  ✗
+//
+// ✓ on Local means it matches the Provider snapshot we just fetched.
+// ✓ on Odoo means the linked Odoo journal cache matches Local. Mismatches
+// surface as ✗ and tell the operator what to investigate next.
+//
+// The Odoo line count excludes synthetic fee-allocation lines (see
+// isOdooSyntheticLine) so it can be compared against the real Stripe BT
+// count directly. --verbose adds the journal name + a synthetic-line
+// annotation when any are present.
+func printAccountFetchSummary(acc *AccountConfig, newTxs int, elapsed time.Duration, verbose bool) {
+	if acc == nil {
+		return
+	}
+	currency := accountCurrency(acc)
+	totals := computeAccountTotals(acc)
+	localCount := 0
+	localBalance := 0.0
+	if totals != nil {
+		localCount = totals.TxCount
+		localBalance = totals.CurrentBalance
+		if totals.Currency != "" {
+			currency = totals.Currency
+		}
+	}
+
+	providerCount := accountProviderRawCount(acc)
+	providerBalance := localBalance
+	providerKnown := false
+	if cache := loadBalanceCache(); cache != nil {
+		if v, _, ok := resolveAccountBalance(acc, cache.Balances, nil); ok {
+			providerBalance = v
+			providerKnown = true
+		}
+	}
+
+	type row struct {
+		label   string
+		count   int
+		balance float64
+		match   *bool
+	}
+	var rows []row
+
+	rows = append(rows, row{
+		label:   accountProviderDisplayName(acc) + ":",
+		count:   providerCount,
+		balance: providerBalance,
+	})
+
+	matchLocal := localCount == providerCount && roundCents(localBalance) == roundCents(providerBalance)
+	localRow := row{label: "Local:", count: localCount, balance: localBalance}
+	if providerKnown {
+		localRow.match = &matchLocal
+	}
+	rows = append(rows, localRow)
+
+	var syntheticCount int
+	var syntheticBalance float64
+	if acc.OdooJournalID > 0 {
+		// Default: "Odoo journal #48:". --verbose adds "(Stripe (synced))"
+		// so the operator can confirm they're looking at the right journal
+		// when debugging; the bare ID is enough day-to-day.
+		label := fmt.Sprintf("Odoo journal #%d:", acc.OdooJournalID)
+		if verbose {
+			if name := OdooJournalName(acc.OdooJournalID); name != "" {
+				label = fmt.Sprintf("Odoo journal #%d (%s):", acc.OdooJournalID, name)
+			}
+		}
+		cached, ok := loadLatestOdooJournalLinesCache(acc.OdooJournalID)
+		if !ok {
+			rows = append(rows, row{label: label})
+		} else {
+			var sum, realSum float64
+			realCount := 0
+			for _, ln := range cached {
+				sum += ln.Amount
+				if isOdooSyntheticLine(ln) {
+					syntheticCount++
+					syntheticBalance += ln.Amount
+				} else {
+					realCount++
+					realSum += ln.Amount
+				}
+			}
+			// Compare real-line count + total balance against local. The
+			// balance match still uses the full sum because that's what the
+			// journal actually balances to.
+			matchOdoo := realCount == localCount && roundCents(sum) == roundCents(localBalance)
+			rows = append(rows, row{
+				label:   label,
+				count:   realCount,
+				balance: roundCents(sum),
+				match:   &matchOdoo,
+			})
+		}
+	}
+
+	maxLabel, maxCount := 0, 0
+	for _, r := range rows {
+		if w := displayWidth(r.label); w > maxLabel {
+			maxLabel = w
+		}
+		if c := len(Pluralize(r.count, "tx", "")); c > maxCount {
+			maxCount = c
+		}
+	}
+
+	fmt.Printf("\n  %s%s%s  %s%s%s\n\n",
+		Fmt.Bold, Pluralize(newTxs, "new transaction", ""), Fmt.Reset,
+		Fmt.Dim, elapsed.Round(100*time.Millisecond), Fmt.Reset)
+
+	for _, r := range rows {
+		mark := ""
+		if r.match != nil {
+			if *r.match {
+				mark = " " + Fmt.Green + "✓" + Fmt.Reset
+			} else {
+				mark = " " + Fmt.Red + "✗" + Fmt.Reset
+			}
+		}
+		fmt.Printf("  %s  %s  balance: %s%s\n",
+			padRight(r.label, maxLabel),
+			padLeft(Pluralize(r.count, "tx", ""), maxCount),
+			padLeft(formatAccountDataBalance(r.balance, currency), 14),
+			mark,
+		)
+	}
+
+	// In verbose mode, surface the synthetic-fee detail so the operator
+	// understands why Odoo's full line count is higher than the comparison
+	// row above shows.
+	if verbose && syntheticCount > 0 {
+		fmt.Printf("  %s↳ Odoo journal includes %s totaling %s%s\n",
+			Fmt.Dim,
+			Pluralize(syntheticCount, "synthetic fee allocation", "synthetic fee allocations"),
+			formatAccountDataBalance(roundCents(syntheticBalance), currency),
+			Fmt.Reset)
+	}
+	fmt.Println()
 }
 
 // refreshAndPersistAccountBalance pulls the current live balance from
@@ -2052,6 +2349,10 @@ func odooSyncStageFlagsExplicit(args []string) bool {
 }
 
 func AccountOdooPush(slug string, args []string) error {
+	if HasFlag(args, "--help", "-h", "help") {
+		printAccountSlugHelp(slug)
+		return nil
+	}
 	configs := LoadAccountConfigs()
 	var acc *AccountConfig
 	for i := range configs {
@@ -2075,12 +2376,20 @@ func AccountOdooPush(slug string, args []string) error {
 
 	uid, err := odooAuth(creds.URL, creds.DB, creds.Login, creds.Password)
 	if err != nil || uid == 0 {
-		return fmt.Errorf("Odoo authentication failed: %v", err)
+		return wrapOdooAuthError(err)
 	}
 
 	dryRun := HasFlag(args, "--dry-run")
 	force := HasFlag(args, "--force")
-	skipReconciliation := HasFlag(args, "--skip-reconciliation")
+	// Reconciliation (matching statement lines against invoices/bills) is
+	// opt-in via --reconcile. The default is import-only so a fast sync
+	// doesn't trigger expensive per-line reconciliation work; the
+	// operator can follow up with `chb odoo journals <id> reconcile`
+	// (or pass --reconcile to combine the two in one shot).
+	// --skip-reconciliation is retained as a no-op alias for callers that
+	// pinned the old default semantics.
+	_ = HasFlag(args, "--skip-reconciliation")
+	skipReconciliation := !HasFlag(args, "--reconcile")
 	if HasFlag(args, "--account") {
 		return fmt.Errorf("unknown flag --account for journal sync; use --accounts")
 	}
@@ -2125,7 +2434,6 @@ func AccountOdooPush(slug string, args []string) error {
 	}
 
 	useHistory := HasFlag(args, "--history") || force
-	rescanExisting := !force && (useHistory || !sinceDate.IsZero())
 	effectiveSinceDate := sinceDate
 	sinceLabelOverride := ""
 	partnerOnly := acc.Provider == "stripe" && stages.Explicit && stages.Partners && !stages.Transactions && !stages.Accounts && !stages.Metadata && !stages.Reconcile
@@ -2158,6 +2466,17 @@ func AccountOdooPush(slug string, args []string) error {
 	}
 
 	localBefore := accountLocalOdooSyncSnapshot(acc)
+
+	// Pre-push freshness check: cache must match Odoo's current count +
+	// balance, otherwise we'd plan against stale target state (which could
+	// silently create duplicates or write against deleted lines). --force
+	// skips the check — the operator explicitly opted into rewriting the
+	// journal from scratch, so cache freshness is irrelevant.
+	if !force && !HasFlag(args, "--no-freshness-check") {
+		if err := verifyOdooJournalCacheFresh(creds, uid, acc.OdooJournalID); err != nil {
+			return err
+		}
+	}
 
 	// --force: empty the entire journal first. Stripe handles this inside
 	// the sync itself, so we only run the global wipe for non-Stripe paths.
@@ -2210,6 +2529,22 @@ func AccountOdooPush(slug string, args []string) error {
 		if stages.Transactions {
 			syncedCount = parseStripeUploadCount(summary)
 		}
+	} else if acc.Provider == "kbcbrussels" {
+		// KBC has its own dedicated reconcile/push code (`merge`) that
+		// handles per-row partner+IBAN resolution, the OdooMapping lookup
+		// for account assignment, and the right payment_ref / narration
+		// from the CSV's Description / FreeReference / StandardReference
+		// fields. Routing `sync` through it ensures `--reset` + sync
+		// produces the same clean state as `merge` against an empty
+		// journal — no IBAN-as-partner-name junk, no IBAN-as-payment-ref.
+		// --history is implied: merge always considers the full CSV.
+		if stages.Explicit && (!stages.Transactions || stages.Partners || stages.Accounts || stages.Metadata || stages.Reconcile) {
+			return fmt.Errorf("staged sync flags are currently supported for Stripe journals; use --transactions for this account")
+		}
+		syncErr = mergeKBCJournalWithCSV(creds, uid, acc.OdooJournalID, acc, dryRun, assumeYes, false)
+		if syncErr == nil {
+			summary = "merged from CSV"
+		}
 	} else {
 		if stages.Explicit && (!stages.Transactions || stages.Partners || stages.Accounts || stages.Metadata || stages.Reconcile) {
 			return fmt.Errorf("staged sync flags are currently supported for Stripe journals; use --transactions for this account")
@@ -2220,22 +2555,18 @@ func AccountOdooPush(slug string, args []string) error {
 		syncedCount = result.Synced
 	}
 
-	// Post-sync pass: walk existing Odoo lines for this journal and
-	// reapply any rule whose partner / account differs from what's
-	// already there. Only runs when --history or --since narrows the
-	// scope — without those flags, we trust the latest-cursor sync and
-	// avoid the cost of fetching every line. Honors --dry-run.
+	// Mapping resolution happens at generate time (see applyOdooMapping
+	// in odoo_mapping.go and the generate.go step that calls it). The
+	// push paths above read tx.AccountCode and tx.PartnerID from the
+	// local transactions.json files, so there's no need for a post-sync
+	// walk that recomputes the mapping against existing Odoo lines.
+	// After editing rules.json or odoo_mapping.json, run `chb generate`
+	// to refresh the local files; the next push applies the new
+	// resolutions to any line it creates. To re-apply mappings onto
+	// lines that already exist in Odoo, use
+	// `chb odoo journals <id> categorize`.
 	reviewedCount := 0
 	updatedCount := 0
-	if syncErr == nil && stages.Accounts && rescanExisting && !(acc.Provider == "stripe" && stages.Explicit) {
-		reviewed, applied, err := applyOdooRulesToExistingLines(creds, uid, acc, sinceDate, untilDate, dryRun)
-		if err != nil {
-			Warnf("  %s⚠ rule re-apply: %v%s", Fmt.Yellow, err, Fmt.Reset)
-		} else {
-			reviewedCount = reviewed
-			updatedCount = applied
-		}
-	}
 
 	label := fmt.Sprintf("#%d %s", acc.OdooJournalID, acc.Slug)
 	if syncErr != nil {
@@ -2490,30 +2821,40 @@ func fetchOdooJournalSnapshot(creds *OdooCredentials, uid int, journalID int, cu
 		Label:    fmt.Sprintf("Odoo journal #%d", journalID),
 		Currency: currency,
 	}
-	rows, err := odooSearchReadAllMapsLabeled(creds, uid, "account.bank.statement.line",
-		[]interface{}{[]interface{}{"journal_id", "=", journalID}},
-		[]string{"date", "amount"},
-		"date asc, id asc",
-		fmt.Sprintf("transactions from journal #%d", journalID),
-	)
+
+	// Count + balance via read_group (one RPC, server-side aggregate).
+	// Replaces what used to be a full paginated search_read of every line.
+	count, balance, err := odooJournalAggregate(creds, uid, journalID)
 	if err != nil {
 		return snap, err
 	}
-	for _, row := range rows {
-		snap.TxCount++
-		snap.Balance += odooFloat(row["amount"])
-		if date := odooString(row["date"]); date != "" {
-			if t, err := time.Parse("2006-01-02", date); err == nil {
-				if snap.FirstTxAt.IsZero() || t.Before(snap.FirstTxAt) {
-					snap.FirstTxAt = t
-				}
-				if t.After(snap.LastTxAt) {
-					snap.LastTxAt = t
-				}
-			}
-		}
+	snap.TxCount = count
+	snap.Balance = balance
+	if count == 0 {
+		return snap, nil
 	}
-	snap.Balance = roundCents(snap.Balance)
+
+	// First + last tx date — one small search_read each, limit 1.
+	dateAt := func(order string) (time.Time, error) {
+		result, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
+			"account.bank.statement.line", "search_read",
+			[]interface{}{[]interface{}{[]interface{}{"journal_id", "=", journalID}}},
+			map[string]interface{}{"fields": []string{"date"}, "limit": 1, "order": order})
+		if err != nil {
+			return time.Time{}, err
+		}
+		var rows []map[string]interface{}
+		if err := json.Unmarshal(result, &rows); err != nil || len(rows) == 0 {
+			return time.Time{}, err
+		}
+		return time.Parse("2006-01-02", odooString(rows[0]["date"]))
+	}
+	if t, err := dateAt("date asc, id asc"); err == nil {
+		snap.FirstTxAt = t
+	}
+	if t, err := dateAt("date desc, id desc"); err == nil {
+		snap.LastTxAt = t
+	}
 	return snap, nil
 }
 
@@ -3319,7 +3660,9 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 	partnerCache := map[string]int{}
 	stats := &syncStats{}
 	synced, errors := 0, 0
-	odooRules, _ := LoadOdooRules()
+	// Note: tx.AccountCode / tx.PartnerID are resolved by `chb generate`
+	// via applyOdooMapping; this loop trusts them as-is and does not
+	// re-run the OdooMapping lookup chain.
 	for i, tx := range missing {
 		t := time.Unix(tx.Timestamp, 0).In(BrusselsTZ())
 		amt := signedOdooAmountForTransaction(acc, tx)
@@ -3332,9 +3675,8 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 			partnerID = resolveOdooPartner(creds, uid, tx.Counterparty, partnerEmail, stringMetadata(tx.Metadata, "stripeCustomerId"), tx.Collective, false, partnerCache, stats)
 		}
 
-		matchedRule := MatchOdooRule(odooRules, tx)
-		if matchedRule != nil && matchedRule.Set.PartnerID > 0 {
-			partnerID = matchedRule.Set.PartnerID
+		if tx.PartnerID > 0 {
+			partnerID = tx.PartnerID
 		}
 
 		lineData := map[string]interface{}{
@@ -3383,11 +3725,11 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 			odooLog("    %sreconciling statement line...%s\n", Fmt.Dim, Fmt.Reset)
 			reconcileCreatedStatementLines(creds, uid, createdIDs, false, stats)
 		}
-		if matchedRule != nil && matchedRule.Set.AccountCode != "" {
-			if err := applyOdooRuleAccount(creds, uid, createdIDs, matchedRule.Set.AccountCode); err != nil {
-				Warnf("  %s⚠ rule account %s: %v%s", Fmt.Yellow, matchedRule.Set.AccountCode, err, Fmt.Reset)
+		if tx.AccountCode != "" {
+			if err := applyOdooMappingAccount(creds, uid, createdIDs, tx.AccountCode); err != nil {
+				Warnf("  %s⚠ mapping account %s: %v%s", Fmt.Yellow, tx.AccountCode, err, Fmt.Reset)
 			} else {
-				odooLog("    %s↳ rule: account %s%s\n", Fmt.Dim, matchedRule.Set.AccountCode, Fmt.Reset)
+				odooLog("    %s↳ mapping: account %s%s\n", Fmt.Dim, tx.AccountCode, Fmt.Reset)
 			}
 		}
 		odooLog("    %s✓ done%s\n", Fmt.Green, Fmt.Reset)
@@ -3485,7 +3827,6 @@ func buildOdooBlockchainDryRunPlan(creds *OdooCredentials, uid int, acc *Account
 		return nil, fmt.Errorf("fetch existing Odoo lines for preview: %v", err)
 	}
 
-	odooRules, _ := LoadOdooRules()
 	plan := make([]odooSyncPlanRow, 0, len(txs))
 	for _, tx := range txs {
 		t := time.Unix(tx.Timestamp, 0).In(BrusselsTZ())
@@ -3494,15 +3835,10 @@ func buildOdooBlockchainDryRunPlan(creds *OdooCredentials, uid int, acc *Account
 		paymentRef := buildOdooPaymentRef(tx)
 		action := "create"
 		reason := ""
-		account := ""
+		account := tx.AccountCode
 
-		if matchedRule := MatchOdooRule(odooRules, tx); matchedRule != nil {
-			if matchedRule.Set.AccountCode != "" {
-				account = matchedRule.Set.AccountCode
-			}
-			if matchedRule.Set.PartnerID > 0 {
-				reason = fmt.Sprintf("rule partner #%d", matchedRule.Set.PartnerID)
-			}
+		if tx.PartnerID > 0 {
+			reason = fmt.Sprintf("rule partner #%d", tx.PartnerID)
 		}
 
 		if existingIDs[importID] {
@@ -4750,6 +5086,17 @@ func ensureOdooPartnerCollectiveTag(creds *OdooCredentials, uid, partnerID int, 
 	if partnerID <= 0 {
 		return nil
 	}
+	// Skip archived partners — the write would fail with a confusing
+	// "(Record: res.partner(N,), User: M)" access-error even though the
+	// real cause is that Odoo's ir.rules hide archived records from
+	// modification by non-admin users. We use the local partner cache
+	// to avoid a per-call existence probe; if the cache is missing,
+	// we let the write proceed and surface the error normally.
+	if idx := loadLatestOdooPartnerIndex(DataDir()); idx != nil {
+		if _, ok := idx.byID[partnerID]; !ok {
+			return nil
+		}
+	}
 	values := odooPartnerCollectiveValues(creds, uid, nil, collective)
 	if len(values) == 0 {
 		return nil
@@ -4805,7 +5152,12 @@ func loadAccountTransactions(acc *AccountConfig) []TransactionEntry {
 }
 
 func loadAccountTransactionsForOdoo(acc *AccountConfig) []TransactionEntry {
-	return loadAccountTransactionsWithOptions(acc, true)
+	txs := loadAccountTransactionsWithOptions(acc, true)
+	// Enrich with the Odoo-specific resolution (account_code / partner_id)
+	// computed at generate time. The public transactions.json doesn't
+	// carry it anymore — it lives in providers/odoo/pending/.
+	PopulateOdooPending(DataDir(), txs)
+	return txs
 }
 
 func loadAccountTransactionsWithOptions(acc *AccountConfig, includeInternal bool) []TransactionEntry {
@@ -5488,12 +5840,11 @@ func printAccountSlugHelp(slug string) {
 	fmt.Printf("%sOPTIONS%s (for sync)\n\n", f.Bold, f.Reset)
 	fmt.Printf("  %s--dry-run%s          Preview what would be synced\n", f.Yellow, f.Reset)
 	fmt.Printf("  %s--force%s            Re-sync (delete existing data first)\n", f.Yellow, f.Reset)
-	fmt.Printf("  %s--skip-reconciliation%s  Import lines without matching them to invoices/moves\n", f.Yellow, f.Reset)
+	fmt.Printf("  %s--reconcile%s        Also reconcile imported lines against invoices/bills (off by default)\n", f.Yellow, f.Reset)
 	fmt.Printf("  %s--transactions%s     Stripe-only: import statement lines/statements/fees\n", f.Yellow, f.Reset)
 	fmt.Printf("  %s--partners%s         Stripe-only: link/create partners and collective tags\n", f.Yellow, f.Reset)
 	fmt.Printf("  %s--accounts%s         Stripe-only: apply account rules to journal lines\n", f.Yellow, f.Reset)
 	fmt.Printf("  %s--metadata%s         Stripe-only: refresh descriptions and narration metadata\n", f.Yellow, f.Reset)
-	fmt.Printf("  %s--reconcile%s        Stripe-only: reconcile journal lines\n", f.Yellow, f.Reset)
 	fmt.Printf("  %s--until <date>%s     Stop processing at this date end\n", f.Yellow, f.Reset)
 	fmt.Println()
 

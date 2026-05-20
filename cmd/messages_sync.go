@@ -76,6 +76,7 @@ func MessagesSync(args []string) (int, error) {
 		}
 
 		fmt.Printf("  #%s (%s)\n", name, channelID)
+		Progress(fmt.Sprintf("fetching #%s", name))
 
 		var messages []DiscordMessage
 		var err error

@@ -427,9 +427,9 @@ func TestStripeOdooPaymentRefIncludesTicketEventName(t *testing.T) {
 }
 
 func TestStripeOdooAccountCodeUsesFeeAccount(t *testing.T) {
-	rules := []OdooRule{{
-		Match: OdooRuleMatch{Category: "stripe_fees", Direction: "out"},
-		Set:   OdooRuleSet{AccountCode: "657020"},
+	rules := []OdooMapping{{
+		Match: OdooMappingMatch{Category: "stripe_fees", Direction: "out"},
+		Set:   OdooMappingResult{AccountCode: "657020"},
 	}}
 	tests := []struct {
 		name string
@@ -535,9 +535,9 @@ func TestEnrichStripeBTFromLocalEventMarksTicket(t *testing.T) {
 }
 
 func TestStripeOdooAccountCodeUsesTicketRule(t *testing.T) {
-	rules := []OdooRule{{
-		Match: OdooRuleMatch{Category: "ticket", Direction: "in"},
-		Set:   OdooRuleSet{AccountCode: "700150"},
+	rules := []OdooMapping{{
+		Match: OdooMappingMatch{Category: "ticket", Direction: "in"},
+		Set:   OdooMappingResult{AccountCode: "700150"},
 	}}
 	tx := TransactionEntry{Category: "ticket", Type: "CREDIT"}
 

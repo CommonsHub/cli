@@ -232,6 +232,15 @@ type TransactionEntry struct {
 	// UnmarshalJSON below restores them from metadata when loading.
 	Category   string                 `json:"-"`
 	Collective string                 `json:"-"`
+	// AccountCode and PartnerID are the Odoo-side mapping resolutions
+	// computed at generate time by LookupOdooMapping. They live in
+	// metadata.accountCode / metadata.partnerId in the serialized form
+	// so consumers (KBC merge, Stripe push, categorize) can read them
+	// without re-running the lookup chain. Producers MUST keep these
+	// in sync with rules.json / odoo_mapping.json by re-running
+	// `chb generate` after edits.
+	AccountCode string `json:"-"`
+	PartnerID   int    `json:"-"`
 	Event      string                 `json:"event,omitempty"`
 	Tags       [][]string             `json:"tags,omitempty"`
 	Metadata   map[string]interface{} `json:"metadata,omitempty"`
@@ -255,7 +264,10 @@ type TransactionEntry struct {
 }
 
 // MarshalJSON projects Category and Collective into metadata.<key> so the
-// public JSON never carries the root-level keys (avoiding duplication).
+// public JSON never carries duplicate root-level keys. AccountCode and
+// PartnerID are deliberately NOT projected — those are Odoo-specific and
+// live in providers/odoo/pending/ instead, keeping transactions.json
+// target-agnostic.
 func (tx TransactionEntry) MarshalJSON() ([]byte, error) {
 	type alias TransactionEntry
 	a := alias(tx)
@@ -274,6 +286,11 @@ func (tx TransactionEntry) MarshalJSON() ([]byte, error) {
 		} else {
 			delete(meta, "collective")
 		}
+		// Strip any legacy accountCode/partnerId entries left over from
+		// pre-pending generates so re-running `chb generate` cleanly
+		// migrates older files.
+		delete(meta, "accountCode")
+		delete(meta, "partnerId")
 		if len(meta) == 0 {
 			a.Metadata = nil
 		} else {
@@ -285,13 +302,16 @@ func (tx TransactionEntry) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON populates internal-only convenience fields (Category /
 // Collective) so consumers reading transactions.json keep working without
-// changes. We accept both metadata.<key> (the canonical place) and
-// top-level <key> (for back-compat with older files / test fixtures).
+// changes. AccountCode / PartnerID are no longer emitted by MarshalJSON
+// (they live in providers/odoo/pending/), but we still read them here for
+// back-compat with older files generated before the pending split.
 func (tx *TransactionEntry) UnmarshalJSON(data []byte) error {
 	type alias TransactionEntry
 	aux := struct {
-		Category   string `json:"category"`
-		Collective string `json:"collective"`
+		Category    string  `json:"category"`
+		Collective  string  `json:"collective"`
+		AccountCode string  `json:"accountCode"`
+		PartnerID   float64 `json:"partnerId"`
 		*alias
 	}{alias: (*alias)(tx)}
 	if err := json.Unmarshal(data, &aux); err != nil {
@@ -306,6 +326,23 @@ func (tx *TransactionEntry) UnmarshalJSON(data []byte) error {
 		tx.Collective = aux.Collective
 	} else if tx.Collective == "" {
 		tx.Collective = stringMetadata(tx.Metadata, "collective")
+	}
+	if aux.AccountCode != "" {
+		tx.AccountCode = aux.AccountCode
+	} else if tx.AccountCode == "" {
+		tx.AccountCode = stringMetadata(tx.Metadata, "accountCode")
+	}
+	if aux.PartnerID != 0 {
+		tx.PartnerID = int(aux.PartnerID)
+	} else if tx.PartnerID == 0 {
+		if v, ok := tx.Metadata["partnerId"]; ok {
+			switch n := v.(type) {
+			case float64:
+				tx.PartnerID = int(n)
+			case int:
+				tx.PartnerID = n
+			}
+		}
 	}
 	// Public transactions.json strips TxHash (the canonical handle is the
 	// NIP-73 ID URI). Restore it on load so verification, Odoo push and
@@ -2226,6 +2263,15 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 					counterparty = tx.Description
 				}
 
+				// Stash Stripe's reporting_category in metadata.kind so
+				// rules.json can match on it ({"kind":"payout",...} →
+				// category "payout"). Keeping classification in one
+				// place — rules.json — avoids "magic" categorisation
+				// that lives in code and surprises future readers.
+				if tx.ReportingCategory != "" {
+					metadata["kind"] = strings.ToLower(tx.ReportingCategory)
+				}
+
 				transactions = append(transactions, TransactionEntry{
 					ID:               BuildStripeURI(tx.ID),
 					ProviderID:       tx.ID,
@@ -2699,13 +2745,46 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 		}
 	}
 
-	// Category and collective live only in metadata in the public JSON, so
-	// mirror tx.Category / tx.Collective into the metadata map (or drop the
-	// keys when no value was assigned).
+	// 4b. Canonicalise collective slugs. Upstream sources sometimes use
+	// alternate spellings (Open Collective uses "commonshub-brussels" for
+	// what our chart of accounts calls "commonshub"); collectives.json
+	// declares the aliases. Running this here means downstream — Odoo
+	// mapping lookups, the breakdown view, the analytic-plan accounts — all
+	// see one canonical slug.
+	for i := range transactions {
+		if c := CanonicalCollectiveSlug(transactions[i].Collective); c != transactions[i].Collective {
+			transactions[i].Collective = c
+		}
+	}
+
+	// 5. Odoo mapping — resolves the lookup-driven account_code and
+	// partner_id per tx using the (now-categorised) category/collective.
+	// Persisting these onto transactions.json means push/merge can
+	// trust the local file and never has to call LookupOdooMapping itself
+	// (so changing rules.json or odoo_mapping.json requires re-running
+	// `chb generate`, which is the right contract per CLAUDE.md).
+	if odooMappings, err := LoadOdooMappings(); err == nil && len(odooMappings) > 0 {
+		for i := range transactions {
+			applyOdooMapping(odooMappings, &transactions[i])
+		}
+	}
+
+	// Category and collective live only in metadata in the public JSON,
+	// so mirror the struct fields into the metadata map (or drop the keys
+	// when no value was assigned). AccountCode / PartnerID are NOT
+	// projected into transactions.json — they get written separately to
+	// providers/odoo/pending/<YYYY-MM>.json by writeOdooPendingFromTransactions
+	// below, keeping transactions.json target-agnostic.
 	for i := range transactions {
 		tx := &transactions[i]
 		syncMetadataString(tx, "category", tx.Category)
 		syncMetadataString(tx, "collective", tx.Collective)
+		// Strip any legacy accountCode/partnerId metadata so re-running
+		// generate cleanly migrates older files into the new shape.
+		if tx.Metadata != nil {
+			delete(tx.Metadata, "accountCode")
+			delete(tx.Metadata, "partnerId")
+		}
 	}
 
 	for i := range transactions {
@@ -2838,6 +2917,29 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 
 	txData, _ := json.MarshalIndent(out, "", "  ")
 	writeMonthFile(dataDir, year, month, filepath.Join("generated", "transactions.json"), txData)
+
+	// Write Odoo-specific resolution out to providers/odoo/pending/. The
+	// public transactions.json is now target-agnostic; push paths look up
+	// AccountCode/PartnerID from pending instead.
+	pendingEntries := map[string]OdooPendingEntry{}
+	for _, tx := range transactions {
+		if tx.ID == "" {
+			continue
+		}
+		if tx.AccountCode == "" && tx.PartnerID == 0 {
+			continue
+		}
+		pendingEntries[tx.ID] = OdooPendingEntry{
+			TxURI:       tx.ID,
+			AccountCode: tx.AccountCode,
+			PartnerID:   tx.PartnerID,
+			Category:    tx.Category,
+			Collective:  tx.Collective,
+		}
+	}
+	if err := WriteOdooPending(dataDir, year, month, pendingEntries); err != nil {
+		Warnf("  %s⚠ Could not write Odoo pending file for %s-%s: %v%s", Fmt.Yellow, year, month, err, Fmt.Reset)
+	}
 
 	// Save PII enrichment to private directory
 	if len(piiFile.Enrichments) > 0 {

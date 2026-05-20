@@ -8,78 +8,118 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"time"
 )
 
-// OdooRule applies during Odoo sync: when a transaction matches the
-// criteria in Match, the values in Set are pushed onto the resulting
-// Odoo statement line (partner_id) and the counterpart move line
-// (account_id, resolved from AccountCode).
+// OdooMapping maps a semantic tag (category / collective + direction) to a
+// specific Odoo account.account code and/or res.partner id. Loaded from
+// odoo_mapping.json and applied during `chb generate` (the result lives in
+// providers/odoo/pending/ for Odoo push paths to consume).
 //
-// Both PartnerName and AccountName are human-readable caches stored
-// alongside the IDs to keep `chb odoo rules` reviewable without
-// hitting Odoo on every list.
-type OdooRule struct {
-	Match OdooRuleMatch `json:"match"`
-	Set   OdooRuleSet   `json:"set"`
+// Note: this is a lookup table, not a rule engine. Pattern matching against
+// descriptions / IBANs / amounts happens earlier in rules.json (semantic
+// categorisation → category/collective); odoo_mapping.json then resolves
+// those semantic tags into Odoo identifiers.
+//
+// PartnerName / AccountName are human-readable caches stored alongside the
+// IDs so `chb odoo mapping` is reviewable without hitting Odoo on every list.
+type OdooMapping struct {
+	Match OdooMappingMatch  `json:"match"`
+	Set   OdooMappingResult `json:"set"`
 }
 
-// OdooRuleMatch — currently matches by category, collective, and
-// optionally tx direction ("in" = CREDIT/MINT, "out" = DEBIT/BURN).
-// An empty value means "don't constrain".
-type OdooRuleMatch struct {
+// OdooMappingMatch — matches by category, collective, and direction. An
+// empty value means "don't constrain". Merchant-specific overrides (e.g.
+// "proximus posts to 616030, not the generic utilities account") belong in
+// rules.json with a more specific category name; this file only maps
+// semantic tags → Odoo account/partner identifiers.
+type OdooMappingMatch struct {
 	Category   string `json:"category,omitempty"`
 	Collective string `json:"collective,omitempty"`
 	Direction  string `json:"direction,omitempty"` // "in" | "out" | ""
 }
 
-// OdooRuleSet — what to write on the Odoo line when Match succeeds.
+// OdooMappingResult — what to write on the Odoo line when Match succeeds.
 // Either PartnerID or AccountCode (or both) should be set.
-type OdooRuleSet struct {
+type OdooMappingResult struct {
 	PartnerID   int    `json:"partner_id,omitempty"`
 	PartnerName string `json:"partner_name,omitempty"`
 	AccountCode string `json:"account_code,omitempty"`
 	AccountName string `json:"account_name,omitempty"`
 }
 
-func odooRulesPath() string {
+func odooMappingPath() string {
+	return settingsFilePath("odoo_mapping.json")
+}
+
+// legacyOdooRulesPath returns the pre-rename settings location. Used once
+// by LoadOdooMappings to migrate users automatically.
+func legacyOdooRulesPath() string {
 	return settingsFilePath("odoo_rules.json")
 }
 
-// LoadOdooRules reads odoo_rules.json. Missing file → empty list (not
-// an error) so rules can be opt-in.
-func LoadOdooRules() ([]OdooRule, error) {
-	data, err := os.ReadFile(odooRulesPath())
+// LoadOdooMappings reads odoo_mapping.json (falling back to the legacy
+// odoo_rules.json once, renaming it in place if found). Missing file →
+// empty list (not an error) so mappings can be opt-in.
+func LoadOdooMappings() ([]OdooMapping, error) {
+	path := odooMappingPath()
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		if _, err := os.Stat(legacyOdooRulesPath()); err == nil {
+			if err := os.Rename(legacyOdooRulesPath(), path); err == nil {
+				Warnf("%s'odoo_rules.json' renamed to 'odoo_mapping.json'%s", Fmt.Dim, Fmt.Reset)
+			}
+		}
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, nil
 		}
 		return nil, err
 	}
-	var rules []OdooRule
-	if err := json.Unmarshal(data, &rules); err != nil {
-		return nil, fmt.Errorf("parse %s: %v", odooRulesPath(), err)
+	var mappings []OdooMapping
+	if err := json.Unmarshal(data, &mappings); err != nil {
+		return nil, fmt.Errorf("parse %s: %v", path, err)
 	}
-	return rules, nil
+	return mappings, nil
 }
 
-func saveOdooRules(rules []OdooRule) error {
-	data, err := json.MarshalIndent(rules, "", "  ")
+func saveOdooMappings(mappings []OdooMapping) error {
+	data, err := json.MarshalIndent(mappings, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(odooRulesPath()), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(odooMappingPath()), 0755); err != nil {
 		return err
 	}
-	return os.WriteFile(odooRulesPath(), data, 0644)
+	return os.WriteFile(odooMappingPath(), data, 0644)
 }
 
-// MatchOdooRule returns the first rule whose Match clause is satisfied
-// by the transaction, or nil when no rule applies.
-func MatchOdooRule(rules []OdooRule, tx TransactionEntry) *OdooRule {
+// applyOdooMapping runs LookupOdooMapping for tx and writes the resulting
+// AccountCode / PartnerID back onto the entry. Called once per tx during
+// generate so downstream push/merge code can trust the resolved values on
+// transactions.json without re-running the lookup chain. Idempotent and
+// safe for empty mapping lists (leaves the fields untouched).
+func applyOdooMapping(mappings []OdooMapping, tx *TransactionEntry) {
+	if tx == nil {
+		return
+	}
+	matched := LookupOdooMapping(mappings, *tx)
+	if matched == nil {
+		tx.AccountCode = ""
+		tx.PartnerID = 0
+		return
+	}
+	tx.AccountCode = matched.Set.AccountCode
+	tx.PartnerID = matched.Set.PartnerID
+}
+
+// LookupOdooMapping returns the first mapping whose Match clause is
+// satisfied by the transaction, or nil when none apply. Mappings are
+// evaluated in file order; the operator orders them most-specific-first.
+func LookupOdooMapping(mappings []OdooMapping, tx TransactionEntry) *OdooMapping {
 	cat := txDisplayCategory(tx)
 	coll := txDisplayCollective(tx)
-	for i, r := range rules {
+	for i, r := range mappings {
 		if r.Match.Category != "" && !strings.EqualFold(r.Match.Category, cat) {
 			continue
 		}
@@ -101,17 +141,18 @@ func MatchOdooRule(rules []OdooRule, tx TransactionEntry) *OdooRule {
 			continue // unknown direction — never matches
 		}
 		if r.Match.Category == "" && r.Match.Collective == "" && r.Match.Direction == "" {
-			continue // a rule with no match criteria is a no-op
+			continue // an entry with no match criteria is a no-op
 		}
-		return &rules[i]
+		return &mappings[i]
 	}
 	return nil
 }
 
-// OdooRulesCommand is the `chb odoo rules ...` entry point.
-func OdooRulesCommand(args []string) error {
+// OdooMappingCommand is the `chb odoo mapping ...` entry point. The legacy
+// alias `chb odoo rules` is wired in main.go with a deprecation notice.
+func OdooMappingCommand(args []string) error {
 	if HasFlag(args, "--help", "-h", "help") {
-		printOdooRulesHelp()
+		printOdooMappingHelp()
 		return nil
 	}
 	sub := ""
@@ -120,49 +161,49 @@ func OdooRulesCommand(args []string) error {
 	}
 	switch sub {
 	case "", "list":
-		return printOdooRulesList()
+		return printOdooMappingList()
 	case "add":
-		return odooRulesAdd(args[1:])
+		return odooMappingAdd(args[1:])
 	case "remove", "rm", "delete":
-		return odooRulesRemove(args[1:])
+		return odooMappingRemove(args[1:])
 	case "edit":
-		return odooRulesEdit()
+		return odooMappingEdit()
 	case "path":
-		fmt.Println(odooRulesPath())
+		fmt.Println(odooMappingPath())
 		return nil
 	default:
 		return fmt.Errorf("unknown subcommand %q (try: list, add, remove, edit)", sub)
 	}
 }
 
-func printOdooRulesList() error {
-	rules, err := LoadOdooRules()
+func printOdooMappingList() error {
+	mappings, err := LoadOdooMappings()
 	if err != nil {
 		return err
 	}
-	if len(rules) == 0 {
-		fmt.Printf("\n%sNo Odoo rules defined yet.%s\n", Fmt.Dim, Fmt.Reset)
-		fmt.Printf("  Add one with: %schb odoo rules add --category donation --partner 2666%s\n", Fmt.Cyan, Fmt.Reset)
-		fmt.Printf("  File: %s%s%s\n\n", Fmt.Dim, odooRulesPath(), Fmt.Reset)
+	if len(mappings) == 0 {
+		fmt.Printf("\n%sNo Odoo mappings defined yet.%s\n", Fmt.Dim, Fmt.Reset)
+		fmt.Printf("  Add one with: %schb odoo mapping add --category donation --partner 2666%s\n", Fmt.Cyan, Fmt.Reset)
+		fmt.Printf("  File: %s%s%s\n\n", Fmt.Dim, odooMappingPath(), Fmt.Reset)
 		return nil
 	}
 
-	fmt.Printf("\n%s🪄 Odoo Sync Rules%s  %s(%s)%s\n\n",
-		Fmt.Bold, Fmt.Reset, Fmt.Dim, odooRulesPath(), Fmt.Reset)
+	fmt.Printf("\n%s🪄 Odoo Mappings%s  %s(%s)%s\n\n",
+		Fmt.Bold, Fmt.Reset, Fmt.Dim, odooMappingPath(), Fmt.Reset)
 
 	headers := []string{"#", "When category", "When collective", "Direction", "Set partner", "Set account"}
-	rows := make([][]string, 0, len(rules))
-	for i, r := range rules {
+	rows := make([][]string, 0, len(mappings))
+	for i, r := range mappings {
 		rows = append(rows, []string{
 			fmt.Sprintf("%d", i+1),
 			truncOrDash(r.Match.Category, 18),
 			truncOrDash(r.Match.Collective, 18),
 			truncOrDash(r.Match.Direction, 6),
-			formatRulePartner(r.Set),
-			formatRuleAccount(r.Set),
+			formatMappingPartner(r.Set),
+			formatMappingAccount(r.Set),
 		})
 	}
-	totalRow := []string{"", Pluralize(len(rules), "rule", ""), "", "", "", ""}
+	totalRow := []string{"", Pluralize(len(mappings), "mapping", ""), "", "", "", ""}
 	renderTicketsTable(headers, rows, totalRow, map[int]bool{0: true})
 	return nil
 }
@@ -174,7 +215,7 @@ func truncOrDash(s string, n int) string {
 	return Truncate(s, n)
 }
 
-func formatRulePartner(s OdooRuleSet) string {
+func formatMappingPartner(s OdooMappingResult) string {
 	if s.PartnerID == 0 {
 		return "—"
 	}
@@ -184,7 +225,7 @@ func formatRulePartner(s OdooRuleSet) string {
 	return fmt.Sprintf("#%d", s.PartnerID)
 }
 
-func formatRuleAccount(s OdooRuleSet) string {
+func formatMappingAccount(s OdooMappingResult) string {
 	if s.AccountCode == "" {
 		return "—"
 	}
@@ -194,7 +235,7 @@ func formatRuleAccount(s OdooRuleSet) string {
 	return s.AccountCode
 }
 
-// odooRulesAdd inserts a new rule. Flags:
+// odooMappingAdd inserts a new mapping. Flags:
 //
 //	--category <slug>         (required, the category to match)
 //	--collective <slug>       (optional, additional match constraint)
@@ -202,7 +243,7 @@ func formatRuleAccount(s OdooRuleSet) string {
 //	--account <code|id>       resolves to an Odoo account.account
 //
 // At least one of --partner / --account must be provided.
-func odooRulesAdd(args []string) error {
+func odooMappingAdd(args []string) error {
 	category := GetOption(args, "--category")
 	collective := GetOption(args, "--collective")
 	partnerArg := GetOption(args, "--partner")
@@ -235,7 +276,7 @@ func odooRulesAdd(args []string) error {
 		return fmt.Errorf("Odoo authentication failed: %v", err)
 	}
 
-	set := OdooRuleSet{}
+	set := OdooMappingResult{}
 	if partnerArg != "" {
 		id, name, err := resolveOdooPartnerArg(creds, uid, partnerArg)
 		if err != nil {
@@ -253,30 +294,30 @@ func odooRulesAdd(args []string) error {
 		set.AccountName = name
 	}
 
-	rules, err := LoadOdooRules()
+	mappings, err := LoadOdooMappings()
 	if err != nil {
 		return err
 	}
-	// Replace an existing rule with the exact same Match — keeps the
+	// Replace an existing mapping with the exact same Match — keeps the
 	// list de-duplicated and lets `add` double as `update`.
-	newRule := OdooRule{
-		Match: OdooRuleMatch{Category: category, Collective: collective, Direction: direction},
+	newMapping := OdooMapping{
+		Match: OdooMappingMatch{Category: category, Collective: collective, Direction: direction},
 		Set:   set,
 	}
 	replaced := false
-	for i, r := range rules {
+	for i, r := range mappings {
 		if strings.EqualFold(r.Match.Category, category) &&
 			strings.EqualFold(r.Match.Collective, collective) &&
 			strings.EqualFold(r.Match.Direction, direction) {
-			rules[i] = newRule
+			mappings[i] = newMapping
 			replaced = true
 			break
 		}
 	}
 	if !replaced {
-		rules = append(rules, newRule)
+		mappings = append(mappings, newMapping)
 	}
-	if err := saveOdooRules(rules); err != nil {
+	if err := saveOdooMappings(mappings); err != nil {
 		return err
 	}
 
@@ -284,29 +325,29 @@ func odooRulesAdd(args []string) error {
 	if replaced {
 		verb = "Updated"
 	}
-	fmt.Printf("\n%s✓ %s rule%s\n", Fmt.Green, verb, Fmt.Reset)
+	fmt.Printf("\n%s✓ %s mapping%s\n", Fmt.Green, verb, Fmt.Reset)
 	fmt.Printf("  match: category=%q collective=%q direction=%q\n", category, collective, direction)
 	fmt.Printf("  set:   partner=%s  account=%s\n\n",
-		formatRulePartner(set), formatRuleAccount(set))
-	return printOdooRulesList()
+		formatMappingPartner(set), formatMappingAccount(set))
+	return printOdooMappingList()
 }
 
-// odooRulesRemove removes a rule by 1-based index OR by --category /
+// odooMappingRemove removes a mapping by 1-based index OR by --category /
 // --collective match.
-func odooRulesRemove(args []string) error {
-	rules, err := LoadOdooRules()
+func odooMappingRemove(args []string) error {
+	mappings, err := LoadOdooMappings()
 	if err != nil {
 		return err
 	}
-	if len(rules) == 0 {
-		return fmt.Errorf("no rules to remove")
+	if len(mappings) == 0 {
+		return fmt.Errorf("no mappings to remove")
 	}
 
 	idx := -1
 	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
 		n, err := strconv.Atoi(args[0])
-		if err != nil || n < 1 || n > len(rules) {
-			return fmt.Errorf("invalid rule number %q (1..%d)", args[0], len(rules))
+		if err != nil || n < 1 || n > len(mappings) {
+			return fmt.Errorf("invalid mapping number %q (1..%d)", args[0], len(mappings))
 		}
 		idx = n - 1
 	} else {
@@ -315,7 +356,7 @@ func odooRulesRemove(args []string) error {
 		if category == "" && collective == "" {
 			return fmt.Errorf("specify a 1-based index, --category, or --collective")
 		}
-		for i, r := range rules {
+		for i, r := range mappings {
 			if category != "" && !strings.EqualFold(r.Match.Category, category) {
 				continue
 			}
@@ -326,26 +367,26 @@ func odooRulesRemove(args []string) error {
 			break
 		}
 		if idx < 0 {
-			return fmt.Errorf("no rule matches category=%q collective=%q", category, collective)
+			return fmt.Errorf("no mapping matches category=%q collective=%q", category, collective)
 		}
 	}
 
-	removed := rules[idx]
-	rules = append(rules[:idx], rules[idx+1:]...)
-	if err := saveOdooRules(rules); err != nil {
+	removed := mappings[idx]
+	mappings = append(mappings[:idx], mappings[idx+1:]...)
+	if err := saveOdooMappings(mappings); err != nil {
 		return err
 	}
-	fmt.Printf("\n%s✓ removed rule:%s category=%q collective=%q\n\n",
+	fmt.Printf("\n%s✓ removed mapping:%s category=%q collective=%q\n\n",
 		Fmt.Green, Fmt.Reset, removed.Match.Category, removed.Match.Collective)
-	return printOdooRulesList()
+	return printOdooMappingList()
 }
 
-// odooRulesEdit opens the rules file in the user's $EDITOR.
-func odooRulesEdit() error {
-	path := odooRulesPath()
+// odooMappingEdit opens the mappings file in the user's $EDITOR.
+func odooMappingEdit() error {
+	path := odooMappingPath()
 	if _, err := os.Stat(path); os.IsNotExist(err) {
 		// Ensure a valid empty list so the editor has something parseable.
-		if err := saveOdooRules(nil); err != nil {
+		if err := saveOdooMappings(nil); err != nil {
 			return err
 		}
 	}
@@ -366,10 +407,10 @@ func odooRulesEdit() error {
 	}
 	// Re-validate after edit so a malformed file fails loudly here, not
 	// silently the next time a sync runs.
-	if _, err := LoadOdooRules(); err != nil {
-		return fmt.Errorf("rules file is now invalid: %v", err)
+	if _, err := LoadOdooMappings(); err != nil {
+		return fmt.Errorf("mapping file is now invalid: %v", err)
 	}
-	return printOdooRulesList()
+	return printOdooMappingList()
 }
 
 // resolveOdooPartnerArg accepts a numeric partner id OR a name / name
@@ -413,7 +454,7 @@ func resolveOdooPartnerArg(creds *OdooCredentials, uid int, arg string) (int, st
 
 // resolveOdooAccountArg accepts an account code (e.g. "610100") or an
 // explicit Odoo internal id (prefixed with "#"). Returns the code
-// (canonical for our rule storage) and the account name.
+// (canonical for our mapping storage) and the account name.
 //
 // We always prefer the code lookup — short numeric strings like "7000"
 // are not Odoo ids; they're partial codes (which we surface as a
@@ -495,138 +536,10 @@ func findOdooAccountIDByCode(creds *OdooCredentials, uid int, code string) (int,
 	return id, nil
 }
 
-// applyOdooRulesToExistingLines walks the journal's already-imported
-// statement lines, matches each one to its source local transaction by
-// unique_import_id, and pushes any rule-driven partner_id /
-// account_code that isn't yet reflected in Odoo. Returns
-// (reviewedCount, updatedCount): reviewed = lines in window that had
-// at least one matching rule (so an actual diff was checked); updated
-// = subset that received (or would receive, in dry-run) a write.
-// No-op when no rules exist.
-//
-// since/until narrow the scan window when set; both zero means "all".
-// When dryRun is true, no writes are issued; instead, every divergence
-// is printed to stdout and counted. Use this for `--dry-run` previews.
-func applyOdooRulesToExistingLines(creds *OdooCredentials, uid int, acc *AccountConfig, since, until time.Time, dryRun bool) (reviewed, updated int, err error) {
-	rules, loadErr := LoadOdooRules()
-	if loadErr != nil {
-		return 0, 0, loadErr
-	}
-	if len(rules) == 0 || acc == nil || acc.OdooJournalID == 0 {
-		return 0, 0, nil
-	}
-
-	// Build importID → matched rule for the local txs that have one.
-	localTxs := loadAccountTransactionsForOdoo(acc)
-	ruleByImport := make(map[string]*OdooRule, len(localTxs))
-	for _, tx := range localTxs {
-		r := MatchOdooRule(rules, tx)
-		if r == nil {
-			continue
-		}
-		if r.Set.PartnerID == 0 && r.Set.AccountCode == "" {
-			continue
-		}
-		ruleByImport[buildUniqueImportID(acc, tx)] = r
-	}
-	if len(ruleByImport) == 0 {
-		return 0, 0, nil
-	}
-
-	// Pull the existing Odoo lines (id, partner, move, date, ref) so we
-	// can diff against the rule and skip the no-op cases.
-	rows, fetchErr := odooSearchReadAllMaps(creds, uid, "account.bank.statement.line",
-		[]interface{}{[]interface{}{"journal_id", "=", acc.OdooJournalID}},
-		[]string{"id", "partner_id", "move_id", "unique_import_id", "date", "payment_ref"},
-		"id desc")
-	if fetchErr != nil {
-		return 0, 0, fmt.Errorf("fetch journal lines: %v", fetchErr)
-	}
-
-	for _, row := range rows {
-		// Window filter: skip lines outside [since, until] when set.
-		if !since.IsZero() || !until.IsZero() {
-			lineDate, dateErr := time.Parse("2006-01-02", odooString(row["date"]))
-			if dateErr == nil {
-				if !since.IsZero() && lineDate.Before(since) {
-					continue
-				}
-				if !until.IsZero() && !lineDate.Before(until) {
-					continue
-				}
-			}
-		}
-		importID := odooString(row["unique_import_id"])
-		rule, ok := ruleByImport[importID]
-		if !ok {
-			continue
-		}
-		lineID := odooInt(row["id"])
-		if lineID == 0 {
-			continue
-		}
-		// At this point we know the line is in the window AND has a
-		// matching rule — count it as reviewed even if no diff exists.
-		reviewed++
-		changed := false
-
-		if rule.Set.PartnerID > 0 {
-			currentPartner := odooFieldID(row["partner_id"])
-			if currentPartner != rule.Set.PartnerID {
-				if dryRun {
-					fmt.Printf("    %s↳ would set partner #%d %s on line #%d  %s  %s%s\n",
-						Fmt.Dim, rule.Set.PartnerID, rule.Set.PartnerName, lineID,
-						odooString(row["date"]), Truncate(odooString(row["payment_ref"]), 40), Fmt.Reset)
-				} else {
-					if _, writeErr := odooExec(creds.URL, creds.DB, uid, creds.Password,
-						"account.bank.statement.line", "write",
-						[]interface{}{[]interface{}{lineID}, map[string]interface{}{
-							"partner_id": rule.Set.PartnerID,
-						}}, nil); writeErr != nil {
-						return reviewed, updated, fmt.Errorf("update partner on line #%d: %v", lineID, writeErr)
-					}
-				}
-				changed = true
-			}
-		}
-
-		if rule.Set.AccountCode != "" {
-			ruleAccountID, lookupErr := findOdooAccountIDByCode(creds, uid, rule.Set.AccountCode)
-			if lookupErr != nil {
-				return reviewed, updated, lookupErr
-			}
-			currentCounterpartAccountID := 0
-			currentCounterpartLineID := 0
-			if mid := odooFieldID(row["move_id"]); mid > 0 {
-				cp, accID, cpErr := lookupCounterpartMoveLine(creds, uid, mid)
-				if cpErr == nil {
-					currentCounterpartLineID = cp
-					currentCounterpartAccountID = accID
-				}
-			}
-			if currentCounterpartLineID > 0 && currentCounterpartAccountID != ruleAccountID {
-				if dryRun {
-					fmt.Printf("    %s↳ would set account %s %s on counterpart of line #%d  %s  %s%s\n",
-						Fmt.Dim, rule.Set.AccountCode, rule.Set.AccountName, lineID,
-						odooString(row["date"]), Truncate(odooString(row["payment_ref"]), 40), Fmt.Reset)
-				} else if applyErr := applyOdooRuleAccount(creds, uid, []int{lineID}, rule.Set.AccountCode); applyErr != nil {
-					return reviewed, updated, applyErr
-				}
-				changed = true
-			}
-		}
-
-		if changed {
-			updated++
-		}
-	}
-	return reviewed, updated, nil
-}
-
 // lookupCounterpartMoveLine returns the (line id, account id) of the
-// non-bank leg of the given move. Used to detect whether a rule's
+// non-bank leg of the given move. Used to detect whether a mapping's
 // account_code is already in place before paying the draft/write/post
-// cost in applyOdooRuleAccount.
+// cost in applyOdooMappingAccount.
 func lookupCounterpartMoveLine(creds *OdooCredentials, uid int, moveID int) (int, int, error) {
 	rows, err := odooSearchReadAllMaps(creds, uid, "account.move.line",
 		[]interface{}{[]interface{}{"move_id", "=", moveID}},
@@ -644,11 +557,11 @@ func lookupCounterpartMoveLine(creds *OdooCredentials, uid int, moveID int) (int
 	return 0, 0, nil
 }
 
-// applyOdooRuleAccount rewrites the counterpart account.move.line of
+// applyOdooMappingAccount rewrites the counterpart account.move.line of
 // each just-created bank statement line to use the chart-of-accounts
-// account named by the rule. Same pattern as the internal-transfer
+// account named by the mapping. Same pattern as the internal-transfer
 // marker: draft → write account_id on the non-bank leg → repost.
-func applyOdooRuleAccount(creds *OdooCredentials, uid int, lineIDs []int, accountCode string, progress ...*statusLine) error {
+func applyOdooMappingAccount(creds *OdooCredentials, uid int, lineIDs []int, accountCode string, progress ...*statusLine) error {
 	if len(lineIDs) == 0 || accountCode == "" {
 		return nil
 	}
@@ -697,33 +610,31 @@ func applyOdooRuleAccount(creds *OdooCredentials, uid int, lineIDs []int, accoun
 	return nil
 }
 
-func printOdooRulesHelp() {
+func printOdooMappingHelp() {
 	f := Fmt
 	fmt.Printf(`
-%schb odoo rules%s — Apply Odoo partner / account assignments by category
+%schb odoo mapping%s — Map semantic tags (category/collective) to Odoo account / partner
 
 %sUSAGE%s
-  %schb odoo rules%s                              List all rules
-  %schb odoo rules add --category donation --partner 2666%s
-  %schb odoo rules add --category rent --account 610100%s
-  %schb odoo rules add --category fridge --partner "SELF-SERVED FRIDGE" --direction in%s
-  %schb odoo rules remove 2%s                     Remove the 2nd rule
-  %schb odoo rules remove --category donation%s   Remove by category match
-  %schb odoo rules edit%s                         Open the rules file in $EDITOR
-  %schb odoo rules path%s                         Print the rules file path
+  %schb odoo mapping%s                                List all mappings
+  %schb odoo mapping add --category donation --partner 2666%s
+  %schb odoo mapping add --category rent --account 610100%s
+  %schb odoo mapping add --category fridge --partner "SELF-SERVED FRIDGE" --direction in%s
+  %schb odoo mapping remove 2%s                       Remove the 2nd mapping
+  %schb odoo mapping remove --category donation%s     Remove by category match
+  %schb odoo mapping edit%s                           Open the mapping file in $EDITOR
+  %schb odoo mapping path%s                           Print the mapping file path
 
   %s--direction in%s   only match incoming (CREDIT/MINT) txs
   %s--direction out%s  only match outgoing (DEBIT/BURN) txs
 
 %sBEHAVIOUR%s
-  When syncing a transaction into an Odoo journal, the first matching
-  rule applies its values:
-    • %spartner_id%s is written on the bank statement line
-    • %saccount_code%s is resolved to an account.account id and written
-      on the counterpart account.move.line (replacing the suspense /
-      auto-assigned account)
+  Mappings are applied during %schb generate%s, which writes the resolved
+  partner_id and account_code into providers/odoo/pending/ alongside
+  each transaction. Odoo push paths read those pre-resolved values; they
+  never run the lookup chain themselves.
 
-  Rules are stored in %s%s%s.
+  Mappings are stored in %s%s%s.
 `,
 		f.Bold, f.Reset,
 		f.Bold, f.Reset,
@@ -738,8 +649,7 @@ func printOdooRulesHelp() {
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Bold, f.Reset,
-		f.Yellow, f.Reset,
-		f.Yellow, f.Reset,
-		f.Dim, odooRulesPath(), f.Reset,
+		f.Cyan, f.Reset,
+		f.Dim, odooMappingPath(), f.Reset,
 	)
 }

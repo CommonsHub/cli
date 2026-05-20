@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
 	"regexp"
@@ -316,6 +317,13 @@ func buildMembershipSnapshot(products []MembershipProduct, odooURL, salt string,
 	}
 }
 
+// rpcMaxRetries / rpcRetryBaseDelay control how long we wait when Odoo
+// returns an HTTP 429 (SaaS rate limit). Each retry doubles the delay,
+// capped at 30s — total budget ~63s with the default settings, enough to
+// ride out the usual 30–60s burst window Odoo SaaS imposes.
+const rpcMaxRetries = 5
+const rpcRetryBaseDelay = 2 * time.Second
+
 func rpc(odooURL, service, method string, args []interface{}) (json.RawMessage, error) {
 	payload := map[string]interface{}{
 		"jsonrpc": "2.0",
@@ -328,15 +336,54 @@ func rpc(odooURL, service, method string, args []interface{}) (json.RawMessage, 
 		"id": time.Now().UnixNano(),
 	}
 	data, _ := json.Marshal(payload)
-	resp, err := http.Post(odooURL+"/jsonrpc", "application/json", bytes.NewReader(data))
-	if err != nil {
-		return nil, err
+
+	delay := rpcRetryBaseDelay
+	for attempt := 0; ; attempt++ {
+		resp, err := http.Post(odooURL+"/jsonrpc", "application/json", bytes.NewReader(data))
+		if err != nil {
+			return nil, err
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+
+		// HTTP 429: Odoo SaaS rate-limit. Honour Retry-After when present,
+		// otherwise back off exponentially. Don't surface the HTML page —
+		// that's noise; the operator wants to know "we're being throttled,
+		// waiting Ns".
+		if resp.StatusCode == 429 && attempt < rpcMaxRetries {
+			wait := delay
+			if ra := resp.Header.Get("Retry-After"); ra != "" {
+				if secs, err := time.ParseDuration(ra + "s"); err == nil && secs > 0 {
+					wait = secs
+				}
+			}
+			if wait > 30*time.Second {
+				wait = 30 * time.Second
+			}
+			time.Sleep(wait)
+			delay *= 2
+			continue
+		}
+
+		var rpcResp rpcResponse
+		if err := json.Unmarshal(body, &rpcResp); err != nil {
+			preview := string(body)
+			if len(preview) > 200 {
+				preview = preview[:200] + "…"
+			}
+			preview = strings.ReplaceAll(preview, "\n", " ")
+			if resp.StatusCode == 429 {
+				return nil, fmt.Errorf("rate-limited by Odoo (HTTP 429) after %d retries — try again in a minute", attempt)
+			}
+			return nil, fmt.Errorf("non-JSON response from %s (HTTP %d): %s — got: %q", odooURL+"/jsonrpc", resp.StatusCode, err, preview)
+		}
+		return handleRPCResponse(rpcResp)
 	}
-	defer resp.Body.Close()
-	var rpcResp rpcResponse
-	if err := json.NewDecoder(resp.Body).Decode(&rpcResp); err != nil {
-		return nil, err
-	}
+}
+
+// handleRPCResponse extracts the result or formats the Odoo-side error.
+// Split out from rpc() so the retry loop above stays linear.
+func handleRPCResponse(rpcResp rpcResponse) (json.RawMessage, error) {
 	if rpcResp.Error != nil {
 		msg := rpcResp.Error.Message
 		if rpcResp.Error.Data.Debug != "" {

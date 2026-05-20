@@ -83,7 +83,7 @@ func odooJournalMerge(creds *OdooCredentials, uid int, sourceJournalID int, targ
 	}
 
 	if len(plan.AccountingMoves) > 0 {
-		if !confirmOdooJournalMergeAccountingMoves(sourceJournalID, targetJournalID, len(plan.AccountingMoves)) {
+		if !confirmOdooJournalMergeAccountingMoves(sourceJournalID, targetJournalID, plan.AccountingMoves) {
 			fmt.Println("  Accounting entries were not moved.")
 		} else if err := moveOdooJournalMergeAccountingMoves(creds, uid, plan); err != nil {
 			return err
@@ -327,13 +327,22 @@ func confirmOdooJournalMergeAddMissing(targetJournalID, missingCount int) bool {
 	return resp == "y" || resp == "yes"
 }
 
-func confirmOdooJournalMergeAccountingMoves(sourceJournalID, targetJournalID, moveCount int) bool {
-	fmt.Printf("\n  %sMove %d standalone accounting entries from journal #%d to journal #%d?%s [y/N] ",
-		Fmt.Bold, moveCount, sourceJournalID, targetJournalID, Fmt.Reset)
+func confirmOdooJournalMergeAccountingMoves(sourceJournalID, targetJournalID int, moves []odooJournalMergeAccountingMove) bool {
+	// Show the entries before asking — these are account.move records with
+	// no statement_line_id (manual journal entries, year-end adjustments,
+	// historical imports). The operator needs to see what they are to
+	// decide whether they're keepers or junk to discard with the journal.
+	printOdooJournalMergeAccountingMoveTable(moves)
+	fmt.Printf("\n  %sThese are standalone accounting entries (not linked to a bank statement line):%s\n", Fmt.Dim, Fmt.Reset)
+	fmt.Printf("  %s  manual journal entries, opening balances, year-end adjustments, etc.%s\n", Fmt.Dim, Fmt.Reset)
+	fmt.Printf("  %sSay yes to keep them by reassigning to journal #%d; say no to discard them with journal #%d.%s\n",
+		Fmt.Dim, targetJournalID, sourceJournalID, Fmt.Reset)
+	fmt.Printf("\n  %sMove %d standalone accounting entries from journal #%d to journal #%d?%s [Y/n] ",
+		Fmt.Bold, len(moves), sourceJournalID, targetJournalID, Fmt.Reset)
 	reader := bufio.NewReader(os.Stdin)
 	resp, _ := reader.ReadString('\n')
 	resp = strings.TrimSpace(strings.ToLower(resp))
-	return resp == "y" || resp == "yes"
+	return resp == "" || resp == "y" || resp == "yes"
 }
 
 func confirmOdooJournalMergeDeleteSource(sourceJournalID, sourceLineCount, stillMissingCount int) bool {

@@ -28,11 +28,39 @@ var (
 
 // ── Helpers ──
 
+// txAmount returns the signed gross amount — the customer-facing number,
+// before any processing fees the provider deducted (Stripe especially).
+// For providers that don't separate gross from net (etherscan, kbc),
+// GrossAmount carries the same value as Amount so the fallback is a no-op.
 func txAmount(tx TransactionEntry) float64 {
+	if tx.GrossAmount != 0 {
+		// GrossAmount is unsigned for Stripe but signed for chain providers.
+		// Derive the direction from whichever signed field carries it, and
+		// re-apply on top of |GrossAmount| so both shapes resolve correctly.
+		gross := math.Abs(tx.GrossAmount)
+		signRef := tx.Amount
+		if signRef == 0 {
+			signRef = tx.NormalizedAmount
+		}
+		if signRef == 0 && tx.IsOutgoing() {
+			return -gross
+		}
+		if signRef < 0 {
+			return -gross
+		}
+		return gross
+	}
 	if tx.NormalizedAmount != 0 {
 		return tx.NormalizedAmount
 	}
 	return tx.Amount
+}
+
+// txFee returns the absolute processing fee for this transaction, in the
+// transaction's currency. Zero for providers that don't book fees on the
+// tx line (etherscan, kbc).
+func txFee(tx TransactionEntry) float64 {
+	return math.Abs(tx.Fee)
 }
 
 func txAmountCell(tx TransactionEntry, styled bool) string {
@@ -200,7 +228,26 @@ type TxFilter struct {
 	Currency    string     // "EUR" matches the EUR family; other codes are exact
 	Since       time.Time  // inclusive lower bound
 	Until       time.Time  // inclusive upper bound (end-of-day handled by caller)
-	Tags        [][]string // all Nostr-style tags must match
+	Tags        [][]string // all Nostr-style tags must match (AND across keys)
+	// AnyTags holds OR-groups: a tx passes if for each group at least one
+	// tag in that group matches. Powers `--category foo,bar,baz` where the
+	// tx need only match ONE of the listed categories.
+	AnyTags [][][]string
+	// SearchAny: each entry is a (lower-cased) substring; a tx passes if ANY
+	// entry matches against the tx's searchable text (counterparty +
+	// description + payment refs). Repeated --search flags accumulate here.
+	SearchAny []string
+	// Amount filters by absolute gross magnitude with an optional operator
+	// (==, >, <, >=, <=). nil = no filter. Magnitude not signed amount —
+	// operators think "€100 transactions", not "+€100 vs -€100"; direction
+	// is what --direction is for.
+	Amount *AmountFilter
+}
+
+// AmountFilter is one comparison constraint on the absolute gross of a tx.
+type AmountFilter struct {
+	Op    string  // "==", ">", "<", ">=", "<="
+	Value float64
 }
 
 func loadAllTransactions(currencyFilter string) []TransactionEntry {
@@ -373,7 +420,120 @@ func (f TxFilter) matches(tx TransactionEntry) bool {
 			return false
 		}
 	}
+	for _, group := range f.AnyTags {
+		anyMatch := false
+		for _, tag := range group {
+			if transactionHasTag(tx, tag) {
+				anyMatch = true
+				break
+			}
+		}
+		if !anyMatch {
+			return false
+		}
+	}
+	if len(f.SearchAny) > 0 {
+		hay := txSearchableText(tx)
+		anyMatch := false
+		for _, needle := range f.SearchAny {
+			if strings.Contains(hay, needle) {
+				anyMatch = true
+				break
+			}
+		}
+		if !anyMatch {
+			return false
+		}
+	}
+	if f.Amount != nil {
+		abs := roundCents(math.Abs(txAmount(tx)))
+		v := roundCents(f.Amount.Value)
+		switch f.Amount.Op {
+		case "==", "":
+			if abs != v {
+				return false
+			}
+		case ">":
+			if abs <= v {
+				return false
+			}
+		case ">=":
+			if abs < v {
+				return false
+			}
+		case "<":
+			if abs >= v {
+				return false
+			}
+		case "<=":
+			if abs > v {
+				return false
+			}
+		}
+	}
 	return true
+}
+
+// parseAmountFilter accepts "100", "=100", "==100", ">10", ">=10", "<5",
+// "<=5" (whitespace around the operator is optional). Returns an
+// AmountFilter or an error suitable for printing.
+func parseAmountFilter(raw string) (*AmountFilter, error) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return nil, nil
+	}
+	op := "=="
+	switch {
+	case strings.HasPrefix(s, ">="):
+		op = ">="
+		s = s[2:]
+	case strings.HasPrefix(s, "<="):
+		op = "<="
+		s = s[2:]
+	case strings.HasPrefix(s, "=="):
+		s = s[2:]
+	case strings.HasPrefix(s, ">"):
+		op = ">"
+		s = s[1:]
+	case strings.HasPrefix(s, "<"):
+		op = "<"
+		s = s[1:]
+	case strings.HasPrefix(s, "="):
+		s = s[1:]
+	}
+	s = strings.TrimSpace(s)
+	v, err := strconv.ParseFloat(s, 64)
+	if err != nil {
+		return nil, fmt.Errorf("invalid --amount value %q (expected: 100, >10, <=1000.40, etc.)", raw)
+	}
+	return &AmountFilter{Op: op, Value: v}, nil
+}
+
+// txSearchableText returns the concatenated lower-cased text fields a
+// --search query runs against. Includes the visible cells (counterparty,
+// description, category, collective) plus the raw payment-ref and Stripe
+// customer name when present — so a search for "openletter" hits both
+// "donation openletter" descriptions and any tagged collective.
+func txSearchableText(tx TransactionEntry) string {
+	parts := []string{
+		tx.Counterparty,
+		txDisplayCounterparty(tx),
+		txDisplayDescription(tx),
+		tx.Category,
+		tx.Collective,
+		tx.Event,
+		tx.Application,
+	}
+	if desc := stringMetadata(tx.Metadata, "description"); desc != "" {
+		parts = append(parts, desc)
+	}
+	if pr := stringMetadata(tx.Metadata, "paymentRef"); pr != "" {
+		parts = append(parts, pr)
+	}
+	if name := stringMetadata(tx.Metadata, "customerName"); name != "" {
+		parts = append(parts, name)
+	}
+	return strings.ToLower(strings.Join(parts, " "))
 }
 
 // accountSlugMatchesTx returns true when a user-supplied --account value
@@ -2455,18 +2615,144 @@ func printTransactionsCSV(txs []TransactionEntry) {
 	}
 }
 
-// printTransactionsTable renders a non-interactive, plain-text table to
-// stdout — the default output for `chb transactions`. The interactive
-// browser is only opened when -i/--interactive is passed.
+// printTransactionsTable renders a non-interactive, plain-text view to
+// stdout — the default output for `chb transactions`. The layout is:
+//
+//   1. one-line per-currency totals (in / out / fees / net)
+//   2. per-category gross breakdown
+//   3. the actual rows table
+//
+// Putting the summary on top means an operator scanning a wide period can
+// answer "how much did we make this quarter?" without scrolling past
+// hundreds of rows. The breakdown is the natural drill-down before going
+// row by row.
 func printTransactionsTable(filter TxFilter, txs []TransactionEntry) {
 	if len(txs) == 0 {
 		fmt.Printf("\n%sNo transactions match the filter%s\n\n", Fmt.Dim, Fmt.Reset)
 		return
 	}
 
+	// Aggregate first so the header has totals + category breakdown.
+	type sums struct{ pos, neg, net, fees float64 }
+	byCur := map[string]*sums{}
+	curOrder := []string{}
+	// Category breakdown bucket: (currency, category) → signed gross sum.
+	// Tracked per-currency so multi-currency views don't conflate amounts;
+	// for the common single-currency case it collapses to one row each.
+	type catSum struct {
+		category string
+		currency string
+		gross    float64
+		n        int
+	}
+	catBuckets := map[string]*catSum{} // key: currency + "|" + category
+	catOrder := []string{}
+
+	for _, tx := range txs {
+		c := tx.Currency
+		if c == "" {
+			c = "EUR"
+		}
+		s, ok := byCur[c]
+		if !ok {
+			s = &sums{}
+			byCur[c] = s
+			curOrder = append(curOrder, c)
+		}
+		amt := txAmount(tx) // signed gross
+		s.net += amt
+		if amt >= 0 {
+			s.pos += amt
+		} else {
+			s.neg += amt
+		}
+		s.fees += txFee(tx)
+
+		cat := txDisplayCategory(tx)
+		if cat == "" || cat == "—" {
+			cat = "(uncategorised)"
+		}
+		key := c + "|" + cat
+		b, ok := catBuckets[key]
+		if !ok {
+			b = &catSum{category: cat, currency: c}
+			catBuckets[key] = b
+			catOrder = append(catOrder, key)
+		}
+		b.gross += amt
+		b.n++
+	}
+
+	// ── 1. Header: totals per currency ──
+	fmt.Println()
+	for _, c := range curOrder {
+		s := byCur[c]
+		label := "Totals"
+		if len(curOrder) > 1 {
+			label = c
+		}
+		feesPart := ""
+		if s.fees > 0 {
+			feesPart = fmt.Sprintf("   fees %s%s%s", Fmt.Yellow, formatBalancePlain(s.fees, c), Fmt.Reset)
+		}
+		fmt.Printf("  %s%s%s  %s%d txs%s   in %s%s%s   out %s%s%s%s   net %s%s%s\n",
+			Fmt.Bold, label, Fmt.Reset,
+			Fmt.Dim, len(txs), Fmt.Reset,
+			Fmt.Green, formatBalancePlain(s.pos, c), Fmt.Reset,
+			Fmt.Red, formatBalancePlain(s.neg, c), Fmt.Reset,
+			feesPart,
+			Fmt.Bold, formatBalancePlain(s.net, c), Fmt.Reset,
+		)
+	}
+
+	// ── 2. Per-category gross breakdown ──
+	// Sort categories within each currency by descending |gross| so the
+	// biggest movers float to the top of the list.
+	sort.SliceStable(catOrder, func(i, j int) bool {
+		ai, bi := catBuckets[catOrder[i]], catBuckets[catOrder[j]]
+		if ai.currency != bi.currency {
+			// Preserve currency grouping by first-seen order.
+			for _, c := range curOrder {
+				if c == ai.currency {
+					return true
+				}
+				if c == bi.currency {
+					return false
+				}
+			}
+		}
+		return math.Abs(ai.gross) > math.Abs(bi.gross)
+	})
+	if len(catOrder) > 0 {
+		fmt.Printf("\n  %sBy category%s\n", Fmt.Dim, Fmt.Reset)
+		maxNameW := 14
+		for _, k := range catOrder {
+			if w := displayWidth(catBuckets[k].category); w > maxNameW {
+				maxNameW = w
+			}
+		}
+		if maxNameW > 28 {
+			maxNameW = 28
+		}
+		for _, k := range catOrder {
+			b := catBuckets[k]
+			name := Truncate(b.category, maxNameW)
+			line := fmt.Sprintf("    %s  %4d  %s",
+				padRight(name, maxNameW),
+				b.n,
+				padLeft(formatBalancePlain(b.gross, b.currency), 14),
+			)
+			if len(curOrder) > 1 {
+				line += "  " + Fmt.Dim + b.currency + Fmt.Reset
+			}
+			fmt.Println(line)
+		}
+	}
+	fmt.Println()
+
+	// ── 3. The table itself ──
 	showAccountColumn := filter.AccountSlug == ""
 	cols := transactionTableColumns(showAccountColumn, false)
-
 	headers := txColumnHeaders(cols)
 	rightAlign := map[int]bool{}
 	for i, col := range cols {
@@ -2474,7 +2760,6 @@ func printTransactionsTable(filter TxFilter, txs []TransactionEntry) {
 			rightAlign[i] = true
 		}
 	}
-
 	rows := make([][]string, 0, len(txs))
 	for _, tx := range txs {
 		row := make([]string, len(cols))
@@ -2494,9 +2779,11 @@ func printTransactionsTable(filter TxFilter, txs []TransactionEntry) {
 		}
 		rows = append(rows, row)
 	}
-
 	totalRow := make([]string, len(cols))
 	totalRow[0] = Pluralize(len(txs), "transaction", "")
+	if amtIdx := txColumnIndex(cols, txColumnAmount); amtIdx >= 0 && len(curOrder) == 1 {
+		totalRow[amtIdx] = formatBalancePlain(byCur[curOrder[0]].net, curOrder[0])
+	}
 	renderTicketsTable(headers, rows, totalRow, rightAlign)
 }
 
@@ -2606,18 +2893,60 @@ func parseTxListFlags(args []string) (TxFilter, int, int, error) {
 			f.Tags = append(f.Tags, tag)
 		}
 	}
+	// Single-value tag filters (AND across keys, exact match on value).
 	for _, alias := range []struct {
 		flag string
 		key  string
 	}{
-		{"--category", "category"},
-		{"--collective", "collective"},
 		{"--event", "event"},
 		{"--application", "application"},
 		{"--payment-link", "paymentLink"},
 	} {
 		if value := GetOption(args, alias.flag); value != "" {
 			addTransactionTag(&f.Tags, alias.key, value)
+		}
+	}
+	// Multi-value tag filters (OR within the key — comma-separated values).
+	// Example: --category membership,donation,ticket matches any tx whose
+	// category is one of those. This makes the common "show me revenue txs
+	// across a few related categories" case a one-liner.
+	for _, alias := range []struct {
+		flag string
+		key  string
+	}{
+		{"--category", "category"},
+		{"--collective", "collective"},
+	} {
+		raw := GetOption(args, alias.flag)
+		if raw == "" {
+			continue
+		}
+		values := []string{}
+		for _, v := range strings.Split(raw, ",") {
+			v = strings.TrimSpace(v)
+			if v != "" {
+				values = append(values, v)
+			}
+		}
+		if len(values) == 1 {
+			addTransactionTag(&f.Tags, alias.key, values[0])
+		} else if len(values) > 1 {
+			group := make([][]string, 0, len(values))
+			for _, v := range values {
+				group = append(group, []string{alias.key, v})
+			}
+			f.AnyTags = append(f.AnyTags, group)
+		}
+	}
+	// --search: case-insensitive substring match against counterparty,
+	// description, payment ref, and display-friendly variants. Repeatable;
+	// terms within a single --search are AND'd (all substrings must appear),
+	// repeated --search flags are OR'd (any matches). Keeps the common cases
+	// — "show me everything mentioning openletter" and "show me txs
+	// matching 'membership OR donation'" — both spellable.
+	for _, term := range GetOptions(args, "--search") {
+		if t := strings.TrimSpace(term); t != "" {
+			f.SearchAny = append(f.SearchAny, strings.ToLower(t))
 		}
 	}
 
@@ -2634,6 +2963,13 @@ func parseTxListFlags(args []string) (TxFilter, int, int, error) {
 		}
 	}
 
+	if s := GetOption(args, "--amount"); s != "" {
+		af, err := parseAmountFilter(s)
+		if err != nil {
+			return f, 0, 0, err
+		}
+		f.Amount = af
+	}
 	if s := GetOption(args, "--since"); s != "" {
 		t, ok := ParseSinceDate(s)
 		if !ok {
@@ -2711,8 +3047,13 @@ func printTransactionsBrowserHelp() {
 %sFILTERS%s
   %s--account <slug>%s     Limit to one account (e.g. savings, stripe-asbl)
   %s--currency <CODE>%s    EUR (matches the EUR family), CHT, etc.
-  %s--category <slug>%s    Match tag ["category", slug]
-  %s--collective <slug>%s  Match tag ["collective", slug]
+  %s--category <a,b,…>%s   Match category (comma-separated → any-of)
+  %s--collective <a,b,…>%s Match collective (comma-separated → any-of)
+  %s--search <text>%s      Substring match against counterparty, description,
+                       payment ref (repeatable → any-of)
+  %s--amount <expr>%s     Filter by absolute gross magnitude. Supports
+                       "100", ">10", "<1000.40", ">=50", "<=200"
+                       (quote the operator to escape shell redirection)
   %s--event <id>%s         Match tag ["event", id]
   %s--application <slug>%s Match tag ["application", slug]
   %s--payment-link <id>%s  Match tag ["paymentLink", id]
@@ -2756,6 +3097,8 @@ func printTransactionsBrowserHelp() {
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Bold, f.Reset, // FILTERS
+		f.Yellow, f.Reset,
+		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,

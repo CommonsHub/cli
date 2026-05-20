@@ -72,6 +72,7 @@ func ImagesSync(args []string) (int, error) {
 
 	scopes := collectImageSyncScopes(dataDir, years, startMonth, endMonth, isHistory)
 	for _, scope := range scopes {
+		Progress(fmt.Sprintf("%s-%s", scope.Year, scope.Month))
 		if discordToken != "" {
 			d, s := syncDiscordImages(dataDir, scope.Year, scope.Month, scope.Label, discordToken, force)
 			totalDiscord += d

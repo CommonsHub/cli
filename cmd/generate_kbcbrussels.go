@@ -112,10 +112,17 @@ func kbcRowToTransactionEntry(acc AccountConfig, row kbcbrusselssource.Transacti
 	}
 	counterparty := row.CounterpartyName
 	if counterparty == "" {
+		// Card payments don't fill CounterpartyName — try to recover the
+		// merchant from the description before falling back to IBAN /
+		// raw text. Without this, the IBAN ends up as the partner name
+		// in Odoo (or worse, the raw "PAYMENT VIA …" prefix).
+		counterparty = kbcbrusselssource.MerchantFromDescription(row.Description)
+	}
+	if counterparty == "" {
 		counterparty = row.CounterpartyIBAN
 	}
 	if counterparty == "" {
-		counterparty = row.Description
+		counterparty = kbcbrusselssource.CleanDescription(row.Description)
 	}
 
 	desc := kbcbrusselssource.PreferredDescription(row)

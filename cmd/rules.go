@@ -17,10 +17,16 @@ type RuleMatch struct {
 	Account     string   `json:"account,omitempty"`     // account slug (fridge, coffee, stripe, savings)
 	Provider    string   `json:"provider,omitempty"`    // stripe, etherscan, monerium
 	Currency    string   `json:"currency,omitempty"`    // EUR, EURe, EURb, CHT
-	Amount      *float64 `json:"amount,omitempty"`      // exact signed amount, rounded to cents
+	Amount      *float64 `json:"amount,omitempty"`      // exact signed GROSS amount, rounded to cents
 	Direction   string   `json:"direction,omitempty"`   // "in" or "out"
 	Application string   `json:"application,omitempty"` // stripe connect app: luma, opencollective, etc.
 	PaymentLink string   `json:"paymentLink,omitempty"` // Stripe Checkout payment link ID
+	// Kind matches the provider-native classifier stashed in
+	// metadata.kind by each provider's generate step. For Stripe this is
+	// the reporting_category (charge / fee / payout / refund / …). Useful
+	// for catching payouts and other system-driven movements that have no
+	// description / IBAN / counterparty for the other matchers to lock onto.
+	Kind string `json:"kind,omitempty"`
 }
 
 // RuleAssign defines what a matching rule assigns.
@@ -96,7 +102,11 @@ func (r *Rule) MatchesTransaction(tx TransactionEntry) bool {
 	}
 
 	if m.Amount != nil {
-		if roundCents(signedOdooAmountForTransaction(&AccountConfig{Provider: tx.Provider}, tx)) != roundCents(*m.Amount) {
+		// Match against the signed GROSS amount (txAmount), not net.
+		// Operators think in gross — "the €10 subscription rule" should
+		// catch a €10 Stripe charge regardless of the ~€0.30 fee that
+		// makes the net €9.70.
+		if roundCents(txAmount(tx)) != roundCents(*m.Amount) {
 			return false
 		}
 	}
@@ -125,6 +135,16 @@ func (r *Rule) MatchesTransaction(tx TransactionEntry) bool {
 	if m.PaymentLink != "" {
 		txPaymentLink := firstNonEmptyStripeMetadata(tx.Metadata, "paymentLink", "payment_link")
 		if !strings.EqualFold(m.PaymentLink, txPaymentLink) {
+			return false
+		}
+	}
+
+	if m.Kind != "" {
+		// metadata.kind is the provider-native classifier — for Stripe this
+		// is the reporting_category ("payout", "fee", "charge", "refund").
+		// We exact-match (case-insensitive); glob isn't needed here since
+		// Stripe's category vocabulary is small and stable.
+		if !strings.EqualFold(m.Kind, stringMetadata(tx.Metadata, "kind")) {
 			return false
 		}
 	}
@@ -218,6 +238,9 @@ func (r *Rule) RuleSummary() string {
 	}
 	if r.Match.IBAN != "" {
 		parts = append(parts, fmt.Sprintf("iban: %s", r.Match.IBAN))
+	}
+	if r.Match.Kind != "" {
+		parts = append(parts, fmt.Sprintf("kind: %s", r.Match.Kind))
 	}
 	if len(parts) == 0 {
 		return "(no conditions)"
