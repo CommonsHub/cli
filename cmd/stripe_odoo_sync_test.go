@@ -428,7 +428,7 @@ func TestStripeOdooPaymentRefIncludesTicketEventName(t *testing.T) {
 
 func TestStripeOdooAccountCodeUsesFeeAccount(t *testing.T) {
 	rules := []OdooMapping{{
-		Match: OdooMappingMatch{Category: "stripe_fees", Direction: "out"},
+		Match: OdooMappingMatch{Category: "stripe_fee", Direction: "out"},
 		Set:   OdooMappingResult{AccountCode: "657020"},
 	}}
 	tests := []struct {
@@ -463,7 +463,7 @@ func TestStripeFeePaymentRefUsesStripeDescription(t *testing.T) {
 	bt := stripesource.Transaction{
 		Type:        "stripe_fee",
 		Description: "Automatic Taxes (2026-05-17): Automatic tax",
-		Metadata:    map[string]interface{}{"category": "stripe_fees"},
+		Metadata:    map[string]interface{}{"category": "stripe_fee"},
 	}
 	tx := stripeRuleTransaction(&AccountConfig{Slug: "stripe", AccountID: "acct_ABC"}, bt, -1.23)
 	if got := stripeOdooPaymentRef(bt, tx); got != bt.Description {
@@ -474,8 +474,8 @@ func TestStripeFeePaymentRefUsesStripeDescription(t *testing.T) {
 	if err := json.Unmarshal([]byte(narr), &meta); err != nil {
 		t.Fatalf("narration json: %v", err)
 	}
-	if got := metaString(meta, "category"); got != "stripe_fees" {
-		t.Fatalf("category = %q, want stripe_fees", got)
+	if got := metaString(meta, "category"); got != "stripe_fee" {
+		t.Fatalf("category = %q, want stripe_fee", got)
 	}
 	if got, _ := meta["stripeFee"].(bool); !got {
 		t.Fatalf("stripeFee tag missing in narration: %#v", meta)
@@ -484,7 +484,7 @@ func TestStripeFeePaymentRefUsesStripeDescription(t *testing.T) {
 
 func TestStripeFeeNarrationNeedsUpdateIgnoresUnrelatedMetadata(t *testing.T) {
 	current := map[string]interface{}{
-		"category":          "stripe_fees",
+		"category":          "stripe_fee",
 		"stripeFee":         true,
 		"stripeDescription": "Automatic Taxes (2026-05-17): Automatic tax",
 		"description":       "Automatic Taxes (2026-05-17): Automatic tax",
@@ -492,7 +492,7 @@ func TestStripeFeeNarrationNeedsUpdateIgnoresUnrelatedMetadata(t *testing.T) {
 		"legacyOnly":        "kept",
 	}
 	desired := map[string]interface{}{
-		"category":          "stripe_fees",
+		"category":          "stripe_fee",
 		"stripeFee":         true,
 		"stripeDescription": "Automatic Taxes (2026-05-17): Automatic tax",
 		"description":       "Automatic Taxes (2026-05-17): Automatic tax",

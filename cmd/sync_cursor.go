@@ -40,6 +40,17 @@ type SyncCursor struct {
 	ContentHash    string    `json:"contentHash,omitempty"`
 	MaxSourceMTime time.Time `json:"maxSourceMTime,omitempty"`
 	Count          int       `json:"count,omitempty"` // last-known item count, for sanity checks
+
+	// DestCount / DestBalanceCents capture the destination's state
+	// after the last successful push (e.g. Odoo journal line count +
+	// summed amount in cents). Used by push short-circuits to detect
+	// drift on the destination side — a cursor that says "local
+	// unchanged since last push" is only safe to act on when the
+	// destination also looks the same as we left it. Without this,
+	// deletions or external edits on Odoo go unnoticed and the next
+	// push silently skips everything.
+	DestCount        int   `json:"destCount,omitempty"`
+	DestBalanceCents int64 `json:"destBalanceCents,omitempty"`
 }
 
 func syncCursorDir() string {

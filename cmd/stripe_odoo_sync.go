@@ -38,6 +38,32 @@ import (
 // matches on it (via strings.Contains) to skip the post-push reconcile.
 const stripeSummaryCursorMatched = "already in sync (cursor)"
 
+// destStillMatchesCursor verifies that Odoo's current journal
+// aggregate matches the destination state we recorded after the last
+// successful push. Returns true when they match. False on confirmed
+// drift OR on a cursor missing the dest snapshot (old chb format) —
+// in the latter case we deliberately force one full pass so the
+// drift-detection invariant is populated. Without that, an existing
+// stale cursor would keep short-circuiting forever.
+//
+// One read_group RPC, same call the post-push stamper uses.
+func destStillMatchesCursor(creds *OdooCredentials, uid int, journalID int, cur SyncCursor) bool {
+	if cur.DestCount == 0 && cur.DestBalanceCents == 0 {
+		// Old cursor format with no destination snapshot. Force a
+		// full pass so the next post-push stamp populates the new
+		// fields; from then on the short-circuit can be trusted.
+		return false
+	}
+	liveCount, liveBalance, err := odooJournalAggregate(creds, uid, journalID)
+	if err != nil {
+		// Aggregation failure is transient; treat as "matches" so we
+		// don't force a full push on a single flaky RPC.
+		return true
+	}
+	liveCents := int64(math.Round(liveBalance * 100))
+	return liveCount == cur.DestCount && liveCents == cur.DestBalanceCents
+}
+
 func syncStripeChronological(
 	acc *AccountConfig,
 	creds *OdooCredentials,
@@ -100,18 +126,30 @@ func syncStripeChronological(
 	}
 
 	// Local-first cursor short-circuit: if our saved cursor's last
-	// import id + count matches what we have locally, there's nothing
-	// new to push — exit before any Odoo RPC. Catches the common case
-	// where Stripe returned no new BTs since last sync. --history /
-	// --force / explicit date windows bypass to force the full check.
-	// Caller (AccountOdooPush) recognises the "(cursor)" summary
-	// suffix and skips the follow-up auto-reconcile pass.
+	// import id + count matches what we have locally AND Odoo's
+	// destination aggregate still matches what we left there after
+	// the last push, there's nothing new to push — exit before any
+	// per-BT processing. Catches the common case where Stripe
+	// returned no new BTs since last sync. --history / --force /
+	// explicit date windows bypass. Caller (AccountOdooPush)
+	// recognises the "(cursor)" summary suffix and skips the
+	// follow-up auto-reconcile pass.
+	//
+	// The destination-aggregate check (DestCount / DestBalanceCents)
+	// is what stops the cursor from masking external edits to Odoo:
+	// without it, a line deleted in Odoo between two syncs lets the
+	// cursor wrongly conclude "already in sync" and the dedup pass
+	// that would have re-created the line never runs.
 	if !useHistory && !force && sinceDate.IsZero() && untilDate.IsZero() && !dryRun && totalLocalBTs > 0 {
 		cur := LoadSyncCursor(SyncCursorKeyForStripeAccount(acc.AccountID))
 		if cur.LastImportID != "" && cur.Count == totalLocalBTs && cur.LastImportID == latestLocalImportID {
-			odooLog("  %sStripe: already in sync (cursor — %d BTs)%s\n",
-				Fmt.Dim, totalLocalBTs, Fmt.Reset)
-			return stripeSummaryCursorMatched, nil
+			if destStillMatchesCursor(creds, uid, acc.OdooJournalID, cur) {
+				odooLog("  %sStripe: already in sync (cursor — %d BTs)%s\n",
+					Fmt.Dim, totalLocalBTs, Fmt.Reset)
+				return stripeSummaryCursorMatched, nil
+			}
+			odooLog("  %sCursor matches local but Odoo journal #%d drifted — running full push%s\n",
+				Fmt.Dim, acc.OdooJournalID, Fmt.Reset)
 		}
 	}
 
@@ -642,13 +680,22 @@ func syncStripeChronological(
 	// when we were processing the full local set (no --since/--until
 	// window). Uses the pre-filter snapshot so the cursor reflects
 	// what's locally available, not just what we pushed this round.
+	// Also records Odoo's post-push aggregate so the next short-
+	// circuit can detect destination-side drift (lines deleted /
+	// edited in Odoo between syncs).
 	if !dryRun && stats.LinesFailed == 0 && totalLocalBTs > 0 && sinceDate.IsZero() && untilDate.IsZero() {
-		_ = SaveSyncCursor(SyncCursor{
+		destCount, destBalance, derr := odooJournalAggregate(creds, uid, acc.OdooJournalID)
+		cursor := SyncCursor{
 			Key:           SyncCursorKeyForStripeAccount(acc.AccountID),
 			LastImportID:  latestLocalImportID,
 			LastTimestamp: latestLocalCreated,
 			Count:         totalLocalBTs,
-		})
+		}
+		if derr == nil {
+			cursor.DestCount = destCount
+			cursor.DestBalanceCents = int64(math.Round(destBalance * 100))
+		}
+		_ = SaveSyncCursor(cursor)
 	}
 	return summary, nil
 }
@@ -848,7 +895,7 @@ func stripeFeeOdooAccountCode(odooMappings []OdooMapping) string {
 	tx := TransactionEntry{
 		Provider: "stripe",
 		Type:     "DEBIT",
-		Category: "stripe_fees",
+		Category: "stripe_fee",
 	}
 	if matched := LookupOdooMapping(odooMappings, tx); matched != nil {
 		return matched.Set.AccountCode
@@ -1636,7 +1683,7 @@ func stripeFeeNarrationNeedsUpdate(current, desired map[string]interface{}) bool
 	if desired == nil {
 		return false
 	}
-	if !strings.EqualFold(metaString(current, "category"), "stripe_fees") {
+	if !strings.EqualFold(metaString(current, "category"), "stripe_fee") {
 		return true
 	}
 	if v, ok := current["stripeFee"].(bool); !ok || !v {
@@ -1699,7 +1746,7 @@ func stripeOdooLineRuleTransaction(acc *AccountConfig, line stripeOdooStageLine)
 	}
 	category := metaString(line.Metadata, "category")
 	if strings.EqualFold(metaString(line.Metadata, "type"), "aggregate_fee") {
-		category = "stripe_fees"
+		category = "stripe_fee"
 	}
 	return TransactionEntry{
 		ID:               BuildStripeURI(firstNonEmpty(metaString(line.Metadata, "balanceTransaction"), line.UniqueImportID)),
@@ -1808,7 +1855,7 @@ func localStripeOdooDesiredLinesByImportID(acc *AccountConfig, targetIDs map[str
 				PaymentRef: stripeOdooPaymentRef(bt, tx),
 				Narration:  narr,
 				Metadata:   meta,
-				IsFee:      stripeBTIsFee(bt) || strings.EqualFold(tx.Category, "stripe_fees"),
+				IsFee:      stripeBTIsFee(bt) || strings.EqualFold(tx.Category, "stripe_fee"),
 			}
 		}
 	}
@@ -2180,7 +2227,7 @@ func stripeRuleTransaction(acc *AccountConfig, bt stripesource.Transaction, stat
 	}
 	category := stringMetadata(metadata, "category")
 	if category == "" && stripeBTIsFee(bt) {
-		category = "stripe_fees"
+		category = "stripe_fee"
 	}
 	return TransactionEntry{
 		ID:               BuildStripeURI(bt.ID),
@@ -2229,7 +2276,7 @@ func buildStripeOdooNarration(acc *AccountConfig, bt stripesource.Transaction, t
 	if stripeBTIsFee(bt) {
 		details["stripeFee"] = true
 		details["tags"] = []string{"stripe_fee"}
-		details["category"] = "stripe_fees"
+		details["category"] = "stripe_fee"
 	}
 	if source := compactStripeSource(bt.Source); len(source) > 0 {
 		details["stripeSource"] = source

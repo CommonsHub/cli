@@ -49,11 +49,47 @@ func writeOdooJournalLinesCache(creds *OdooCredentials, uid int, journalID int) 
 	cur := LoadSyncCursor(SyncCursorKeyForOdooJournal(journalID))
 	existing, haveCache := loadLatestOdooJournalLinesCache(journalID)
 	if !haveCache || cur.LastWriteDate == "" {
-		lines, maxWriteDate, err := fetchOdooJournalLinesForCacheFull(creds, uid, journalID)
-		if err != nil {
-			return 0, err
+		return writeOdooJournalLinesCacheFullRefetch(creds, uid, journalID, &cur)
+	}
+
+	newLines, maxWriteDate, err := fetchOdooJournalLinesSince(creds, uid, journalID, cur.LastWriteDate)
+	if err != nil {
+		return 0, err
+	}
+
+	// Merge: replace any existing line with the same id, otherwise
+	// append. Handles edits (write_date bumped) and new arrivals; the
+	// post-merge aggregate check below catches deletes the watermark
+	// fetch can't see.
+	merged := existing
+	if len(newLines) > 0 {
+		byID := make(map[int]OdooCacheLine, len(existing)+len(newLines))
+		for _, l := range existing {
+			byID[l.ID] = l
 		}
-		count, err := writeOdooJournalLinesCacheFile(journalID, lines)
+		for _, l := range newLines {
+			byID[l.ID] = l
+		}
+		merged = make([]OdooCacheLine, 0, len(byID))
+		for _, l := range byID {
+			merged = append(merged, l)
+		}
+	}
+
+	// Verify against the server-side aggregate. A `write_date > X`
+	// filter can't see deletions — Odoo simply omits the row from the
+	// result set — so a line deleted between pulls stays in the local
+	// cache and drifts the count/balance by 1 each cycle. That used to
+	// surface later as a confusing "out of sync, run `chb odoo pull`
+	// first" error on the next push, even though pull had just run.
+	// One cheap read_group RPC tells us whether the merge result
+	// matches Odoo; when it doesn't, full re-fetch is the only safe
+	// path because we have no way to learn which id was deleted.
+	if journalCacheMatchesOdoo(creds, uid, journalID, merged) {
+		if len(newLines) == 0 {
+			return len(existing), nil
+		}
+		count, err := writeOdooJournalLinesCacheFile(journalID, merged)
 		if err != nil {
 			return 0, err
 		}
@@ -62,40 +98,46 @@ func writeOdooJournalLinesCache(creds *OdooCredentials, uid int, journalID int) 
 		_ = SaveSyncCursor(cur)
 		return count, nil
 	}
+	return writeOdooJournalLinesCacheFullRefetch(creds, uid, journalID, &cur)
+}
 
-	newLines, maxWriteDate, err := fetchOdooJournalLinesSince(creds, uid, journalID, cur.LastWriteDate)
+// writeOdooJournalLinesCacheFullRefetch does the full paginated fetch +
+// cursor reset. Used on first run (no cache) and as the fallback path
+// when the incremental refresh's aggregate check detects drift (the
+// canonical signal of a deletion the watermark missed).
+func writeOdooJournalLinesCacheFullRefetch(creds *OdooCredentials, uid int, journalID int, cur *SyncCursor) (int, error) {
+	lines, maxWriteDate, err := fetchOdooJournalLinesForCacheFull(creds, uid, journalID)
 	if err != nil {
 		return 0, err
 	}
-	if len(newLines) == 0 {
-		// Nothing changed; existing cache is still authoritative.
-		return len(existing), nil
-	}
-
-	// Merge: replace any existing line with the same id, otherwise
-	// append. This handles edits (write_date bumped) as well as new
-	// arrivals. Doesn't handle deletes — for those, run with
-	// --full-sync (TODO) or just delete the cache file.
-	byID := make(map[int]OdooCacheLine, len(existing)+len(newLines))
-	for _, l := range existing {
-		byID[l.ID] = l
-	}
-	for _, l := range newLines {
-		byID[l.ID] = l
-	}
-	merged := make([]OdooCacheLine, 0, len(byID))
-	for _, l := range byID {
-		merged = append(merged, l)
-	}
-
-	count, err := writeOdooJournalLinesCacheFile(journalID, merged)
+	count, err := writeOdooJournalLinesCacheFile(journalID, lines)
 	if err != nil {
 		return 0, err
 	}
 	cur.LastWriteDate = maxWriteDate
 	cur.Count = count
-	_ = SaveSyncCursor(cur)
+	_ = SaveSyncCursor(*cur)
 	return count, nil
+}
+
+// journalCacheMatchesOdoo returns true when the in-memory `lines`
+// slice has the same count and total balance as Odoo's server-side
+// aggregate for the journal. Sums cents as int64 locally so float64
+// accumulation drift doesn't false-positive against Odoo's exact
+// NUMERIC sum (same trick verifyOdooJournalCacheFresh uses).
+func journalCacheMatchesOdoo(creds *OdooCredentials, uid int, journalID int, lines []OdooCacheLine) bool {
+	liveCount, liveBalance, err := odooJournalAggregate(creds, uid, journalID)
+	if err != nil {
+		// Aggregation failed — bias to "matches" so a transient
+		// Odoo error doesn't trigger a full-fetch storm.
+		return true
+	}
+	var cents int64
+	for _, l := range lines {
+		cents += int64(math.Round(l.Amount * 100))
+	}
+	cachedBalance := float64(cents) / 100.0
+	return len(lines) == liveCount && cachedBalance == liveBalance
 }
 
 // fetchOdooJournalLinesSince returns lines on the journal whose

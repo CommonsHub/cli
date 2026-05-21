@@ -3763,16 +3763,28 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 	}
 
 	// Local-first cursor check: if the saved cursor says the latest
-	// local tx + count matches what we last pushed, there's nothing
-	// to do — skip every Odoo RPC. Catches the common "nothing new
-	// since last sync" case in zero round-trips. --history / --force
-	// bypass this since they explicitly request a full re-check.
+	// local tx + count matches what we last pushed AND Odoo's
+	// destination aggregate still matches what we left there, there's
+	// nothing to do — skip every Odoo RPC for the common "nothing new
+	// since last sync" case. --history / --force bypass for explicit
+	// re-checks.
+	//
+	// The destination check is what stops the cursor from masking
+	// external edits to Odoo (lines deleted, balances rewritten by
+	// someone else, partial-push gaps). Without it the same class of
+	// bug as the Stripe cursor short-circuit surfaces here: cursor
+	// keeps reporting "in sync" forever while Odoo silently misses
+	// rows the dedup pass would have re-created.
 	if !useHistory && acc.OdooJournalID != 0 && len(localTxs) > 0 && !dryRun {
 		cur := LoadSyncCursor(SyncCursorKeyForOdooJournal(acc.OdooJournalID))
 		if cur.LastImportID != "" && cur.Count == len(localTxs) {
 			latestLocalID := buildUniqueImportID(acc, localTxs[len(localTxs)-1])
 			if cur.LastImportID == latestLocalID {
-				return blockchainOdooSyncResult{Summary: "already in sync (cursor)", CursorMatched: true}, nil
+				if destStillMatchesCursor(creds, uid, acc.OdooJournalID, cur) {
+					return blockchainOdooSyncResult{Summary: "already in sync (cursor)", CursorMatched: true}, nil
+				}
+				odooLog("  %sCursor matches local but Odoo journal #%d drifted — running full push%s\n",
+					Fmt.Dim, acc.OdooJournalID, Fmt.Reset)
 			}
 		}
 	}
@@ -3864,7 +3876,7 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 		// Persist cursor even on the "nothing new" path so the next
 		// sync hits the cheap local-first short-circuit instead of
 		// going through this full re-check.
-		saveOdooJournalPushCursor(acc, localTxs, false)
+		saveOdooJournalPushCursor(creds, uid, acc, localTxs, false)
 		if partnerUpdates > 0 {
 			return blockchainOdooSyncResult{Summary: fmt.Sprintf("already in sync, %d partner links updated", partnerUpdates)}, nil
 		}
@@ -3980,24 +3992,34 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 	}
 	// Persist the cursor so the next sync's local-first check can
 	// short-circuit. Only when at least one line was actually written.
-	saveOdooJournalPushCursor(acc, localTxs, errors > 0)
+	saveOdooJournalPushCursor(creds, uid, acc, localTxs, errors > 0)
 	return blockchainOdooSyncResult{Summary: summary, Synced: synced}, nil
 }
 
 // saveOdooJournalPushCursor stamps the latest local tx + count onto
 // the cursor file for this journal. Skipped when the push had errors
 // (partial state would mark us as "in sync" while still missing lines).
-func saveOdooJournalPushCursor(acc *AccountConfig, localTxs []TransactionEntry, hadErrors bool) {
+func saveOdooJournalPushCursor(creds *OdooCredentials, uid int, acc *AccountConfig, localTxs []TransactionEntry, hadErrors bool) {
 	if hadErrors || len(localTxs) == 0 || acc.OdooJournalID == 0 {
 		return
 	}
 	latest := localTxs[len(localTxs)-1]
-	_ = SaveSyncCursor(SyncCursor{
+	cursor := SyncCursor{
 		Key:           SyncCursorKeyForOdooJournal(acc.OdooJournalID),
 		LastImportID:  buildUniqueImportID(acc, latest),
 		LastTimestamp: latest.Timestamp,
 		Count:         len(localTxs),
-	})
+	}
+	// Stamp Odoo's post-push aggregate so the next short-circuit can
+	// detect destination drift (lines deleted/edited externally between
+	// syncs). One read_group RPC; same call the freshness check uses.
+	if creds != nil && uid > 0 {
+		if destCount, destBalance, err := odooJournalAggregate(creds, uid, acc.OdooJournalID); err == nil {
+			cursor.DestCount = destCount
+			cursor.DestBalanceCents = int64(math.Round(destBalance * 100))
+		}
+	}
+	_ = SaveSyncCursor(cursor)
 }
 
 // syncBlockchainOdooMetadataStage walks every Odoo bank-statement-line
