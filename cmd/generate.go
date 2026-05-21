@@ -2403,6 +2403,23 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 					metadata["kind"] = strings.ToLower(tx.ReportingCategory)
 				}
 
+				// Schema convention across providers:
+				//   Amount           = signed gross (the canonical
+				//                      customer-facing number, with
+				//                      direction baked into the sign)
+				//   GrossAmount      = |Amount| (positive magnitude)
+				//   NetAmount        = signed net (after Stripe fees)
+				//   NormalizedAmount = signed net (balance impact;
+				//                      this is what account balance
+				//                      math should consume)
+				//   Fee              = positive fee magnitude
+				// For providers without separate fees (etherscan, kbc)
+				// gross == net so Amount == NormalizedAmount == NetAmount.
+				signedGross := amount
+				if txType == "DEBIT" || txType == "BURN" {
+					signedGross = -amount
+				}
+
 				transactions = append(transactions, TransactionEntry{
 					ID:               BuildStripeURI(tx.ID),
 					ProviderID:       tx.ID,
@@ -2414,8 +2431,8 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 					AccountSlug:      accountSlug,
 					AccountName:      accountName,
 					Currency:         currency,
-					Value:            fmt.Sprintf("%.2f", net),
-					Amount:           roundCents(net),
+					Value:            fmt.Sprintf("%.2f", signedGross),
+					Amount:           roundCents(signedGross),
 					NetAmount:        roundCents(net),
 					GrossAmount:      roundCents(math.Abs(amount)),
 					NormalizedAmount: roundCents(net),
@@ -2577,6 +2594,26 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 				logIndex := txHashCounter[hashKey]
 				txHashCounter[hashKey]++
 
+				// Schema convention: Amount is signed gross from the
+				// perspective of accountId (positive = money INTO the
+				// account, negative = money OUT). GrossAmount stays as
+				// the positive magnitude. For etherscan there's no fee,
+				// so NetAmount = NormalizedAmount = Amount.
+				signedAmount := amount
+				switch txType {
+				case "DEBIT", "BURN":
+					signedAmount = -amount
+				case "INTERNAL":
+					if internalDirection == "DEBIT" {
+						signedAmount = -amount
+					}
+				case "TRANSFER":
+					// Token-wide transfer between two arbitrary
+					// addresses — accountId is the sender, so this
+					// is "money OUT of the sender" → negative.
+					signedAmount = -amount
+				}
+
 				entry := TransactionEntry{
 					ID:               BuildBlockchainURI(chainID, tx.Hash),
 					ProviderID:       tx.Hash,
@@ -2590,11 +2627,11 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 					AccountSlug:      accountSlug,
 					AccountName:      fmt.Sprintf("⛓️ %s %s", strings.Title(chain), tokenSymbol),
 					Currency:         tokenSymbol,
-					Value:            fmt.Sprintf("%.6f", amount),
-					Amount:           amount,
-					NetAmount:        amount,
+					Value:            fmt.Sprintf("%.6f", signedAmount),
+					Amount:           signedAmount,
+					NetAmount:        signedAmount,
 					GrossAmount:      amount,
-					NormalizedAmount: amount,
+					NormalizedAmount: signedAmount,
 					Fee:              0,
 					Type:             txType,
 					Counterparty:     counterparty,
@@ -2631,28 +2668,25 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 					}
 				}
 
-				// Token-wide tracking (account=="") loses the recipient because
-				// counterparty is forced to From. Stash both endpoints (and any
-				// known names) so downstream consumers — top receivers/spenders
-				// in the report — can resolve recipients too.
-				if accountAddr == "" {
-					if entry.Metadata == nil {
-						entry.Metadata = map[string]interface{}{}
-					}
+				// Token-wide tracking (account=="") encodes both sides via
+				// the schema's standard fields:
+				//   accountId / Account        = sender (the perspective)
+				//   counterpartyId / Counterparty = receiver
+				// Names: when we know who an address belongs to (via Nostr
+				// address metadata), overwrite AccountName with the sender
+				// label and Counterparty with the receiver label. The raw
+				// addresses are still recoverable from accountId / counterpartyId.
+				if accountAddr == "" && nostrMeta.Addresses != nil {
 					fromAddr := strings.ToLower(tx.From)
 					toAddr := strings.ToLower(tx.To)
-					entry.Metadata["from"] = fromAddr
-					entry.Metadata["to"] = toAddr
-					if nostrMeta.Addresses != nil {
-						if fromAddr != "" && fromAddr != zeroAddr {
-							if m, ok := nostrMeta.Addresses[fromAddr]; ok && m.Name != "" {
-								entry.Metadata["fromName"] = m.Name
-							}
+					if fromAddr != "" && fromAddr != zeroAddr {
+						if m, ok := nostrMeta.Addresses[fromAddr]; ok && m.Name != "" {
+							entry.AccountName = m.Name
 						}
-						if toAddr != "" && toAddr != zeroAddr {
-							if m, ok := nostrMeta.Addresses[toAddr]; ok && m.Name != "" {
-								entry.Metadata["toName"] = m.Name
-							}
+					}
+					if toAddr != "" && toAddr != zeroAddr {
+						if m, ok := nostrMeta.Addresses[toAddr]; ok && m.Name != "" {
+							entry.Counterparty = m.Name
 						}
 					}
 				}

@@ -4,30 +4,14 @@ The on-disk shape `chb` reads and writes. Schemas first, file layout after.
 
 ## TransactionEntry
 
-The canonical transaction shape, defined in `cmd/generate.go`. One per money-movement event, regardless of source.
+The canonical transaction shape, defined in `cmd/generate.go`. One per money-movement event from one account's perspective — see [transactions.md](transactions.md) for the full schema (signed-amount convention, account-based vs graph-based design, why there's no `from`/`to`, per-provider quirks).
 
-Key fields:
+Short version:
 
-| Field | Type | Notes |
-|---|---|---|
-| `id` | string | NIP-73 URI (`stripe:txn_…`, `ethereum:100:tx:0x…`, `iban:be46…:tx:<hash>`). Canonical handle. |
-| `provider` | string | `stripe`, `etherscan`, `monerium`, `kbcbrussels`, … |
-| `providerId` | string | Provider-native id when distinct from `id` (e.g. Stripe `txn_…`). |
-| `accountId` | string | NIP-73 URI of the account (e.g. `iban:be46…`, `ethereum:100:address:0x…`). |
-| `counterpartyId` | string | NIP-73 URI of the counterparty (address / token contract / `stripe:cus_…`). |
-| `accountSlug` / `accountName` | string | Local-friendly account labels. |
-| `currency` / `value` / `amount` | string / float | `amount` is signed; `value` is the raw provider field. |
-| `grossAmount` / `netAmount` / `fee` | float | Stripe fee accounting, populated where available. |
-| `normalizedAmount` | float | Converted to EUR for cross-currency reporting. |
-| `type` | string | `CREDIT` / `DEBIT` / `MINT` / `BURN` / `INTERNAL` / `STRIPE_FEE`. |
-| `timestamp` | int64 | Unix seconds. |
-| `metadata.category` / `metadata.collective` | string | Semantic tags from `rules.json` + Nostr annotations. |
-| `tags` | `[][]string` | Nostr-style tags (`[["category","food"], …]`). |
-| `spread` | `[]SpreadEntry` | Per-month allocation when amortising — see [txspread.md](txspread.md). |
-
-**Not in JSON, but on the in-memory struct:** `AccountCode`, `PartnerID`. These are Odoo-specific and live in `providers/odoo/pending/<YYYY-MM>.json` instead, so `transactions.json` stays target-agnostic.
-
-Internal-only fields (`TxHash`, `Account`, `Counterparty`, `LogIndex`, `StripeChargeID`) are restored from the URI on load and stripped before public serialization.
+- **Account-based.** Each entry has an `accountId` and the amount is signed from that perspective. Internal transfers produce two entries (one per account), sharing the same `id`.
+- **No `from` / `to` / `sender` / `receiver` fields.** Use `accountId` (the perspective) and `counterpartyId` (the other side).
+- **Signed `amount`:** positive ⇔ money INTO `accountId`. `grossAmount` is always positive; `netAmount` is signed after fees.
+- **Not in JSON, but on the in-memory struct:** `AccountCode`, `PartnerID` (Odoo-specific; live in `providers/odoo/pending/`).
 
 ## FullEvent
 

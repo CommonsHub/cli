@@ -315,14 +315,32 @@ func tokenTopFlows(dataDir, year, month string, token MonthlyReportTokenData, _ 
 
 	for _, tx := range txFile.Transactions {
 		// Token-wide tracking only — wallet-specific txs are accounted under
-		// their account, not under the token-level top flows.
+		// their account, not under the token-level top flows. The schema for
+		// token-wide entries:
+		//   accountId / Account              = sender address
+		//   accountName                      = sender label (or fallback)
+		//   counterpartyId / Counterparty    = receiver address or label
+		// Sender/receiver addresses come from the URI; names live on
+		// AccountName / Counterparty when Nostr address metadata is known.
 		if !strings.EqualFold(tx.Currency, token.Symbol) || strings.TrimSpace(tx.Account) != "" {
 			continue
 		}
-		from, _ := tx.Metadata["from"].(string)
-		to, _ := tx.Metadata["to"].(string)
-		fromName, _ := tx.Metadata["fromName"].(string)
-		toName, _ := tx.Metadata["toName"].(string)
+		from := strings.ToLower(strings.TrimSpace(tx.Account))
+		fromName := tx.AccountName
+		// AccountName falls back to the generic "⛓️ Gnosis CHT" label when
+		// no nostr name was resolved — don't pass that through as a
+		// person's label, the address is more useful.
+		if strings.HasPrefix(fromName, "⛓️") {
+			fromName = ""
+		}
+		to := strings.ToLower(strings.TrimSpace(tx.Counterparty))
+		toName := ""
+		// If Counterparty looks like a hex address it's the raw address;
+		// otherwise it's a resolved label, so split them.
+		if !strings.HasPrefix(to, "0x") {
+			toName = tx.Counterparty
+			to = ""
+		}
 		amount := math.Abs(firstNonZeroFloat(tx.GrossAmount, tx.Amount, tx.NormalizedAmount, tx.NetAmount))
 		accumulate(receivedBy, to, toName, amount)
 		accumulate(sentBy, from, fromName, amount)
@@ -616,12 +634,13 @@ func yearlyReport(year string) error {
 	type monthData struct {
 		month    string
 		events   int
-		attend   int
+		tickets  int
 		messages int
 		income   float64
 		expenses float64
 	}
 	var breakdown []monthData
+	totalTickets := 0
 
 	// Track per-channel message counts across year
 	yearlyChannelMessages := make(map[string]int)
@@ -632,12 +651,16 @@ func yearlyReport(year string) error {
 		totalEvents += monthEvents
 
 		monthAttendance := 0
+		monthTickets := 0
 		monthTicketRevenue := 0.0
 		monthFridgeIncome := 0.0
 		for _, e := range events {
 			if e.Metadata.Attendance != nil && *e.Metadata.Attendance > 0 {
 				monthAttendance += *e.Metadata.Attendance
 				eventsWithAttendance++
+			}
+			if e.Metadata.TicketsSold != nil && *e.Metadata.TicketsSold > 0 {
+				monthTickets += *e.Metadata.TicketsSold
 			}
 			if e.Metadata.TicketRevenue != nil {
 				monthTicketRevenue += *e.Metadata.TicketRevenue
@@ -647,6 +670,7 @@ func yearlyReport(year string) error {
 			}
 		}
 		totalAttendance += monthAttendance
+		totalTickets += monthTickets
 		totalTicketRevenue += monthTicketRevenue
 		totalFridgeIncome += monthFridgeIncome
 
@@ -661,7 +685,7 @@ func yearlyReport(year string) error {
 		breakdown = append(breakdown, monthData{
 			month:    month,
 			events:   monthEvents,
-			attend:   monthAttendance,
+			tickets:  monthTickets,
 			messages: msgCount,
 			income:   income,
 			expenses: expenses,
@@ -676,6 +700,9 @@ func yearlyReport(year string) error {
 	fmt.Println()
 	if totalAttendance > 0 {
 		fmt.Printf("  Total attendance: %d\n", totalAttendance)
+	}
+	if totalTickets > 0 {
+		fmt.Printf("  Tickets sold: %d\n", totalTickets)
 	}
 	if totalTicketRevenue > 0 {
 		fmt.Printf("  Ticket revenue: €%.2f\n", totalTicketRevenue)
@@ -704,12 +731,12 @@ func yearlyReport(year string) error {
 
 	// Month-by-month breakdown
 	fmt.Printf("\n%sMonth-by-Month:%s\n", Fmt.Bold, Fmt.Reset)
-	fmt.Printf("  %s%-6s %6s %6s %8s %10s %10s%s\n",
-		Fmt.Dim, "MONTH", "EVENTS", "ATTEND", "MESSAGES", "INCOME", "EXPENSES", Fmt.Reset)
+	fmt.Printf("  %s%-6s %6s %7s %8s %10s %10s%s\n",
+		Fmt.Dim, "MONTH", "EVENTS", "TICKETS", "MESSAGES", "INCOME", "EXPENSES", Fmt.Reset)
 	for _, m := range breakdown {
 		monthName := monthNameShort(m.month)
-		fmt.Printf("  %-6s %6d %6d %8d %10s %10s\n",
-			monthName, m.events, m.attend, m.messages,
+		fmt.Printf("  %-6s %6d %7d %8d %10s %10s\n",
+			monthName, m.events, m.tickets, m.messages,
 			formatEuro(m.income), formatEuro(m.expenses))
 	}
 
@@ -1009,65 +1036,35 @@ func printTransactionsSummary(dataDir, year, month string) {
 	}
 }
 
+// calculateMonthTransactions returns EUR-family income/expense totals for a
+// month, sourced from the generated transactions.json so that tx.Type is
+// honored. INTERNAL and TRANSFER rows (movements between accounts we own) are
+// excluded so a Gnosis→Polygon EURe transfer doesn't get double-counted as
+// both income and expense — matching the policy used by `chb transactions
+// stats` (see cmd/transactions_stats.go).
 func calculateMonthTransactions(dataDir, year, month string) (income, expenses float64) {
-	settings, err := LoadSettings()
-	if err != nil {
+	txFile := LoadTransactionsWithPII(dataDir, year, month)
+	if txFile == nil {
 		return 0, 0
 	}
-
-	for _, acc := range settings.Finance.Accounts {
-		if acc.Provider == "etherscan" && acc.Token != nil {
-			filePath := etherscansource.Path(dataDir, year, month, acc.Chain,
-				etherscansource.FileName(acc.Slug, acc.Token.Symbol))
-
-			data, err := os.ReadFile(filePath)
-			if err != nil {
-				continue
-			}
-
-			var cache TransactionsCacheFile
-			if err := json.Unmarshal(data, &cache); err != nil {
-				continue
-			}
-
-			addrLower := strings.ToLower(acc.Address)
-			for _, tx := range cache.Transactions {
-				val := parseTokenValue(tx.Value, acc.Token.Decimals)
-				if strings.ToLower(tx.To) == addrLower {
-					income += val
-				} else if strings.ToLower(tx.From) == addrLower {
-					expenses += val
-				}
-			}
+	for _, tx := range txFile.Transactions {
+		if tx.Type == "INTERNAL" || tx.Type == "TRANSFER" {
+			continue
 		}
-
-		if acc.Provider == "stripe" {
-			filePath := stripesource.TransactionCachePath(dataDir, year, month)
-			data, err := os.ReadFile(filePath)
-			if err != nil {
-				continue
-			}
-
-			var cache struct {
-				Transactions []struct {
-					Net int `json:"net"`
-				} `json:"transactions"`
-			}
-			if err := json.Unmarshal(data, &cache); err != nil {
-				continue
-			}
-
-			for _, tx := range cache.Transactions {
-				amountEur := float64(tx.Net) / 100.0
-				if amountEur > 0 {
-					income += amountEur
-				} else {
-					expenses += math.Abs(amountEur)
-				}
-			}
+		if !isEURCurrency(tx.Currency) {
+			continue
+		}
+		amount := math.Abs(firstNonZeroFloat(tx.GrossAmount, tx.Amount, tx.NormalizedAmount, tx.NetAmount))
+		if amount == 0 {
+			continue
+		}
+		switch {
+		case tx.IsIncoming():
+			income += amount
+		case tx.IsOutgoing():
+			expenses += amount
 		}
 	}
-
 	return income, expenses
 }
 

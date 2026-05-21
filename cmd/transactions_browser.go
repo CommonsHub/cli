@@ -31,22 +31,26 @@ var (
 // txAmount returns the signed gross amount — the customer-facing number,
 // before any processing fees the provider deducted (Stripe especially).
 // For providers that don't separate gross from net (etherscan, kbc),
-// GrossAmount carries the same value as Amount so the fallback is a no-op.
+// GrossAmount, Amount, and NormalizedAmount all carry the same value so
+// the order of fallbacks doesn't matter.
+//
+// IMPORTANT: prefer GrossAmount first. Earlier versions started with
+// NormalizedAmount which is the balance-impact (post-fee) value for
+// Stripe — that's the wrong number to display in the table, since "show
+// me my €100 customer payment" should show €100 not €97.10.
 func txAmount(tx TransactionEntry) float64 {
 	// Tx Type ("CREDIT"/"MINT" vs "DEBIT"/"BURN") is the authoritative
 	// direction signal across providers: Stripe has signed amounts but
 	// blockchain providers (Etherscan / Monerium) store the token magnitude
 	// as a positive number and rely on Type to encode direction. So we
 	// take the magnitude from whichever amount field is populated and
-	// re-apply the sign from IsOutgoing(). This used to favour the signed
-	// field over Type, which silently dropped blockchain outgoings from
-	// `--direction out` filters.
-	mag := math.Abs(tx.NormalizedAmount)
+	// re-apply the sign from IsOutgoing().
+	mag := math.Abs(tx.GrossAmount)
 	if mag == 0 {
 		mag = math.Abs(tx.Amount)
 	}
 	if mag == 0 {
-		mag = math.Abs(tx.GrossAmount)
+		mag = math.Abs(tx.NormalizedAmount)
 	}
 	if tx.IsOutgoing() {
 		return -mag
@@ -56,11 +60,11 @@ func txAmount(tx TransactionEntry) float64 {
 	}
 	// Neither flagged (TRANSFER / INTERNAL / etc.): keep the original
 	// signed value so callers see whichever sign the source supplied.
-	if tx.NormalizedAmount != 0 {
-		return tx.NormalizedAmount
-	}
 	if tx.Amount != 0 {
 		return tx.Amount
+	}
+	if tx.NormalizedAmount != 0 {
+		return tx.NormalizedAmount
 	}
 	return tx.GrossAmount
 }
@@ -682,7 +686,13 @@ func transactionTableColumns(showAccount bool, includeSelection bool) []txTableC
 	if includeSelection {
 		cols = append(cols, txTableColumn{Header: "Sel", Kind: txColumnSelection, Ratio: 1, MinWidth: 5})
 	}
-	cols = append(cols, txTableColumn{Header: "Date", Kind: txColumnDate, Ratio: 2, MinWidth: 7})
+	// Date renders as "↳ 02/01" worst case (virtual rows) — 7 columns.
+	// Pin the column there: Ratio=0 means flexbox gives it no share of
+	// the leftover width, MinWidth=7 holds it at exactly that. The
+	// freed width gets redistributed to Counterparty / Description /
+	// Collective, which are the columns that actually benefit from
+	// extra space.
+	cols = append(cols, txTableColumn{Header: "Date", Kind: txColumnDate, Ratio: 0, MinWidth: 7})
 	if showAccount {
 		cols = append(cols, txTableColumn{Header: "Account", Kind: txColumnSource, Ratio: 3, MinWidth: 8})
 	}
@@ -2694,7 +2704,11 @@ func printTransactionsTable(filter TxFilter, txs []TransactionEntry) {
 	}
 
 	// Aggregate first so the header has totals + category breakdown.
-	type sums struct{ pos, neg, net, fees float64 }
+	// pos/neg track gross flow (signed gross from txAmount); fees track
+	// what providers deducted on top. "net" in the header = pos + neg -
+	// fees, i.e. the actual balance impact — computed inline below so
+	// "net" stays honest after switching txAmount to return gross.
+	type sums struct{ pos, neg, fees float64 }
 	byCur := map[string]*sums{}
 	curOrder := []string{}
 	// Category breakdown bucket: (currency, category) → signed gross sum.
@@ -2721,7 +2735,6 @@ func printTransactionsTable(filter TxFilter, txs []TransactionEntry) {
 			curOrder = append(curOrder, c)
 		}
 		amt := txAmount(tx) // signed gross
-		s.net += amt
 		if amt >= 0 {
 			s.pos += amt
 		} else {
@@ -2756,13 +2769,14 @@ func printTransactionsTable(filter TxFilter, txs []TransactionEntry) {
 		if s.fees > 0 {
 			feesPart = fmt.Sprintf("   fees %s%s%s", Fmt.Yellow, formatBalancePlain(s.fees, c), Fmt.Reset)
 		}
+		netAfterFees := s.pos + s.neg - s.fees
 		fmt.Printf("  %s%s%s  %s%d txs%s   in %s%s%s   out %s%s%s%s   net %s%s%s\n",
 			Fmt.Bold, label, Fmt.Reset,
 			Fmt.Dim, len(txs), Fmt.Reset,
 			Fmt.Green, formatBalancePlain(s.pos, c), Fmt.Reset,
 			Fmt.Red, formatBalancePlain(s.neg, c), Fmt.Reset,
 			feesPart,
-			Fmt.Bold, formatBalancePlain(s.net, c), Fmt.Reset,
+			Fmt.Bold, formatBalancePlain(netAfterFees, c), Fmt.Reset,
 		)
 	}
 
@@ -2845,7 +2859,8 @@ func printTransactionsTable(filter TxFilter, txs []TransactionEntry) {
 	totalRow := make([]string, len(cols))
 	totalRow[0] = Pluralize(len(txs), "transaction", "")
 	if amtIdx := txColumnIndex(cols, txColumnAmount); amtIdx >= 0 && len(curOrder) == 1 {
-		totalRow[amtIdx] = formatBalancePlain(byCur[curOrder[0]].net, curOrder[0])
+		s := byCur[curOrder[0]]
+		totalRow[amtIdx] = formatBalancePlain(s.pos+s.neg-s.fees, curOrder[0])
 	}
 	renderTicketsTable(headers, rows, totalRow, rightAlign)
 }
@@ -3053,6 +3068,18 @@ func parseTxListFlags(args []string) (TxFilter, int, int, error) {
 	}
 	f.NoCategory = HasFlag(args, "--no-category")
 	f.NoCollective = HasFlag(args, "--no-collective")
+	// --daterange sets Since/Until from any spec ParseDateRangeSpec accepts
+	// (2025/Q1, 2026, 20260101-20260331, etc.). Applied before --since /
+	// --until so those still win when given alongside, matching the usual
+	// "broad flag first, narrow flag overrides" precedence.
+	if s := GetOption(args, "--daterange"); s != "" {
+		spec, ok := ParseDateRangeSpec(s)
+		if !ok {
+			return f, 0, 0, fmt.Errorf("invalid --daterange value %q (expected %s)", s, DateRangeFormatHelp)
+		}
+		f.Since = spec.Start
+		f.Until = spec.End.Add(-time.Second)
+	}
 	if s := GetOption(args, "--since"); s != "" {
 		t, ok := ParseSinceDate(s)
 		if !ok {
@@ -3122,6 +3149,7 @@ func printTransactionsBrowserHelp() {
   %schb transactions --event evt-2gc6B12TEyRNRqN%s       Filter to one event
   %schb transactions --tag '#color:red'%s                Filter by Nostr-style tag
   %schb transactions --currency EUR%s                   Filter to EUR-family transactions
+  %schb transactions --daterange 2026/Q1%s              Filter to any range Parse­DateRangeSpec accepts
   %schb transactions --since 20260101 --until 20260131%s   Date range (inclusive)
   %schb transactions -n 50 --skip 100%s                 Paginate
   %schb transactions --json%s                           Print matching txs as JSON
@@ -3148,6 +3176,10 @@ func printTransactionsBrowserHelp() {
   %s--payment-link <id>%s  Match tag ["paymentLink", id]
   %s--tag <spec>%s         Match #tag, #key:value, or #[key:long value]
   %s--tags <a,b>%s         Match several tag specs
+  %s--daterange <spec>%s   Convenience for --since/--until: any spec parsed by
+                       chb's date-range parser (2025, 2025/Q1, 2026/03,
+                       20260101-20260331, 2025/H1, …). Overridden by
+                       --since/--until when both are passed.
   %s--since <date>%s       Inclusive lower bound on transaction date
   %s--until <date>%s       Inclusive upper bound on transaction date
   %s-n N%s                 Limit to N transactions (most recent first)
@@ -3181,6 +3213,7 @@ func printTransactionsBrowserHelp() {
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
+		f.Cyan, f.Reset, // --daterange example
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
 		f.Cyan, f.Reset,
@@ -3201,6 +3234,7 @@ func printTransactionsBrowserHelp() {
 		f.Yellow, f.Reset, // --payment-link
 		f.Yellow, f.Reset, // --tag
 		f.Yellow, f.Reset, // --tags
+		f.Yellow, f.Reset, // --daterange
 		f.Yellow, f.Reset, // --since
 		f.Yellow, f.Reset, // --until
 		f.Yellow, f.Reset, // -n
