@@ -2389,9 +2389,19 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 					}
 				}
 
-				// Final fallback: use balance tx description
+				// Final fallback: for fee txs (Stripe Automatic Tax,
+				// Usage Fee, processing fees) there's no customer or
+				// vendor — the counterparty *is* Stripe itself. The
+				// descriptive text lives in metadata.description so
+				// rules.json can match it there. For other Stripe txs
+				// without a customer (anonymous direct API charges),
+				// keep using tx.Description as a useful label.
 				if counterparty == "" {
-					counterparty = tx.Description
+					if strings.EqualFold(tx.ReportingCategory, "fee") {
+						counterparty = "Stripe"
+					} else {
+						counterparty = tx.Description
+					}
 				}
 
 				// Stash Stripe's reporting_category in metadata.kind so

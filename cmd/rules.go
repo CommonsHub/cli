@@ -12,7 +12,8 @@ import (
 type RuleMatch struct {
 	Sender      string   `json:"sender,omitempty"`      // glob on counterparty for incoming (IBAN, 0xaddr, name)
 	Recipient   string   `json:"recipient,omitempty"`   // glob on counterparty for outgoing (IBAN, 0xaddr, name)
-	Description string   `json:"description,omitempty"` // glob on tx description/memo
+	Counterparty string  `json:"counterparty,omitempty"` // glob on counterparty, any direction (use sender/recipient when you only want one direction)
+	Description string   `json:"description,omitempty"` // glob on metadata.description / metadata.memo only — does NOT fall back to counterparty (use the counterparty field for that)
 	IBAN        string   `json:"iban,omitempty"`        // exact match on counterparty IBAN (spaces stripped, case-insensitive)
 	Account     string   `json:"account,omitempty"`     // account slug (fridge, coffee, stripe, savings)
 	Provider    string   `json:"provider,omitempty"`    // stripe, etherscan, monerium
@@ -184,16 +185,24 @@ func (r *Rule) MatchesTransaction(tx TransactionEntry) bool {
 		}
 	}
 
+	if m.Counterparty != "" {
+		// Direction-agnostic counterparty match. Use sender/recipient when
+		// you need to scope to one direction; counterparty matches both.
+		target := strings.ToLower(tx.Counterparty)
+		if !globMatch(strings.ToLower(m.Counterparty), target) {
+			return false
+		}
+	}
+
 	if m.Description != "" {
-		// Match against the first non-empty of: metadata.description, memo
-		// (Monerium SEPA reference, etc.), then the raw counterparty. All
-		// comparisons are lower-cased so the rule pattern is case-insensitive.
+		// Match against metadata.description, then metadata.memo (Monerium
+		// SEPA reference, etc.). Does NOT fall back to counterparty — use
+		// the `counterparty` field above for that. Keeping the two
+		// concerns separate so "match by description" and "match by other
+		// party" stay distinguishable in rules.json.
 		description := stringMetadata(tx.Metadata, "description")
 		if description == "" {
 			description = stringMetadata(tx.Metadata, "memo")
-		}
-		if description == "" {
-			description = tx.Counterparty
 		}
 		if !globMatch(strings.ToLower(m.Description), strings.ToLower(description)) {
 			return false
@@ -211,6 +220,9 @@ func (r *Rule) RuleSummary() string {
 	}
 	if r.Match.Recipient != "" {
 		parts = append(parts, fmt.Sprintf("recipient: %s", r.Match.Recipient))
+	}
+	if r.Match.Counterparty != "" {
+		parts = append(parts, fmt.Sprintf("counterparty: %s", r.Match.Counterparty))
 	}
 	if r.Match.Description != "" {
 		parts = append(parts, fmt.Sprintf("description: %s", r.Match.Description))

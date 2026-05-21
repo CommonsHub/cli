@@ -6,6 +6,8 @@ Two settings files, two different jobs. Don't conflate them.
 
 Pattern matching against transaction descriptions, IBANs, amounts, and counterparties. Resolves to **category** + **collective** — semantic tags that mean the same thing whether the next system is Odoo, Wave, Xero, or a CSV export.
 
+**Match fields are field-scoped, not free-text.** `description` only looks at `metadata.description` + `metadata.memo`; use `counterparty` (any direction) or `sender`/`recipient` (direction-filtered) to match the counterparty. Mixing the two — e.g. "the vendor name in the bank statement" — needs an explicit `counterparty` rule, not a `description` glob.
+
 Lives at `$APP_DATA_DIR/settings/rules.json`. Schema (simplified):
 
 ```json
