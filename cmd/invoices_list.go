@@ -64,6 +64,7 @@ func runMoveList(args []string, kind moveKind) error {
 	csv := HasFlag(args, "--csv")
 	interactive := HasFlag(args, "-i", "--interactive")
 	all := HasFlag(args, "--all")
+	unreconciled := HasFlag(args, "--unreconciled", "--open")
 	limit := GetNumber(args, []string{"-n", "--limit"}, invoicesDefaultLimit)
 	posYear, posMonth, _ := ParseYearMonthArg(args)
 
@@ -71,8 +72,23 @@ func runMoveList(args []string, kind moveKind) error {
 	if err != nil {
 		return err
 	}
+
+	if unreconciled {
+		filtered := rows[:0]
+		for _, r := range rows {
+			if moveIsOpen(r.Move) {
+				filtered = append(filtered, r)
+			}
+		}
+		rows = filtered
+	}
+
 	if len(rows) == 0 {
-		fmt.Printf("\n%sNo %s found%s\n\n", Fmt.Dim, kind.labelPl, Fmt.Reset)
+		noun := kind.labelPl
+		if unreconciled {
+			noun = "unreconciled " + noun
+		}
+		fmt.Printf("\n%sNo %s found%s\n\n", Fmt.Dim, noun, Fmt.Reset)
 		return nil
 	}
 
@@ -92,6 +108,21 @@ func runMoveList(args []string, kind moveKind) error {
 		printMoveListTable(kind, posYear, posMonth, rows)
 	}
 	return nil
+}
+
+// moveIsOpen reports whether an invoice / bill is still awaiting a
+// payment — i.e. fair game for `--unreconciled` filtering and for the
+// invoice-side reconcile flow. PaymentState "paid" is excluded; an
+// already-attached ReconciledTransaction is excluded; everything else
+// (not_paid / in_payment / partial / blank) stays open.
+func moveIsOpen(m OdooOutgoingInvoicePublic) bool {
+	if m.ReconciledTransaction != nil && m.ReconciledTransaction.ID != "" {
+		return false
+	}
+	if strings.EqualFold(m.PaymentState, "paid") {
+		return false
+	}
+	return true
 }
 
 // moveRow wraps an OdooOutgoingInvoicePublic with location info (year,
@@ -316,9 +347,11 @@ func printMoveListHelp(kind moveKind) {
 %schb %s%s — List %s with totals, sorted newest first
 
 %sUSAGE%s
-  %schb %s%s              All time
-  %schb %s%s 2025         Year 2025
-  %schb %s%s 2025/12      December 2025
+  %schb %s%s                    All time
+  %schb %s%s 2025               Year 2025
+  %schb %s%s 2025/12            December 2025
+  %schb %s --unreconciled -i%s   Interactive picker for open %s only
+  %schb %s reconcile [yyyy/mm]%s Attach unreconciled %s to bank lines
 
 %sCOLUMNS%s
   Date         Invoice / bill date
@@ -331,26 +364,44 @@ func printMoveListHelp(kind moveKind) {
   Category     Annotation on the move record
 
 %sOPTIONS%s
-  %s-i%s, %s--interactive%s    Open a TUI: navigate, drill in, set collective/category
-                       directly on the move AND on every reconciled tx
+  %s-i%s, %s--interactive%s    Open a TUI: navigate, drill in, set collective/category,
+                       and on rows with no payment, press [r] to pick from
+                       candidate bank lines and reconcile in place.
+  %s--unreconciled%s       Only %s whose payment_state ≠ paid AND that have no
+                       attached payment yet. Pair with -i to triage open items.
   %s-n%s <N>, %s--limit%s <N>   Limit output rows (default %d, use --all to show all)
   %s--all%s                Show every row
   %s--csv%s                Output CSV instead of a formatted table
   %s--help, -h%s           Show this help
+
+%sRECONCILE SUBCOMMAND%s
+  %schb %s reconcile [YYYY[/MM]] [--yes] [-v]%s
+
+  Scans unreconciled %s in scope, looks for a single matching unreconciled
+  bank line (same amount, correct direction) across every linked journal
+  cache, and (with --yes) attaches them via the same flow as
+  %schb odoo journals <id> reconcile%s. Default is dry-run.
 `,
 		f.Bold, kind.labelPl, f.Reset, noun,
 		f.Bold, f.Reset,
 		f.Cyan, kind.labelPl, f.Reset,
 		f.Cyan, kind.labelPl, f.Reset,
 		f.Cyan, kind.labelPl, f.Reset,
+		f.Cyan, kind.labelPl, f.Reset, kind.labelPl,
+		f.Cyan, kind.labelPl, f.Reset, kind.labelPl,
 		f.Bold, f.Reset,
 		partnerColumnLabel(kind),
 		f.Bold, f.Reset,
 		f.Yellow, f.Reset, f.Yellow, f.Reset,
+		f.Yellow, f.Reset, kind.labelPl,
 		f.Yellow, f.Reset, f.Yellow, f.Reset, invoicesDefaultLimit,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
 		f.Yellow, f.Reset,
+		f.Bold, f.Reset,
+		f.Cyan, kind.labelPl, f.Reset,
+		kind.labelPl,
+		f.Cyan, f.Reset,
 	)
 }
 

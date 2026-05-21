@@ -154,6 +154,15 @@ func main() {
 		if len(args) > 1 {
 			invSub = args[1]
 		}
+		// Allow `chb invoices <daterange> reconcile [...]` in addition to
+		// the canonical `chb invoices reconcile <daterange>` form.
+		if invSub != "reconcile" && cmd.HasFlag(args[1:], "reconcile") {
+			recArgs := cmd.RemoveArg(args[1:], "reconcile")
+			if err := cmd.MovesReconcileCommandInvoices(recArgs); err != nil {
+				exitWithError(err)
+			}
+			break
+		}
 		switch invSub {
 		case "sync":
 			if len(args) > 2 && args[2] == "nostr" {
@@ -164,6 +173,10 @@ func main() {
 			}
 		case "categorize":
 			if err := cmd.InvoicesCategorize(args[2:]); err != nil {
+				exitWithError(err)
+			}
+		case "reconcile":
+			if err := cmd.MovesReconcileCommandInvoices(args[2:]); err != nil {
 				exitWithError(err)
 			}
 		case "publish":
@@ -178,6 +191,13 @@ func main() {
 		if len(args) > 1 {
 			billSub = args[1]
 		}
+		if billSub != "reconcile" && cmd.HasFlag(args[1:], "reconcile") {
+			recArgs := cmd.RemoveArg(args[1:], "reconcile")
+			if err := cmd.MovesReconcileCommandBills(recArgs); err != nil {
+				exitWithError(err)
+			}
+			break
+		}
 		switch billSub {
 		case "sync":
 			if len(args) > 2 && args[2] == "nostr" {
@@ -188,6 +208,10 @@ func main() {
 			}
 		case "categorize":
 			if err := cmd.BillsCategorize(args[2:]); err != nil {
+				exitWithError(err)
+			}
+		case "reconcile":
+			if err := cmd.MovesReconcileCommandBills(args[2:]); err != nil {
 				exitWithError(err)
 			}
 		case "publish":

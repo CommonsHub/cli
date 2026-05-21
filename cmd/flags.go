@@ -44,6 +44,14 @@ func filterFlag(args []string, flag string) []string {
 	return out
 }
 
+// RemoveArg is filterFlag's exported twin — returns args with every
+// occurrence of the given literal arg removed. Used by the main.go
+// dispatch to splice the `reconcile` subcommand out of an args list
+// that interleaves it with a positional daterange.
+func RemoveArg(args []string, arg string) []string {
+	return filterFlag(args, arg)
+}
+
 func GetOption(args []string, flags ...string) string {
 	for _, flag := range flags {
 		for i, a := range args {
@@ -308,7 +316,8 @@ func firstPositionalDateArg(args []string) (string, bool) {
 			switch a {
 			case "--since", "--until", "--month", "--channel", "--room", "--account",
 				"--currency", "--limit", "--skip", "--tag", "--tags", "--event",
-				"--application", "--payment-link", "--collective", "--category", "-n":
+				"--application", "--payment-link", "--collective", "--category",
+				"--daterange", "-n":
 				skipNext = true
 			}
 			continue

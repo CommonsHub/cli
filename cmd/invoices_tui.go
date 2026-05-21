@@ -52,6 +52,7 @@ const (
 	movesModeList movesTUIMode = iota
 	movesModeEdit
 	movesModeDetail
+	movesModeAttach
 )
 
 type movesTUIModel struct {
@@ -66,6 +67,11 @@ type movesTUIModel struct {
 	collInput  textinput.Model
 	catInput   textinput.Model
 	focusField int
+
+	// Attach-payment picker state. Loaded lazily on `r` from the detail
+	// mode; reset when the detail view closes.
+	attachCands  []invoicePaymentCandidate
+	attachCursor int
 
 	status      string
 	statusError bool
@@ -87,6 +93,8 @@ func (m movesTUIModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.updateEdit(msg)
 		case movesModeDetail:
 			return m.updateDetail(msg)
+		case movesModeAttach:
+			return m.updateAttach(msg)
 		}
 		return m.updateList(msg)
 	}
@@ -163,8 +171,14 @@ func (m movesTUIModel) updateList(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 func (m movesTUIModel) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
-	case "esc", "q", "enter":
+	case "esc", "q":
 		m.mode = movesModeList
+		m.attachCands = nil
+		m.attachCursor = 0
+	case "enter":
+		m.mode = movesModeList
+		m.attachCands = nil
+		m.attachCursor = 0
 	case "e":
 		m.selected = map[int]bool{m.cursor: true}
 		m.mode = movesModeEdit
@@ -174,6 +188,27 @@ func (m movesTUIModel) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.collInput.Focus()
 		m.catInput.Blur()
 		return m, textinput.Blink
+	case "r":
+		// Open the attach-payment picker. Always recomputes candidates
+		// so a fresh `chb pull` between sessions is reflected.
+		if m.cursor < 0 || m.cursor >= len(m.rows) {
+			return m, nil
+		}
+		row := m.rows[m.cursor]
+		m.attachCands = findInvoicePaymentCandidates(row, m.kind)
+		m.attachCursor = 0
+		if len(m.attachCands) == 0 {
+			m.status = fmt.Sprintf("No matching unreconciled bank lines found for %s (amount %s %s).",
+				kindLabelN(m.kind, 1),
+				fmtAmountCurrency(row.Move.TotalAmount, row.Move.Currency),
+				strings.ToUpper(firstNonEmptyStr(row.Move.Currency, "EUR")))
+			m.statusError = false
+			return m, nil
+		}
+		m.mode = movesModeAttach
+		m.status = ""
+		m.statusError = false
+		return m, nil
 	case "up", "k":
 		if m.cursor > 0 {
 			m.cursor--
@@ -186,6 +221,63 @@ func (m movesTUIModel) updateDetail(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	}
 	return m, nil
+}
+
+func (m movesTUIModel) updateAttach(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "q":
+		m.mode = movesModeDetail
+		m.attachCands = nil
+		m.attachCursor = 0
+		return m, nil
+	case "ctrl+c":
+		return m, tea.Quit
+	case "up", "k":
+		if m.attachCursor > 0 {
+			m.attachCursor--
+		}
+		return m, nil
+	case "down", "j":
+		if m.attachCursor < len(m.attachCands)-1 {
+			m.attachCursor++
+		}
+		return m, nil
+	case "enter":
+		if m.attachCursor < 0 || m.attachCursor >= len(m.attachCands) {
+			return m, nil
+		}
+		row := &m.rows[m.cursor]
+		cand := m.attachCands[m.attachCursor]
+		if err := applyAttachPayment(row, cand); err != nil {
+			m.status = fmt.Sprintf("Attach failed: %v", err)
+			m.statusError = true
+			return m, nil
+		}
+		m.status = fmt.Sprintf("✓ Attached line #%d (%s, %s) to %s #%d",
+			cand.Line.ID, cand.JournalName, cand.Line.Date, m.kind.label, row.Move.ID)
+		m.statusError = false
+		m.mode = movesModeDetail
+		m.attachCands = nil
+		m.attachCursor = 0
+		return m, nil
+	}
+	return m, nil
+}
+
+// applyAttachPayment resolves Odoo creds, authenticates, and calls
+// attachMoveToBankLine. Kept separate from the TUI Update handler so
+// the unhappy paths (creds missing, auth failed, RPC error) all
+// surface as a single status string.
+func applyAttachPayment(row *moveRow, cand invoicePaymentCandidate) error {
+	creds, err := ResolveOdooCredentials()
+	if err != nil {
+		return err
+	}
+	uid, err := odooAuth(creds.URL, creds.DB, creds.Login, creds.Password)
+	if err != nil || uid == 0 {
+		return fmt.Errorf("Odoo authentication failed: %v", err)
+	}
+	return attachMoveToBankLine(creds, uid, row, cand)
 }
 
 func (m movesTUIModel) updateEdit(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -430,7 +522,20 @@ func (m movesTUIModel) View() string {
 		b.WriteString("\n")
 		b.WriteString(m.renderDetail())
 		b.WriteString("\n  ")
-		b.WriteString(cpTUIDimStyle.Render("[↑/↓] navigate   [e] edit   [esc/enter] close   [q] back"))
+		hint := "[↑/↓] navigate   [e] edit   [r] attach payment   [esc/enter] close   [q] back"
+		if m.cursor >= 0 && m.cursor < len(m.rows) {
+			rec := m.rows[m.cursor].Move.ReconciledTransaction
+			if rec != nil && rec.ID != "" {
+				hint = "[↑/↓] navigate   [e] edit   [esc/enter] close   [q] back"
+			}
+		}
+		b.WriteString(cpTUIDimStyle.Render(hint))
+		b.WriteString("\n")
+	case movesModeAttach:
+		b.WriteString("\n")
+		b.WriteString(m.renderAttach())
+		b.WriteString("\n  ")
+		b.WriteString(cpTUIDimStyle.Render("[↑/↓] pick   [enter] attach (writes to Odoo)   [esc] back"))
 		b.WriteString("\n")
 	default:
 		b.WriteString("\n  ")
@@ -438,6 +543,127 @@ func (m movesTUIModel) View() string {
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// renderAttach prints the candidate-payment picker for the currently
+// focussed row. Always reached from detail mode, so the moveRow at
+// m.cursor is the target.
+func (m movesTUIModel) renderAttach() string {
+	if m.cursor < 0 || m.cursor >= len(m.rows) {
+		return ""
+	}
+	row := m.rows[m.cursor]
+	mv := row.Move
+
+	var b strings.Builder
+	b.WriteString(cpTUIHeaderStyle.Render(fmt.Sprintf("⇄ Attach payment to %s #%d (%s — %s)",
+		m.kind.label, mv.ID, mv.Date,
+		fmtAmountCurrency(mv.TotalAmount, mv.Currency))))
+	b.WriteString("\n")
+	b.WriteString(cpTUIDimStyle.Render(fmt.Sprintf("  %d candidate bank line(s) — closest to invoice date first",
+		len(m.attachCands))))
+	b.WriteString("\n\n")
+
+	headers := []string{"Sel", "Date", "Δ", "Amount", "Journal", "Description", "Ref / Counterparty"}
+	rightAlign := map[int]bool{3: true}
+	caps := []int{3, 10, 6, 14, 14, 36, 30}
+
+	plain := make([][]string, 0, len(m.attachCands))
+	for i, c := range m.attachCands {
+		mark := " "
+		if i == m.attachCursor {
+			mark = "▸"
+		}
+		desc := strings.TrimSpace(c.Line.PaymentRef)
+		if desc == "" {
+			desc = strings.ReplaceAll(strings.TrimSpace(c.Line.Narration), "\n", " ")
+		}
+		delta := dateDeltaLabel(c.Line.Date, mv.Date)
+		journal := c.JournalName
+		if journal == "" {
+			journal = fmt.Sprintf("#%d", c.JournalID)
+		}
+		// Use UniqueImportID as a stable identifier when present; falls
+		// back to the cached line id otherwise.
+		stableID := c.Line.UniqueImportID
+		if stableID == "" {
+			stableID = fmt.Sprintf("line #%d", c.Line.ID)
+		}
+		plain = append(plain, []string{
+			mark,
+			c.Line.Date,
+			delta,
+			fmtAmountCurrency(c.Line.Amount, "EUR"),
+			Truncate(journal, 14),
+			Truncate(desc, 36),
+			Truncate(stableID, 30),
+		})
+	}
+
+	widths := make([]int, len(headers))
+	for i, h := range headers {
+		widths[i] = displayWidth(h)
+	}
+	for _, r := range plain {
+		for i, c := range r {
+			if w := displayWidth(c); w > widths[i] {
+				widths[i] = w
+			}
+		}
+	}
+	for i := range widths {
+		if widths[i] > caps[i] {
+			widths[i] = caps[i]
+		}
+	}
+
+	renderRow := func(cells []string, isHeader, isCursor bool) string {
+		parts := make([]string, len(cells))
+		for i, c := range cells {
+			if rightAlign[i] {
+				parts[i] = padLeft(c, widths[i])
+			} else {
+				parts[i] = padRight(c, widths[i])
+			}
+		}
+		line := "  " + strings.Join(parts, "  ")
+		switch {
+		case isHeader:
+			return cpTUIDimStyle.Render(line)
+		case isCursor:
+			return cpTUICursorStyle.Render(line)
+		}
+		return line
+	}
+
+	b.WriteString(renderRow(headers, true, false))
+	b.WriteString("\n")
+	for i, r := range plain {
+		b.WriteString(renderRow(r, false, i == m.attachCursor))
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
+// dateDeltaLabel returns a short "+Nd" / "-Nd" / "0d" string for the
+// candidate date relative to the invoice date. "?" when either side
+// is unparseable. The sign convention is candidate − invoice: positive
+// means the payment landed after the invoice was issued, negative
+// means it preceded the invoice.
+func dateDeltaLabel(candidateDate, moveDate string) string {
+	ta, err1 := parseOdooDate(candidateDate)
+	tb, err2 := parseOdooDate(moveDate)
+	if err1 != nil || err2 != nil {
+		return "?"
+	}
+	days := int(ta.Sub(tb).Hours() / 24)
+	switch {
+	case days > 0:
+		return fmt.Sprintf("+%dd", days)
+	case days < 0:
+		return fmt.Sprintf("%dd", days)
+	}
+	return "0d"
 }
 
 func (m movesTUIModel) renderDetail() string {
@@ -558,7 +784,7 @@ func (m movesTUIModel) renderDetail() string {
 		writeKV("Counterparty", rec.Counterparty)
 	} else {
 		b.WriteString("\n  ")
-		b.WriteString(cpTUIDimStyle.Render("(no reconciled tx)"))
+		b.WriteString(cpTUIDimStyle.Render("(no reconciled tx — press [r] to pick from candidate bank lines)"))
 		b.WriteString("\n")
 	}
 	return b.String()
