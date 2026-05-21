@@ -18,7 +18,7 @@ type DateSpec struct {
 }
 
 const DateFormatHelp = "YYYYMMDD, YYYY-MM-DD, YYYY/MM/DD, YYYYMM, YYYY-MM, YYYY/MM, YYYY/M, YYYY-M, or YYYY"
-const DateRangeFormatHelp = "a date, YYYY/Q[1-4], YYYY/S[1-2], or YYYYMMDD-YYYYMMDD"
+const DateRangeFormatHelp = "a date, YYYY/Q[1-4], YYYY/S[1-2] (or H[1-2]), or YYYYMMDD-YYYYMMDD"
 
 func HasFlag(args []string, flags ...string) bool {
 	for _, a := range args {
@@ -98,7 +98,7 @@ func ParseDateSpec(s string) (DateSpec, bool) {
 			return buildDaySpec(clean[:4], clean[4:6], clean[6:8])
 		case len(clean) == 6 && allDigits(clean):
 			return buildMonthSpec(clean[:4], clean[4:6])
-		case len(clean) == 6 && (clean[4] == 'Q' || clean[4] == 'S') && clean[5] >= '1' && clean[5] <= '9':
+		case len(clean) == 6 && (clean[4] == 'Q' || clean[4] == 'S' || clean[4] == 'H') && clean[5] >= '1' && clean[5] <= '9':
 			return buildPeriodSpec(clean[:4], clean[4], string(clean[5]))
 		case len(clean) == 4 && allDigits(clean):
 			return buildYearSpec(clean)
@@ -106,7 +106,7 @@ func ParseDateSpec(s string) (DateSpec, bool) {
 		return DateSpec{}, false
 	}
 	if len(parts) == 2 {
-		if len(parts[1]) >= 2 && (parts[1][0] == 'Q' || parts[1][0] == 'S') {
+		if len(parts[1]) >= 2 && (parts[1][0] == 'Q' || parts[1][0] == 'S' || parts[1][0] == 'H') {
 			return buildPeriodSpec(parts[0], parts[1][0], parts[1][1:])
 		}
 		return buildMonthSpec(parts[0], parts[1])
@@ -232,7 +232,9 @@ func buildPeriodSpec(yStr string, kind byte, nStr string) (DateSpec, bool) {
 		}
 		start := time.Date(y, time.Month((n-1)*3+1), 1, 0, 0, 0, 0, BrusselsTZ())
 		return makeDateSpec(start, start.AddDate(0, 3, 0), "quarter"), true
-	case 'S':
+	case 'S', 'H':
+		// H1/H2 are aliases for S1/S2 — both name the same half-year
+		// (semester) period. H is the English convention, S the French.
 		if n < 1 || n > 2 {
 			return DateSpec{}, false
 		}

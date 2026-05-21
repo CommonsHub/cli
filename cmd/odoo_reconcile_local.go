@@ -75,15 +75,21 @@ type reconcileMatchSet struct {
 // candidates show up in the interactive prompt's "top 5 by date" list
 // so the operator can override an existing match if needed.
 type reconcileCandidate struct {
-	ID           int    // Odoo account.move id — primary dedupe key
-	Kind         string // "invoice" or "bill"
-	Number       string
-	Residual     float64
-	PartnerID    int
-	PartnerName  string
-	Date         string
-	State        string // Odoo move state ("posted", "draft", ...)
-	PaymentState string // "not_paid" / "in_payment" / "partial" / "paid"
+	ID                 int    // Odoo account.move id — primary dedupe key
+	Kind               string // "invoice" or "bill"
+	Number             string
+	Residual           float64
+	SignedTotal        float64 // total_signed (signed; negative for credit notes / refunds)
+	PartnerID          int
+	PartnerName        string
+	Date               string
+	State              string // Odoo move state ("posted", "draft", ...)
+	PaymentState       string // "not_paid" / "in_payment" / "partial" / "paid"
+	LastPayment        string // most recent payment date (YYYY-MM-DD), empty when none
+	LastPaymentBy      string // journal name of the latest payment (e.g. "Stripe"), empty when none
+	LastPaymentPayer   string // partner name from account.payment (who actually paid)
+	LastPaymentAccount string // IBAN / acc_number the payment was made from
+	FirstLineItem      string // first non-section line item title — preview in -i list
 }
 
 // IsOpen reports whether the candidate still has an unsettled balance,
@@ -147,10 +153,17 @@ func computeReconcileMatches(journalID int, interactive bool) (*reconcileMatchSe
 	if err != nil {
 		return nil, nil, err
 	}
+	// Strategy 1 (ref-substring match) also looks at paid/in_payment
+	// candidates: the bank line's payment_ref carries the invoice
+	// number regardless of whether the invoice was already settled by
+	// another (potentially wrong) reconciliation. Picking it triggers
+	// unreconcile+reattach in the apply phase — the operator's
+	// surgical override stays trustworthy.
+	allCandidates, _ := loadLocalAllPostedCandidates()
 	// Partner index (optional) so the interactive prompt can show the
 	// bank line's counterparty name, not just the integer id.
 	partnerIdx := loadLatestOdooPartnerIndex(DataDir())
-	if len(candidates) == 0 {
+	if len(candidates) == 0 && len(allCandidates) == 0 {
 		return &reconcileMatchSet{DemotedToDuplicate: map[int]bool{}}, partnerIdx, errNoLocalCandidates
 	}
 
@@ -175,7 +188,7 @@ func computeReconcileMatches(journalID int, interactive bool) (*reconcileMatchSe
 		if ln.IsReconciled || isOdooSyntheticLine(ln) || ln.Amount == 0 {
 			continue
 		}
-		hits := matchLineToCandidates(ln, candidates, byPartner, byAmount)
+		hits := matchLineToCandidates(ln, candidates, allCandidates, byPartner, byAmount)
 		if len(hits) > 1 {
 			lineDate := ln.Date
 			sort.SliceStable(hits, func(i, j int) bool {
@@ -190,7 +203,7 @@ func computeReconcileMatches(journalID int, interactive bool) (*reconcileMatchSe
 	// or skips. Selected picks collapse to a single-hit (treated like an
 	// unambiguous match downstream).
 	if interactive {
-		resolveAmbiguousInteractively(results, partnerIdx)
+		resolveAmbiguousInteractively(journalID, results, partnerIdx)
 	}
 
 	// Phase 2: dedupe. When several bank lines pick the same single
@@ -428,10 +441,11 @@ func reconcileDryRunLocal(journalID int, verbose, interactive bool) error {
 }
 
 // interactiveSuggestionCount caps how many candidates the -i prompt
-// surfaces per ambiguous line. Five is the sweet spot: enough to cover
-// the legitimate alternatives (typical partner has 2-3 open + 1-2 paid
-// close in time), small enough to fit on screen and stay scannable.
-const interactiveSuggestionCount = 5
+// surfaces per ambiguous line. Eight is comfortable: enough to cover
+// the legitimate alternatives across open/in_payment/paid status
+// without falling off the screen, and keeps the single-keystroke menu
+// (1-9) usable.
+const interactiveSuggestionCount = 8
 
 // resolveAmbiguousInteractively walks every ambiguous lineMatch (>1
 // candidate) and prompts the operator to pick one or skip. Selected
@@ -448,7 +462,7 @@ const interactiveSuggestionCount = 5
 //
 // Lines are walked newest-first: most recent bank activity is freshest
 // in the operator's mind.
-func resolveAmbiguousInteractively(results []reconcileLineMatch, partners *odooPartnerIndex) {
+func resolveAmbiguousInteractively(journalID int, results []reconcileLineMatch, partners *odooPartnerIndex) {
 	reader := bufio.NewReader(os.Stdin)
 	ambIdxs := make([]int, 0)
 	for i, r := range results {
@@ -465,12 +479,19 @@ func resolveAmbiguousInteractively(results []reconcileLineMatch, partners *odooP
 
 	// Load every posted invoice/bill (open AND closed) and index by
 	// amount in cents — the interactive picker uses this to surface
-	// top-5-by-date alternatives, even ones already reconciled.
+	// top-N-by-date alternatives, even ones already reconciled.
 	allCandidates, _ := loadLocalAllPostedCandidates()
 	byAmountAll := map[int64][]reconcileCandidate{}
 	for _, c := range allCandidates {
 		byAmountAll[centsKey(c.Residual)] = append(byAmountAll[centsKey(c.Residual)], c)
 	}
+
+	// Index the linked account's local transactions by unique_import_id
+	// so we can render a "Local tx:" preview alongside the Odoo bank
+	// line — counterparty name + IBAN/address from the source-of-truth
+	// (Monerium memo, KBC counterparty, Stripe customer), which is
+	// usually richer than what made it onto the Odoo bank line.
+	localByImportID := loadLocalTxIndexForJournal(journalID)
 
 	odooBaseURL := strings.TrimRight(os.Getenv("ODOO_URL"), "/")
 
@@ -499,6 +520,14 @@ func resolveAmbiguousInteractively(results []reconcileLineMatch, partners *odooP
 		if d := reconcileLineDescription(ln); d != "" {
 			fmt.Printf("        Description:  %s\n", d)
 		}
+		if localCp, localURI := localTxPreview(localByImportID, ln.UniqueImportID); localCp != "" || localURI != "" {
+			if localCp != "" {
+				fmt.Printf("        %sLocal tx:%s     %s\n", Fmt.Dim, Fmt.Reset, localCp)
+			}
+			if localURI != "" {
+				fmt.Printf("        %sURI:%s          %s\n", Fmt.Dim, Fmt.Reset, localURI)
+			}
+		}
 
 		// Candidates. Column order: date · partner · ref (hyperlinked) ·
 		// residual · date-delta · status badge (only when not "open").
@@ -510,14 +539,21 @@ func resolveAmbiguousInteractively(results []reconcileLineMatch, partners *odooP
 		for k := 0; k < limit; k++ {
 			c := hits[k]
 			rel := dateRelativePhrase(c.Date, ln.Date)
-			status := candidateStatusBadge(c)
-			fmt.Printf("        [%d] %s  %-30s  %s %s  %s  (%s)%s\n",
+			// Row 1: [N] date (delta)   Partner   firstLine   ref   amount
+			// ref hyperlinks to the Odoo form, "invoice"/"bill" prefix
+			// removed (operator can tell from context).
+			fmt.Printf("        [%d] %s %s%-18s%s  %-28s  %-30s  %s  %s\n",
 				k+1,
 				c.Date,
+				Fmt.Dim, "("+rel+")", Fmt.Reset,
 				truncate(c.PartnerName, 28),
-				c.Kind, formatCandidateRefLink(c, odooBaseURL, 18),
-				formatBalancePlain(c.Residual, "EUR"),
-				rel, status)
+				truncate(c.FirstLineItem, 30),
+				formatCandidateRefLink(c, odooBaseURL, 18),
+				formatBalancePlain(c.Residual, "EUR"))
+			// Row 2: optional status line for paid / in_payment / partial.
+			if badge := candidateStatusLine(c); badge != "" {
+				fmt.Printf("            %s\n", badge)
+			}
 		}
 		if limit < len(hits) {
 			fmt.Printf("        %s… and %d more (skip to see all in summary)%s\n",
@@ -530,8 +566,12 @@ func resolveAmbiguousInteractively(results []reconcileLineMatch, partners *odooP
 		switch choice {
 		case "":
 			results[i].Hits = []reconcileCandidate{hits[0]}
+			suffix := ""
+			if line := candidateStatusLine(hits[0]); line != "" {
+				suffix = "  " + line
+			}
 			fmt.Printf("        %s↳ accepted [1] %s %s%s%s\n",
-				Fmt.Dim, hits[0].Kind, hits[0].label(), candidateStatusBadge(hits[0]), Fmt.Reset)
+				Fmt.Dim, hits[0].Kind, hits[0].label(), suffix, Fmt.Reset)
 			continue
 		case "s":
 			continue
@@ -562,15 +602,154 @@ func topCandidatesByDateAmount(ln OdooCacheLine, byAmount map[int64][]reconcileC
 		if c.Kind != wantKind {
 			continue
 		}
+		// Direction-gate by signed total: incoming bank lines should
+		// only show invoices the customer owes us (positive signed
+		// total), outgoing bank lines should only show bills / credit
+		// notes we owe (negative signed total). SignedTotal == 0
+		// falls through (some imports leave it blank).
+		if !candidateSignMatches(c, ln.Amount) {
+			continue
+		}
 		matches = append(matches, c)
 	}
 	sort.SliceStable(matches, func(i, j int) bool {
 		return dateDeltaDaysAbs(matches[i].Date, ln.Date) < dateDeltaDaysAbs(matches[j].Date, ln.Date)
 	})
-	if len(matches) > limit {
-		matches = matches[:limit]
+
+	// Date-direction filter:
+	//   - Outgoing (bill payment) → bill must be dated BEFORE the bank
+	//     line; we can't pay a bill that hasn't been issued yet. Keep
+	//     past candidates only.
+	//   - Incoming (invoice receipt) → prefer past invoices (customer
+	//     paid an outstanding invoice) but allow up to 3 future ones
+	//     (sometimes we issue the invoice after receiving payment).
+	const futureCap = 3
+	out := make([]reconcileCandidate, 0, len(matches))
+	future := 0
+	for _, c := range matches {
+		isFuture := c.Date > ln.Date
+		if isFuture {
+			if ln.Amount < 0 {
+				continue // outgoing → no future bills
+			}
+			if future >= futureCap {
+				continue
+			}
+			future++
+		}
+		out = append(out, c)
+		if len(out) >= limit {
+			break
+		}
 	}
-	return matches
+	return out
+}
+
+// candidateSignMatches reports whether the candidate's signed total
+// aligns with the bank line's direction. SignedTotal == 0 is treated
+// as a wildcard (some imports leave it blank).
+func candidateSignMatches(c reconcileCandidate, lineAmount float64) bool {
+	if c.SignedTotal == 0 {
+		return true
+	}
+	return (lineAmount > 0 && c.SignedTotal > 0) || (lineAmount < 0 && c.SignedTotal < 0)
+}
+
+// candidateLastActivity returns the most recent payment-related date
+// + the journal that booked it + the payer's name and account/IBAN
+// (when the enriched fields are populated; older caches won't have
+// payer info — that comes from a fresh `chb odoo invoices sync`).
+// Falls back to writeDate when Payments is empty but the state is
+// paid / partial / in_payment.
+func candidateLastActivity(payments []OdooInvoicePayment, writeDate, paymentState string) (date, journal, payer, account string) {
+	for _, p := range payments {
+		d := strings.TrimSpace(p.Date)
+		if len(d) >= 10 {
+			d = d[:10]
+		}
+		if d > date {
+			date = d
+			journal = p.Journal
+			payer = p.PayerName
+			account = p.PayerAccount
+		}
+	}
+	if date != "" {
+		return date, journal, payer, account
+	}
+	switch strings.ToLower(paymentState) {
+	case "paid", "in_payment", "partial":
+		d := strings.TrimSpace(writeDate)
+		if len(d) >= 10 {
+			return d[:10], "", "", ""
+		}
+	}
+	return "", "", "", ""
+}
+
+// loadFirstLineItemIndex walks every monthly PUBLIC invoice + bill
+// cache and builds an id → "first line item title" map. The private
+// projection drops LineItems, but the public file keeps them — used
+// to render an extra preview line under each candidate in -i mode.
+func loadFirstLineItemIndex(dataDir string) map[int]string {
+	out := map[int]string{}
+	years, _ := os.ReadDir(dataDir)
+	for _, y := range years {
+		if !y.IsDir() || len(y.Name()) != 4 {
+			continue
+		}
+		months, _ := os.ReadDir(filepath.Join(dataDir, y.Name()))
+		for _, m := range months {
+			if !m.IsDir() || len(m.Name()) != 2 {
+				continue
+			}
+			loadFirstLineItemsFromFile(filepath.Join(dataDir, y.Name(), m.Name(), odoosource.RelPath(odoosource.InvoicesFile)), true, out)
+			loadFirstLineItemsFromFile(filepath.Join(dataDir, y.Name(), m.Name(), odoosource.RelPath(odoosource.BillsFile)), false, out)
+		}
+	}
+	return out
+}
+
+func loadFirstLineItemsFromFile(path string, isInvoice bool, out map[int]string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return
+	}
+	var entries []OdooOutgoingInvoicePublic
+	if isInvoice {
+		var file OdooOutgoingInvoicesFile
+		if json.Unmarshal(data, &file) != nil {
+			return
+		}
+		entries = file.Invoices
+	} else {
+		var file OdooVendorBillsFile
+		if json.Unmarshal(data, &file) != nil {
+			return
+		}
+		entries = file.Bills
+	}
+	for _, e := range entries {
+		if _, exists := out[e.ID]; exists {
+			continue
+		}
+		for _, li := range e.LineItems {
+			// Skip section / note rows that Odoo uses for layout, not
+			// real line items. "product" / "" are the real ones.
+			switch strings.ToLower(li.DisplayType) {
+			case "line_section", "line_note":
+				continue
+			}
+			if title := strings.TrimSpace(li.Title); title != "" {
+				out[e.ID] = title
+				break
+			}
+			if title := strings.TrimSpace(li.ProductName); title != "" {
+				out[e.ID] = title
+				break
+			}
+		}
+	}
 }
 
 // dateRelativePhrase returns "N days earlier" / "N days later" /
@@ -593,23 +772,56 @@ func dateRelativePhrase(candidateDate, lineDate string) string {
 	}
 }
 
-// candidateStatusBadge returns a dim-yellow suffix flagging the
-// candidate's payment state when it's not open — paid / in_payment /
-// partial. Empty string for open candidates (the default; no need to
-// clutter the row).
-func candidateStatusBadge(c reconcileCandidate) string {
+// candidateStatusLine returns the dedicated second-line status string
+// for a non-open candidate. Prefers the actual payer's name + IBAN
+// when the cache has them; falls back to the booking journal otherwise.
+// Format:
+//   "paid on DATE by NAME (IBAN) via JOURNAL (will unreconcile + reattach)"
+// — with each segment dropped when its data is missing.
+func candidateStatusLine(c reconcileCandidate) string {
 	state := strings.ToLower(c.PaymentState)
-	switch state {
-	case "", "not_paid":
+	if state == "" || state == "not_paid" {
 		return ""
-	case "paid":
-		return "  " + Fmt.Yellow + "[already paid — will unreconcile + reattach]" + Fmt.Reset
-	case "in_payment":
-		return "  " + Fmt.Yellow + "[in_payment]" + Fmt.Reset
-	case "partial":
-		return "  " + Fmt.Yellow + "[partial]" + Fmt.Reset
 	}
-	return "  " + Fmt.Dim + "[" + state + "]" + Fmt.Reset
+	var sb strings.Builder
+	sb.WriteString(Fmt.Yellow)
+	switch state {
+	case "paid":
+		sb.WriteString("paid")
+	case "in_payment":
+		sb.WriteString("in payment")
+	case "partial":
+		sb.WriteString("partially paid")
+	default:
+		sb.WriteString(state)
+	}
+	if c.LastPayment != "" {
+		sb.WriteString(" on ")
+		sb.WriteString(c.LastPayment)
+	}
+	switch {
+	case c.LastPaymentPayer != "" && c.LastPaymentAccount != "":
+		sb.WriteString(" by ")
+		sb.WriteString(c.LastPaymentPayer)
+		sb.WriteString(" (")
+		sb.WriteString(c.LastPaymentAccount)
+		sb.WriteString(")")
+	case c.LastPaymentPayer != "":
+		sb.WriteString(" by ")
+		sb.WriteString(c.LastPaymentPayer)
+	case c.LastPaymentAccount != "":
+		sb.WriteString(" from ")
+		sb.WriteString(c.LastPaymentAccount)
+	}
+	if c.LastPaymentBy != "" {
+		sb.WriteString(" via ")
+		sb.WriteString(c.LastPaymentBy)
+	}
+	if state == "paid" || state == "partial" {
+		sb.WriteString(" (will unreconcile + reattach)")
+	}
+	sb.WriteString(Fmt.Reset)
+	return sb.String()
 }
 
 // formatCandidateRefLink renders the candidate's reference as an OSC 8
@@ -691,7 +903,7 @@ func dateDeltaDaysAbs(a, b string) int {
 	return d
 }
 
-func matchLineToCandidates(ln OdooCacheLine, all []reconcileCandidate, byPartner map[int][]reconcileCandidate, byAmount map[int64][]reconcileCandidate) []reconcileCandidate {
+func matchLineToCandidates(ln OdooCacheLine, openCandidates, allPosted []reconcileCandidate, byPartner map[int][]reconcileCandidate, byAmount map[int64][]reconcileCandidate) []reconcileCandidate {
 	amt := math.Abs(ln.Amount)
 	ref := strings.ToLower(ln.PaymentRef)
 
@@ -718,20 +930,36 @@ func matchLineToCandidates(ln OdooCacheLine, all []reconcileCandidate, byPartner
 	// through as a 2-digit "number" (e.g. "40") which then matches every
 	// payment_ref containing those digits ("140.00", "240 EUR donation",
 	// etc.) and produces false positives.
+	//
+	// Searches *all* posted candidates (open + paid + in_payment): if
+	// the bank line's payment_ref names a specific invoice, we want to
+	// flag it as a match even when the invoice was already (perhaps
+	// wrongly) reconciled by something else. The apply phase falls
+	// back to unreconcile+reattach for paid candidates, so the
+	// operator's surgical override stays trustworthy.
 	if ref != "" {
 		var refHits []reconcileCandidate
-		for _, c := range all {
+		seen := map[int]bool{}
+		for _, c := range allPosted {
 			if c.Kind != wantKind || !isRefMatchable(c.Number) {
+				continue
+			}
+			if seen[c.ID] {
 				continue
 			}
 			if strings.Contains(ref, strings.ToLower(c.Number)) {
 				refHits = append(refHits, c)
+				seen[c.ID] = true
 			}
 		}
 		if len(refHits) > 0 {
 			return refHits
 		}
 	}
+	// Amount-based strategies (2/3/4) below stay open-only via
+	// byPartner / byAmount — those are pre-indexed from openCandidates
+	// by the caller, so paid invoices don't pollute amount fallbacks.
+	_ = openCandidates
 
 	// 2. partner_id + amount.
 	if ln.PartnerID > 0 {
@@ -786,6 +1014,11 @@ func loadLocalAllPostedCandidates() ([]reconcileCandidate, error) {
 
 func loadLocalCandidates(onlyOpen bool) ([]reconcileCandidate, error) {
 	dataDir := DataDir()
+	// First line items live on the PUBLIC invoice/bill files only —
+	// the private projection drops them. Walk public alongside so the
+	// interactive prompt can show "what's actually on the invoice"
+	// next to each candidate. Map keyed by account.move id.
+	firstLineByID := loadFirstLineItemIndex(dataDir)
 	var out []reconcileCandidate
 
 	walkPath := func(path string, kind string) {
@@ -802,16 +1035,23 @@ func loadLocalCandidates(onlyOpen bool) ([]reconcileCandidate, error) {
 				if inv.State != "posted" {
 					continue // drop drafts / cancellations
 				}
+				date, journal, payer, account := candidateLastActivity(inv.Payments, inv.WriteDate, inv.PaymentState)
 				c := reconcileCandidate{
-					ID:           inv.ID,
-					Kind:         "invoice",
-					Number:       firstNonEmpty(inv.Number, inv.Reference),
-					Residual:     candidateResidual(inv.ResidualAmount, inv.TotalSignedAmount),
-					PartnerID:    inv.Partner.ID,
-					PartnerName:  firstNonEmpty(inv.Partner.DisplayName, inv.Partner.Name),
-					Date:         firstNonEmpty(inv.InvoiceDate, inv.Date),
-					State:        inv.State,
-					PaymentState: inv.PaymentState,
+					ID:                 inv.ID,
+					Kind:               "invoice",
+					Number:             firstNonEmpty(inv.Number, inv.Reference),
+					Residual:           candidateResidual(inv.ResidualAmount, inv.TotalSignedAmount),
+					SignedTotal:        inv.TotalSignedAmount,
+					PartnerID:          inv.Partner.ID,
+					PartnerName:        firstNonEmpty(inv.Partner.DisplayName, inv.Partner.Name),
+					Date:               firstNonEmpty(inv.InvoiceDate, inv.Date),
+					State:              inv.State,
+					PaymentState:       inv.PaymentState,
+					LastPayment:        date,
+					LastPaymentBy:      journal,
+					LastPaymentPayer:   payer,
+					LastPaymentAccount: account,
+					FirstLineItem:      firstLineByID[inv.ID],
 				}
 				if onlyOpen && !invoiceIsOpen(inv) {
 					continue
@@ -828,16 +1068,23 @@ func loadLocalCandidates(onlyOpen bool) ([]reconcileCandidate, error) {
 			if b.State != "posted" {
 				continue
 			}
+			date, journal, payer, account := candidateLastActivity(b.Payments, b.WriteDate, b.PaymentState)
 			c := reconcileCandidate{
-				ID:           b.ID,
-				Kind:         "bill",
-				Number:       firstNonEmpty(b.Number, b.Reference),
-				Residual:     candidateResidual(b.ResidualAmount, b.TotalSignedAmount),
-				PartnerID:    b.Partner.ID,
-				PartnerName:  firstNonEmpty(b.Partner.DisplayName, b.Partner.Name),
-				Date:         firstNonEmpty(b.InvoiceDate, b.Date),
-				State:        b.State,
-				PaymentState: b.PaymentState,
+				ID:                 b.ID,
+				Kind:               "bill",
+				Number:             firstNonEmpty(b.Number, b.Reference),
+				Residual:           candidateResidual(b.ResidualAmount, b.TotalSignedAmount),
+				SignedTotal:        b.TotalSignedAmount,
+				PartnerID:          b.Partner.ID,
+				PartnerName:        firstNonEmpty(b.Partner.DisplayName, b.Partner.Name),
+				Date:               firstNonEmpty(b.InvoiceDate, b.Date),
+				State:              b.State,
+				PaymentState:       b.PaymentState,
+				LastPayment:        date,
+				LastPaymentBy:      journal,
+				LastPaymentPayer:   payer,
+				LastPaymentAccount: account,
+				FirstLineItem:      firstLineByID[b.ID],
 			}
 			if onlyOpen && !invoiceIsOpen(b) {
 				continue
@@ -1018,4 +1265,87 @@ func patchPrivateInvoiceCacheFile(path string, updates map[int]invoiceCacheUpdat
 		_ = os.WriteFile(path, buf, 0o644)
 	}
 	return patched
+}
+
+// loadLocalTxIndexForJournal joins the bank statement lines in the
+// journal cache to the source-of-truth local transactions
+// (loadAccountTransactionsForOdoo) via unique_import_id. Returns an
+// index the interactive prompt uses to surface counterparty + IBAN /
+// wallet address from the local cache, which is usually richer than
+// the bank line on Odoo (Monerium-only memo, KBC counterparty name,
+// Stripe customer name, etc.). Returns nil when no account is linked
+// to the journal — the caller treats nil as "no extra info".
+func loadLocalTxIndexForJournal(journalID int) map[string]TransactionEntry {
+	acc := linkedAccountForJournal(journalID)
+	if acc == nil {
+		return nil
+	}
+	local := loadAccountTransactionsForOdoo(acc)
+	if len(local) == 0 {
+		return nil
+	}
+	out := make(map[string]TransactionEntry, len(local))
+	for _, tx := range local {
+		if id := buildUniqueImportID(acc, tx); id != "" {
+			out[id] = tx
+		}
+	}
+	return out
+}
+
+// localTxPreview returns two strings extracted from the local tx
+// keyed by unique_import_id: a "counterparty + IBAN/address" row and
+// the canonical tx URI (tx.ID — ethereum:100:tx:0x… / stripe:txn_…).
+// Either may be empty when the local cache has no matching record or
+// no enrichment for that field.
+func localTxPreview(index map[string]TransactionEntry, importID string) (counterpartyLine, uriLine string) {
+	if index == nil || importID == "" {
+		return "", ""
+	}
+	tx, ok := index[importID]
+	if !ok {
+		return "", ""
+	}
+	// Counterparty: prefer the name (Monerium memo / Stripe customer /
+	// KBC counterparty), append the IBAN or wallet address in dim.
+	var cp string
+	if tx.Counterparty != "" {
+		cp = tx.Counterparty
+	}
+	if iban := stringMetadata(tx.Metadata, "iban"); iban != "" {
+		if cp != "" {
+			cp += "  " + Fmt.Dim + "(" + iban + ")" + Fmt.Reset
+		} else {
+			cp = iban
+		}
+	} else if addr := localTxAddress(tx); addr != "" {
+		if cp != "" {
+			cp += "  " + Fmt.Dim + "(" + addr + ")" + Fmt.Reset
+		} else {
+			cp = addr
+		}
+	}
+	// URI row: the canonical tx identifier (ethereum:100:tx:0x… or
+	// stripe:txn_…). Full form, no truncation — operators copy-paste
+	// it into other chb commands (rules add, etc.).
+	uri := tx.ID
+	if uri == "" {
+		uri = tx.ProviderID
+	}
+	return cp, uri
+}
+
+// localTxAddress pulls the most useful address-shaped identifier off
+// the local tx: from/to wallet address for blockchain, or the raw
+// CounterpartyId URI for everything else. Empty when nothing fits.
+func localTxAddress(tx TransactionEntry) string {
+	for _, key := range []string{"from", "to"} {
+		if v, ok := tx.Metadata[key].(string); ok && v != "" && !strings.HasPrefix(v, "0x000000000000") {
+			return v
+		}
+	}
+	if strings.HasPrefix(tx.CounterpartyID, "ethereum:") || strings.HasPrefix(tx.CounterpartyID, "stripe:") {
+		return tx.CounterpartyID
+	}
+	return ""
 }

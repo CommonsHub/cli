@@ -101,6 +101,25 @@ type journalRowLayout struct {
 
 var journalRowLayoutActive *journalRowLayout
 
+// journalRowSink, when set, replaces finalizeJournalRow's direct print
+// with a write to *journalRowSink. Used by the compact `chb push`
+// driver: stdout is silenced around AccountOdooPush, the row data
+// arrives here instead, and the driver renders one clean line per
+// journal on stderr.
+var journalRowSink *journalSyncRow
+
+// pushAttentionHint is one closing action item collected during the
+// compact push — surfaced after all journals finish so the operator
+// has a clear "what to do next" list.
+type pushAttentionHint struct {
+	JournalID int
+	Slug      string
+	Message   string // human-readable suggestion
+	Suggested string // shell command the operator can run
+}
+
+var pushAttentionHints []pushAttentionHint
+
 // printJournalRowPrefix prints the "    #48  stripe" prefix of a journal row,
 // followed by a newline so it stays visible while the per-journal sync prints
 // its progress messages on the line below.
@@ -121,6 +140,14 @@ func printJournalRowPrefix(journalID int, slug string) {
 // handled the output, false to signal the caller should fall back to the
 // regular sub-line printer.
 func finalizeJournalRow(row journalSyncRow) bool {
+	// Compact-mode capture: row data is collected by the caller (the
+	// `chb push` / `chb sync` driver) instead of printed inline. The
+	// driver renders one clean line per journal on stderr after the
+	// silenced section returns.
+	if journalRowSink != nil {
+		*journalRowSink = row
+		return true
+	}
 	w := journalRowLayoutActive
 	if w == nil {
 		return false
@@ -2909,7 +2936,7 @@ func odooJournalSync(journalID int, args []string) error {
 // serially so the per-account one-liners stay in order and can't interleave.
 // In verbose mode, up to 4 journals run concurrently.
 func odooJournalsSyncAll(args []string) error {
-	// Print the Odoo URL once at the top, unless a wrapper already did it.
+	verbose := HasFlag(args, "--verbose", "-v") || HasFlag(args, "--debug")
 	wasQuiet := quietOdooContext()
 	if !wasQuiet {
 		if creds, err := ResolveOdooCredentials(); err == nil {
@@ -2956,9 +2983,39 @@ func odooJournalsSyncAll(args []string) error {
 	isTTY := info != nil && (info.Mode()&os.ModeCharDevice) != 0
 	journalRowLayoutActive = &journalRowLayout{JIDWidth: wJID, SlugWidth: wSlug, IsTTY: isTTY}
 	defer func() { journalRowLayoutActive = nil }()
+	pushAttentionHints = nil
+	defer func() { pushAttentionHints = nil }()
 
 	failed := 0
-	if wasQuiet {
+	if !verbose {
+		// Compact mode: serial loop with per-journal status line +
+		// silenced stdout. Sub-step chatter goes to /dev/null; the
+		// final row is captured via journalRowSink and rendered as a
+		// single status-line Final.
+		for _, t := range targets {
+			label := fmt.Sprintf("#%-*d %s", wJID-1, t.journalID, t.slug)
+			sl := NewStatusLine(label)
+			SetActiveStatusLine(sl)
+			var row journalSyncRow
+			journalRowSink = &row
+			restore := silenceStdout()
+			err := AccountOdooPush(t.slug, args)
+			restore()
+			journalRowSink = nil
+			SetActiveStatusLine(nil)
+
+			mark := Fmt.Green + "✓" + Fmt.Reset
+			if err != nil || row.HasError {
+				mark = Fmt.Red + "✗" + Fmt.Reset
+				failed++
+			}
+			summary := formatCompactJournalRow(row, err)
+			sl.Final(mark, summary)
+			if row.Mismatch != "" {
+				Warnf("    %s%s%s", Fmt.Yellow, strings.TrimRight(row.Mismatch, "\n"), Fmt.Reset)
+			}
+		}
+	} else if wasQuiet {
 		// Serial: preserve one-line-per-item ordering, avoid interleaving.
 		for _, t := range targets {
 			printJournalRowPrefix(t.journalID, t.slug)
@@ -2994,10 +3051,61 @@ func odooJournalsSyncAll(args []string) error {
 			}
 		}
 	}
+
+	// Closing summary — attention items only, in compact mode. Things
+	// the operator needs to act on (reconcile threshold exceeded,
+	// out-of-sync balances, …) are collected during the loop and
+	// listed here with the exact command to run.
+	if !verbose && len(pushAttentionHints) > 0 {
+		fmt.Printf("\n  %s⚠ %d journal%s need%s attention:%s\n",
+			Fmt.Yellow, len(pushAttentionHints),
+			plural(len(pushAttentionHints)),
+			attentionVerb(len(pushAttentionHints)),
+			Fmt.Reset)
+		for _, h := range pushAttentionHints {
+			fmt.Printf("    %s#%d %s — %s%s\n", Fmt.Dim, h.JournalID, h.Slug, h.Message, Fmt.Reset)
+			if h.Suggested != "" {
+				fmt.Printf("      %s$ %s%s\n", Fmt.Cyan, h.Suggested, Fmt.Reset)
+			}
+		}
+	}
+
 	if failed > 0 {
 		return fmt.Errorf("%s failed", Pluralize(failed, "journal", ""))
 	}
 	return nil
+}
+
+// formatCompactJournalRow turns a captured journalSyncRow into a
+// single status-line summary string. Falls back to the error message
+// when the push errored out.
+func formatCompactJournalRow(row journalSyncRow, err error) string {
+	if err != nil {
+		return Fmt.Red + truncErr(err) + Fmt.Reset
+	}
+	var parts []string
+	if row.Status != "" {
+		parts = append(parts, strings.TrimSpace(row.Status))
+	}
+	if row.TxCount > 0 {
+		parts = append(parts, fmt.Sprintf("%s txs", formatThousands(row.TxCount)))
+	}
+	if row.Balance != "" {
+		parts = append(parts, "balance "+row.Balance)
+	}
+	if len(parts) == 0 {
+		return "ok"
+	}
+	return strings.Join(parts, " · ")
+}
+
+// attentionVerb is a tiny grammar helper: "needs" / "need" depending
+// on count, used in the closing attention list header.
+func attentionVerb(n int) string {
+	if n == 1 {
+		return "s"
+	}
+	return ""
 }
 
 func odooJournalReset(creds *OdooCredentials, uid int, journalID int, yes bool) error {

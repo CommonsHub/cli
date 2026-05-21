@@ -26,7 +26,7 @@ func EventsTickets(args []string) {
 		return
 	}
 	csv := HasFlag(args, "--csv")
-	posYear, posMonth, _ := ParseYearMonthArg(args)
+	startMonth, endMonth, hasRange := ParseMonthRangeArg(args)
 
 	dataDir := DataDir()
 	txsByEvent := loadTicketEventTxs(dataDir)
@@ -48,25 +48,23 @@ func EventsTickets(args []string) {
 		return
 	}
 
-	filtered := filterEventTicketAggregates(aggregates, posYear, posMonth)
+	filtered := filterEventTicketAggregatesByRange(aggregates, startMonth, endMonth)
 	if len(filtered) == 0 {
 		if csv {
 			return
 		}
 		scope := "any year"
-		if posYear != "" {
-			scope = posYear
-			if posMonth != "" {
-				scope += "/" + posMonth
-			}
+		if hasRange {
+			scope = scopeLabel(startMonth, endMonth, firstPositionalDateRaw(args))
 		}
 		fmt.Printf("\n%sNo events with ticket sales found for %s.%s\n\n", Fmt.Dim, scope, Fmt.Reset)
 		return
 	}
 
-	// Single-month: render per-event detail.
-	if posMonth != "" {
-		title := posYear + "/" + posMonth
+	// Single-month range → per-event detail. Multi-month ranges →
+	// per-month summary; multi-year ranges → per-year summary.
+	if hasRange && startMonth == endMonth {
+		title := strings.ReplaceAll(startMonth, "-", "/")
 		sort.SliceStable(filtered, func(i, j int) bool { return filtered[i].StartAt < filtered[j].StartAt })
 		if csv {
 			printEventTicketsDetailCSV(filtered)
@@ -76,19 +74,44 @@ func EventsTickets(args []string) {
 		return
 	}
 
-	// Year breakdown: one row per month for the year. Otherwise (no
-	// positional arg): one row per year.
 	period := "year"
 	periodTitle := "All years"
-	if posYear != "" {
+	if hasRange {
 		period = "month"
-		periodTitle = posYear
+		periodTitle = scopeLabel(startMonth, endMonth, firstPositionalDateRaw(args))
 	}
 	if csv {
 		printEventTicketsSummaryCSV(period, filtered)
 		return
 	}
 	printEventTicketsSummary(periodTitle, period, filtered)
+}
+
+// firstPositionalDateRaw returns the raw positional date argument as
+// the operator typed it ("2025Q1", "2025/S2", …) so titles and error
+// messages can echo their input rather than expanded ranges.
+func firstPositionalDateRaw(args []string) string {
+	v, _ := firstPositionalDateArg(args)
+	return v
+}
+
+// scopeLabel returns the human title for the filtered range. Prefers
+// the raw input ("2025Q1") when given; falls back to "YYYY-MM..YYYY-MM"
+// or a single month / year when the range collapses.
+func scopeLabel(startMonth, endMonth, raw string) string {
+	if raw != "" {
+		return raw
+	}
+	if startMonth == "" {
+		return ""
+	}
+	if startMonth == endMonth {
+		return strings.ReplaceAll(startMonth, "-", "/")
+	}
+	if startMonth[:4] == endMonth[:4] && startMonth[5:] == "01" && endMonth[5:] == "12" {
+		return startMonth[:4]
+	}
+	return startMonth + "..." + endMonth
 }
 
 type eventTicketAgg struct {
@@ -279,8 +302,11 @@ func txTagValue(tx TransactionEntry, key string) string {
 	return ""
 }
 
-func filterEventTicketAggregates(aggregates []eventTicketAgg, posYear, posMonth string) []eventTicketAgg {
-	if posYear == "" {
+// filterEventTicketAggregatesByRange keeps aggregates whose event date
+// (YYYY-MM) falls inside [startMonth, endMonth] inclusive. Empty range
+// returns all aggregates untouched.
+func filterEventTicketAggregatesByRange(aggregates []eventTicketAgg, startMonth, endMonth string) []eventTicketAgg {
+	if startMonth == "" && endMonth == "" {
 		return aggregates
 	}
 	var out []eventTicketAgg
@@ -288,10 +314,11 @@ func filterEventTicketAggregates(aggregates []eventTicketAgg, posYear, posMonth 
 		if a.StartTime.IsZero() {
 			continue
 		}
-		if fmt.Sprintf("%04d", a.StartTime.Year()) != posYear {
+		ym := fmt.Sprintf("%04d-%02d", a.StartTime.Year(), int(a.StartTime.Month()))
+		if startMonth != "" && ym < startMonth {
 			continue
 		}
-		if posMonth != "" && fmt.Sprintf("%02d", int(a.StartTime.Month())) != posMonth {
+		if endMonth != "" && ym > endMonth {
 			continue
 		}
 		out = append(out, a)

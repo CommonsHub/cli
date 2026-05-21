@@ -1800,7 +1800,9 @@ const reconcileAutoThreshold = 20
 
 // shouldReconcileAfterPush encodes the policy: --skip-reconcile opts
 // out; otherwise the new-line count decides. When skipped because of
-// the threshold, prints a hint pointing at the dedicated reconcile verb.
+// the threshold, prints a hint pointing at the dedicated reconcile
+// verb and queues a closing attention item for the compact `chb push`
+// driver to surface at the end.
 func shouldReconcileAfterPush(args []string, newLines int, label string) bool {
 	if HasFlag(args, "--skip-reconcile", "--skip-reconciliation") {
 		return false
@@ -1810,7 +1812,35 @@ func shouldReconcileAfterPush(args []string, newLines int, label string) bool {
 	}
 	fmt.Printf("  %s↳ %d new lines exceeds the auto-reconcile threshold of %d; run `chb odoo journals <id> reconcile` to reconcile them%s\n",
 		Fmt.Dim, newLines, reconcileAutoThreshold, Fmt.Reset)
+	queuePushAttentionHint(label, fmt.Sprintf("%d new lines — auto-reconcile skipped (threshold %d)", newLines, reconcileAutoThreshold))
 	return false
+}
+
+// queuePushAttentionHint adds a "needs attention" entry for the
+// compact push driver to surface at the end. label is the account
+// slug; the journal id is looked up so the suggested command is
+// copy-pasteable.
+func queuePushAttentionHint(label, message string) {
+	if label == "" {
+		return
+	}
+	journalID := 0
+	for _, acc := range LoadAccountConfigs() {
+		if strings.EqualFold(acc.Slug, label) && acc.OdooJournalID > 0 {
+			journalID = acc.OdooJournalID
+			break
+		}
+	}
+	suggested := ""
+	if journalID > 0 {
+		suggested = fmt.Sprintf("chb odoo journals %d reconcile", journalID)
+	}
+	pushAttentionHints = append(pushAttentionHints, pushAttentionHint{
+		JournalID: journalID,
+		Slug:      label,
+		Message:   message,
+		Suggested: suggested,
+	})
 }
 
 // accountProviderDisplayName returns the human-friendly source label used
@@ -2625,7 +2655,7 @@ func AccountOdooPush(slug string, args []string) error {
 			syncedCount = result.Synced
 		}
 		if syncErr == nil && stages.Explicit && stages.Metadata {
-			reviewed, updated, err := syncBlockchainOdooMetadataStage(creds, uid, acc, effectiveSinceDate, untilDate, dryRun)
+			reviewed, updated, err := syncBlockchainOdooMetadataStage(creds, uid, acc, effectiveSinceDate, untilDate, dryRun, assumeYes)
 			if err != nil {
 				syncErr = err
 			} else if reviewed > 0 {
@@ -3861,7 +3891,49 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 // Only payment_ref and narration are updated; partner_id and amount
 // are left alone (the regular --transactions stage handles those when
 // creating fresh lines).
-func syncBlockchainOdooMetadataStage(creds *OdooCredentials, uid int, acc *AccountConfig, since, until time.Time, dryRun bool) (reviewed, updated int, err error) {
+// normalizeNarration strips Odoo's HTML wrapping (`<p>…</p>`) and
+// surrounding whitespace so two narrations that differ only in markup
+// compare equal. buildOdooNarration emits raw JSON; Odoo stores it
+// wrapped — without this, every refresh would think every line is
+// stale.
+func normalizeNarration(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimPrefix(s, "<p>")
+	s = strings.TrimSuffix(s, "</p>")
+	return strings.TrimSpace(s)
+}
+
+// metadataUpdatePlan is one row in the metadata-refresh plan: the
+// statement-line + move ids, the old/new payment_ref values, and the
+// optional narration diff. Promoted out of the function body so the
+// preview helper (planChangedFields) can take it as a parameter.
+type metadataUpdatePlan struct {
+	LineID     int
+	MoveID     int
+	ImportID   string
+	Old        string
+	New        string
+	NarrChange bool
+	NarrOld    string
+	NarrNew    string
+}
+
+// planChangedFields returns a compact label like "payment_ref" /
+// "narration" / "payment_ref + narration" for the preview row tag.
+func planChangedFields(p metadataUpdatePlan) string {
+	refChange := p.New != p.Old
+	switch {
+	case refChange && p.NarrChange:
+		return "payment_ref + narration"
+	case refChange:
+		return "payment_ref"
+	case p.NarrChange:
+		return "narration"
+	}
+	return "no-op"
+}
+
+func syncBlockchainOdooMetadataStage(creds *OdooCredentials, uid int, acc *AccountConfig, since, until time.Time, dryRun, assumeYes bool) (reviewed, updated int, err error) {
 	// Local cache → index by unique_import_id.
 	local := loadAccountTransactionsForOdoo(acc)
 	localByImportID := make(map[string]TransactionEntry, len(local))
@@ -3887,17 +3959,7 @@ func syncBlockchainOdooMetadataStage(creds *OdooCredentials, uid int, acc *Accou
 		return 0, 0, fmt.Errorf("fetch journal lines: %v", err)
 	}
 
-	type planned struct {
-		LineID     int
-		MoveID     int
-		ImportID   string
-		Old        string
-		New        string
-		NarrChange bool
-		NarrOld    string
-		NarrNew    string
-	}
-	var plan []planned
+	var plan []metadataUpdatePlan
 	skippedReconciled := 0
 
 	for _, row := range lines {
@@ -3926,7 +3988,11 @@ func syncBlockchainOdooMetadataStage(creds *OdooCredentials, uid int, acc *Accou
 		curRef := odooString(row["payment_ref"])
 		curNarr := odooString(row["narration"])
 		refChange := wantRef != "" && wantRef != curRef
-		narrChange := wantNarr != "" && wantNarr != curNarr
+		// Odoo wraps stored narration in <p>...</p> but
+		// buildOdooNarration emits raw JSON. Normalize both sides
+		// before comparing so the wrapper alone doesn't classify a
+		// line as stale — that produced hundreds of false positives.
+		narrChange := wantNarr != "" && normalizeNarration(wantNarr) != normalizeNarration(curNarr)
 		if !refChange && !narrChange {
 			continue
 		}
@@ -3939,7 +4005,7 @@ func syncBlockchainOdooMetadataStage(creds *OdooCredentials, uid int, acc *Accou
 			skippedReconciled++
 			continue
 		}
-		plan = append(plan, planned{
+		plan = append(plan, metadataUpdatePlan{
 			LineID:     odooInt(row["id"]),
 			MoveID:     odooFieldID(row["move_id"]),
 			ImportID:   importID,
@@ -3949,6 +4015,21 @@ func syncBlockchainOdooMetadataStage(creds *OdooCredentials, uid int, acc *Accou
 			NarrOld:    curNarr,
 			NarrNew:    wantNarr,
 		})
+	}
+
+	// Bucket the plan by which attribute(s) actually change so the
+	// preview header tells the operator exactly what's about to move.
+	refOnly, narrOnly, both := 0, 0, 0
+	for _, p := range plan {
+		refChange := p.New != p.Old
+		switch {
+		case refChange && p.NarrChange:
+			both++
+		case refChange:
+			refOnly++
+		case p.NarrChange:
+			narrOnly++
+		}
 	}
 
 	if len(plan) == 0 {
@@ -3965,24 +4046,65 @@ func syncBlockchainOdooMetadataStage(creds *OdooCredentials, uid int, acc *Accou
 	if skippedReconciled > 0 {
 		skipHint = fmt.Sprintf(", %d already-reconciled skipped", skippedReconciled)
 	}
-	fmt.Printf("  %s↻ metadata stage: %d reviewed, %d stale%s%s\n",
+	fmt.Printf("\n  %s↻ Metadata refresh — %d reviewed, %d stale%s%s\n",
 		Fmt.Bold, reviewed, len(plan), skipHint, Fmt.Reset)
+	fmt.Printf("  %sWill update on each stale line (draft → write → repost):%s\n", Fmt.Dim, Fmt.Reset)
+	if refOnly+both > 0 {
+		fmt.Printf("    %s• payment_ref%s on %d line%s\n",
+			Fmt.Yellow, Fmt.Reset, refOnly+both, plural(refOnly+both))
+	}
+	if narrOnly+both > 0 {
+		fmt.Printf("    %s• narration%s on %d line%s\n",
+			Fmt.Yellow, Fmt.Reset, narrOnly+both, plural(narrOnly+both))
+	}
+	fmt.Println()
+
+	previewLimit := 5
+	if dryRun {
+		previewLimit = len(plan)
+	}
 	for i, p := range plan {
-		if i < 5 || dryRun {
-			oldRef := truncate(p.Old, 50)
-			newRef := truncate(p.New, 50)
-			fmt.Printf("    %sline #%d%s  %s%s%s → %s%s%s\n",
-				Fmt.Dim, p.LineID, Fmt.Reset,
+		if i >= previewLimit {
+			break
+		}
+		fields := planChangedFields(p)
+		oldRef := truncate(p.Old, 50)
+		newRef := truncate(p.New, 50)
+		fmt.Printf("    %sline #%d%s  [%s]\n",
+			Fmt.Dim, p.LineID, Fmt.Reset, fields)
+		if p.New != p.Old {
+			fmt.Printf("      %spayment_ref:%s %s%s%s → %s%s%s\n",
+				Fmt.Dim, Fmt.Reset,
 				Fmt.Yellow, oldRef, Fmt.Reset,
 				Fmt.Green, newRef, Fmt.Reset)
 		}
+		if p.NarrChange {
+			fmt.Printf("      %snarration:%s  %s%s%s → %s%s%s\n",
+				Fmt.Dim, Fmt.Reset,
+				Fmt.Yellow, truncate(p.NarrOld, 50), Fmt.Reset,
+				Fmt.Green, truncate(p.NarrNew, 50), Fmt.Reset)
+		}
 	}
-	if !dryRun && len(plan) > 5 {
-		fmt.Printf("    %s…and %d more%s\n", Fmt.Dim, len(plan)-5, Fmt.Reset)
+	if len(plan) > previewLimit {
+		fmt.Printf("    %s… and %d more (--verbose / --dry-run to see all)%s\n",
+			Fmt.Dim, len(plan)-previewLimit, Fmt.Reset)
 	}
+
 	if dryRun {
-		fmt.Printf("  %s(dry-run — no writes)%s\n", Fmt.Dim, Fmt.Reset)
+		fmt.Printf("\n  %s(dry-run — no writes)%s\n", Fmt.Dim, Fmt.Reset)
 		return reviewed, 0, nil
+	}
+
+	if !assumeYes {
+		fmt.Printf("\n  %sApply %d update%s to %s? [y/N] %s",
+			Fmt.Bold, len(plan), plural(len(plan)), acc.Slug, Fmt.Reset)
+		reader := bufio.NewReader(os.Stdin)
+		resp, _ := reader.ReadString('\n')
+		resp = strings.TrimSpace(strings.ToLower(resp))
+		if resp != "y" && resp != "yes" {
+			fmt.Println("  Aborted.")
+			return reviewed, 0, nil
+		}
 	}
 
 	// Apply: each unreconciled bank line lives on a posted move; writing
@@ -3991,15 +4113,25 @@ func syncBlockchainOdooMetadataStage(creds *OdooCredentials, uid int, acc *Accou
 	// "vous ne pouvez pas supprimer une écriture comptable validée".
 	// Draft → write → repost is the standard workaround, same shape as
 	// applyOdooMappingAccount uses for counterpart-account rewrites.
-	for _, p := range plan {
+	//
+	// Per-line progress: each iteration costs 3 RPCs (draft / write /
+	// post), so a 200-line batch easily takes 30s+. Without a live
+	// counter the loop looks frozen — surface it on stderr.
+	status := newStatusLine()
+	defer status.Clear()
+	failed := 0
+	for i, p := range plan {
+		status.Update("Metadata refresh %d/%d (%d ok, %d failed)…", i+1, len(plan), updated, failed)
 		if p.MoveID == 0 {
 			Warnf("    %s⚠ line #%d: missing move_id; skipped%s", Fmt.Yellow, p.LineID, Fmt.Reset)
+			failed++
 			continue
 		}
 		if _, werr := odooExec(creds.URL, creds.DB, uid, creds.Password,
 			"account.move", "button_draft",
 			[]interface{}{[]interface{}{p.MoveID}}, nil); werr != nil {
 			Warnf("    %s⚠ line #%d draft: %v%s", Fmt.Yellow, p.LineID, werr, Fmt.Reset)
+			failed++
 			continue
 		}
 		patch := map[string]interface{}{"payment_ref": p.New}
@@ -4018,14 +4150,26 @@ func syncBlockchainOdooMetadataStage(creds *OdooCredentials, uid int, acc *Accou
 			"account.move", "action_post",
 			[]interface{}{[]interface{}{p.MoveID}}, nil); postErr != nil {
 			Warnf("    %s⚠ line #%d repost: %v%s", Fmt.Yellow, p.LineID, postErr, Fmt.Reset)
+			failed++
 			continue
 		}
 		if writeErr != nil {
 			Warnf("    %s⚠ line #%d write: %v%s", Fmt.Yellow, p.LineID, writeErr, Fmt.Reset)
+			failed++
 			continue
 		}
 		updated++
 	}
+	status.Clear()
+	mark := Fmt.Green + "✓" + Fmt.Reset
+	if failed > 0 {
+		mark = Fmt.Yellow + "⚠" + Fmt.Reset
+	}
+	fmt.Printf("  %s %d/%d updated", mark, updated, len(plan))
+	if failed > 0 {
+		fmt.Printf(" (%s%d failed%s)", Fmt.Red, failed, Fmt.Reset)
+	}
+	fmt.Println()
 	// Refresh local journal cache so subsequent dry-run / reconcile
 	// passes see the new payment_refs.
 	if updated > 0 {
@@ -4985,25 +5129,18 @@ func buildOdooPaymentRef(tx TransactionEntry) string {
 		}
 		return ref
 	}
-	// Prefer description over counterparty: the description usually
-	// carries the human-readable memo (incl. invoice references like
-	// "MEM/2026/00048"), which is what the reconcile matcher's
-	// strategy 1 looks for. The partner is already attributed via
-	// partner_id, so we don't lose the customer name by demoting
-	// Counterparty to a fallback. Counterparty wins only when both are
-	// non-empty AND the description doesn't already mention it — that
-	// pads bare-counterparty cases (e.g. blockchain transfers with no
-	// memo) without duplicating info.
-	desc := txDisplayDescription(tx)
-	counterparty := strings.TrimSpace(tx.Counterparty)
-	if desc != "" {
-		if counterparty != "" && !strings.Contains(strings.ToLower(desc), strings.ToLower(counterparty)) {
-			return counterparty + " — " + desc
-		}
+	// Prefer description — it's where the memo with the invoice ref
+	// lives, and that's what the reconcile matcher's strategy 1 needs.
+	// Counterparty is intentionally NOT concatenated: partner_id on
+	// the bank line already carries the customer identity, so repeating
+	// the name in payment_ref just clutters the reconcile-i view ("RCR?
+	// — mem/2026/00059" duplicates the Counterparty column). Falls
+	// back to counterparty only when there's no description at all.
+	if desc := strings.TrimSpace(txDisplayDescription(tx)); desc != "" {
 		return desc
 	}
-	if counterparty != "" {
-		return counterparty
+	if cp := strings.TrimSpace(tx.Counterparty); cp != "" {
+		return cp
 	}
 	paymentRef := strings.ToLower(tx.Type)
 	if tx.Currency != "" {

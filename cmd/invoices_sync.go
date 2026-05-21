@@ -213,13 +213,15 @@ type OdooInvoiceTx struct {
 }
 
 type OdooInvoicePayment struct {
-	PaymentID int     `json:"paymentId,omitempty"`
-	MoveID    int     `json:"moveId,omitempty"`
-	Date      string  `json:"date,omitempty"`
-	Journal   string  `json:"journal,omitempty"`
-	Reference string  `json:"reference,omitempty"`
-	Amount    float64 `json:"amount,omitempty"`
-	TxHash    string  `json:"txHash,omitempty"`
+	PaymentID    int     `json:"paymentId,omitempty"`
+	MoveID       int     `json:"moveId,omitempty"`
+	Date         string  `json:"date,omitempty"`
+	Journal      string  `json:"journal,omitempty"`
+	Reference    string  `json:"reference,omitempty"`
+	Amount       float64 `json:"amount,omitempty"`
+	TxHash       string  `json:"txHash,omitempty"`
+	PayerName    string  `json:"payerName,omitempty"`    // who actually paid (account.payment.partner_id, or partner_bank's owner)
+	PayerAccount string  `json:"payerAccount,omitempty"` // IBAN / acc_number the payment was made from
 }
 
 type OdooDocumentAttachment struct {
@@ -845,6 +847,14 @@ func enrichOutgoingInvoices(creds *OdooCredentials, uid int, rawInvoices []map[s
 		invoices = append(invoices, inv)
 	}
 
+	// Batch-enrich payments with payer info (partner_id + partner_bank_id
+	// from account.payment). The widget data we parsed only carries the
+	// journal name — useful but not as actionable as knowing who actually
+	// paid + from which IBAN. One round-trip across all invoices' payments
+	// is enough; result is cached locally in invoices.json / bills.json
+	// so the interactive reconcile prompt has it offline.
+	enrichInvoicePaymentsWithPayer(creds, uid, invoices)
+
 	sort.Slice(invoices, func(i, j int) bool {
 		if invoices[i].InvoiceDate == invoices[j].InvoiceDate {
 			return invoices[i].ID > invoices[j].ID
@@ -852,6 +862,173 @@ func enrichOutgoingInvoices(creds *OdooCredentials, uid int, rawInvoices []map[s
 		return invoices[i].InvoiceDate > invoices[j].InvoiceDate
 	})
 	return invoices, nil
+}
+
+// synthesizePaymentsFromAccountPayment queries account.payment for any
+// invoice in `invoices` that's paid / partial / in_payment but has an
+// empty Payments slice (typical when Odoo's invoice_payments_widget
+// field doesn't roundtrip cleanly — seen in some Odoo 17+ instances).
+// Populates inv.Payments[] with one entry per related payment, mirroring
+// the shape parseInvoicePaymentsWidget produces. Best-effort: silently
+// no-op on RPC errors.
+func synthesizePaymentsFromAccountPayment(creds *OdooCredentials, uid int, invoices []OdooOutgoingInvoice) {
+	var needsLookup []int
+	indexByID := map[int]int{}
+	for i, inv := range invoices {
+		state := strings.ToLower(inv.PaymentState)
+		if state != "paid" && state != "in_payment" && state != "partial" {
+			continue
+		}
+		if len(inv.Payments) > 0 {
+			continue
+		}
+		if inv.ID == 0 {
+			continue
+		}
+		needsLookup = append(needsLookup, inv.ID)
+		indexByID[inv.ID] = i
+	}
+	if len(needsLookup) == 0 {
+		return
+	}
+	rows, err := odooSearchReadAllMaps(creds, uid, "account.payment",
+		[]interface{}{[]interface{}{"reconciled_invoice_ids", "in", intsToInterfaces(needsLookup)}},
+		[]string{"id", "move_id", "date", "journal_id", "name", "ref",
+			"amount", "reconciled_invoice_ids"},
+		"id asc")
+	if err != nil {
+		return
+	}
+	for _, r := range rows {
+		paymentID := odooInt(r["id"])
+		if paymentID == 0 {
+			continue
+		}
+		entry := OdooInvoicePayment{
+			PaymentID: paymentID,
+			MoveID:    odooFieldID(r["move_id"]),
+			Date:      odooString(r["date"]),
+			Journal:   odooFieldName(r["journal_id"]),
+			Reference: firstNonEmpty(odooString(r["ref"]), odooString(r["name"])),
+			Amount:    odooFloat(r["amount"]),
+		}
+		entry.TxHash = extractTxHash(entry.Reference)
+		for _, invID := range odooIDList(r["reconciled_invoice_ids"]) {
+			idx, ok := indexByID[invID]
+			if !ok {
+				continue
+			}
+			invoices[idx].Payments = append(invoices[idx].Payments, entry)
+		}
+	}
+}
+
+// enrichInvoicePaymentsWithPayer fills PayerName + PayerAccount on
+// each invoice's payments by batched reads of account.payment +
+// res.partner.bank. Also *synthesises* the Payments slice for paid /
+// in_payment / partial invoices whose widget data came back empty
+// (newer Odoo versions don't always populate invoice_payments_widget),
+// querying account.payment.reconciled_invoice_ids directly. Best-effort:
+// errors leave the fields empty, they're not load-bearing for any
+// other flow.
+func enrichInvoicePaymentsWithPayer(creds *OdooCredentials, uid int, invoices []OdooOutgoingInvoice) {
+	// First: fill in Payments[] for paid/partial/in_payment invoices
+	// that came back without widget data. We query account.payment
+	// directly using reconciled_invoice_ids — robust against any
+	// Odoo version that quirks the widget format.
+	synthesizePaymentsFromAccountPayment(creds, uid, invoices)
+
+	paymentIDSet := map[int]bool{}
+	for _, inv := range invoices {
+		for _, p := range inv.Payments {
+			if p.PaymentID > 0 {
+				paymentIDSet[p.PaymentID] = true
+			}
+		}
+	}
+	if len(paymentIDSet) == 0 {
+		return
+	}
+	paymentIDs := make([]int, 0, len(paymentIDSet))
+	for id := range paymentIDSet {
+		paymentIDs = append(paymentIDs, id)
+	}
+	paymentRows, err := odooReadMapsByIDs(creds, uid, "account.payment", paymentIDs,
+		[]string{"id", "partner_id", "partner_bank_id"})
+	if err != nil {
+		return
+	}
+	bankIDSet := map[int]bool{}
+	type paymentInfo struct {
+		PartnerName string
+		BankID      int
+	}
+	info := make(map[int]paymentInfo, len(paymentRows))
+	for _, r := range paymentRows {
+		id := odooInt(r["id"])
+		if id == 0 {
+			continue
+		}
+		bankID := odooFieldID(r["partner_bank_id"])
+		if bankID > 0 {
+			bankIDSet[bankID] = true
+		}
+		info[id] = paymentInfo{
+			PartnerName: odooFieldName(r["partner_id"]),
+			BankID:      bankID,
+		}
+	}
+	bankByID := map[int]struct {
+		Acc   string
+		Owner string
+	}{}
+	if len(bankIDSet) > 0 {
+		bankIDs := make([]int, 0, len(bankIDSet))
+		for id := range bankIDSet {
+			bankIDs = append(bankIDs, id)
+		}
+		bankRows, berr := odooReadMapsByIDs(creds, uid, "res.partner.bank", bankIDs,
+			[]string{"id", "acc_number", "sanitized_acc_number", "partner_id"})
+		if berr == nil {
+			for _, r := range bankRows {
+				id := odooInt(r["id"])
+				if id == 0 {
+					continue
+				}
+				acc := strings.TrimSpace(odooString(r["sanitized_acc_number"]))
+				if acc == "" {
+					acc = strings.TrimSpace(odooString(r["acc_number"]))
+				}
+				bankByID[id] = struct {
+					Acc   string
+					Owner string
+				}{
+					Acc:   acc,
+					Owner: odooFieldName(r["partner_id"]),
+				}
+			}
+		}
+	}
+	for i := range invoices {
+		for j, p := range invoices[i].Payments {
+			pi, ok := info[p.PaymentID]
+			if !ok {
+				continue
+			}
+			invoices[i].Payments[j].PayerName = pi.PartnerName
+			if pi.BankID > 0 {
+				if b, ok := bankByID[pi.BankID]; ok {
+					invoices[i].Payments[j].PayerAccount = b.Acc
+					// res.partner.bank.partner_id is sometimes the
+					// actual account owner when it differs from the
+					// payment.partner_id (parent/subsidiary case).
+					if invoices[i].Payments[j].PayerName == "" && b.Owner != "" {
+						invoices[i].Payments[j].PayerName = b.Owner
+					}
+				}
+			}
+		}
+	}
 }
 
 func buildInvoicePartner(row map[string]interface{}) OdooInvoicePartner {
