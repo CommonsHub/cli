@@ -11,6 +11,12 @@ import (
 var VERSION string
 
 func exitWithError(err error) {
+	// Blank line on stderr before the footer so it visually separates
+	// from whatever the failed step last printed (status-line rewrites,
+	// per-journal rows, etc. can otherwise run flush against the
+	// "Error:" line and bury it). Kept out of the Errorf payload so the
+	// diagnostics log file doesn't pick up the stray blank.
+	os.Stderr.WriteString("\n")
 	cmd.Errorf("%sError:%s %v", cmd.Fmt.Red, cmd.Fmt.Reset, err)
 	exitAfterDiagnostics()
 }
@@ -376,8 +382,9 @@ func main() {
 		}
 	case "sync":
 		// `chb sync` is the full hourly-cron loop: pull from every source,
-		// then push to every target. Equivalent to:
-		//   chb pull && chb push
+		// generate the derived outputs, then push to every target.
+		// Equivalent to:
+		//   chb pull && chb generate && chb push
 		// Designed to be safe to run unattended (push uses the
 		// auto-reconcile-when-≤20-new-lines policy so manual back-fills
 		// stay out of cron's reach).
@@ -386,6 +393,9 @@ func main() {
 			return
 		}
 		if err := cmd.ProvidersCommand(append([]string{"*", "pull"}, args[1:]...)); err != nil {
+			exitWithError(err)
+		}
+		if err := cmd.Generate(args[1:]); err != nil {
 			exitWithError(err)
 		}
 		if err := cmd.PushAllTargets(args[1:]); err != nil {

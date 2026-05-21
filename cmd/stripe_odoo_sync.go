@@ -33,6 +33,11 @@ import (
 
 // syncStripeChronological is the implementation. AccountOdooPush routes here
 // for Stripe accounts.
+// stripeSummaryCursorMatched is the sentinel summary value returned
+// when the local-first cursor short-circuit kicked in. AccountOdooPush
+// matches on it (via strings.Contains) to skip the post-push reconcile.
+const stripeSummaryCursorMatched = "already in sync (cursor)"
+
 func syncStripeChronological(
 	acc *AccountConfig,
 	creds *OdooCredentials,
@@ -80,6 +85,36 @@ func syncStripeChronological(
 		}
 		return bts[i].Created < bts[j].Created
 	})
+	// Snapshot the full local BT set BEFORE any cursor filtering so we
+	// can stamp the post-push cursor correctly: cursor.Count = total
+	// local BTs, cursor.LastImportID = latest local BT. Without this,
+	// after filterStripeBTsAfterOdooCursor narrows bts, we'd save a
+	// cursor reflecting only the just-pushed slice — not what's locally
+	// available — and the next sync's short-circuit would always miss.
+	totalLocalBTs := len(bts)
+	var latestLocalImportID string
+	var latestLocalCreated int64
+	if totalLocalBTs > 0 {
+		latestLocalImportID = stripeBTImportID(acc, bts[totalLocalBTs-1])
+		latestLocalCreated = bts[totalLocalBTs-1].Created
+	}
+
+	// Local-first cursor short-circuit: if our saved cursor's last
+	// import id + count matches what we have locally, there's nothing
+	// new to push — exit before any Odoo RPC. Catches the common case
+	// where Stripe returned no new BTs since last sync. --history /
+	// --force / explicit date windows bypass to force the full check.
+	// Caller (AccountOdooPush) recognises the "(cursor)" summary
+	// suffix and skips the follow-up auto-reconcile pass.
+	if !useHistory && !force && sinceDate.IsZero() && untilDate.IsZero() && !dryRun && totalLocalBTs > 0 {
+		cur := LoadSyncCursor(SyncCursorKeyForStripeAccount(acc.AccountID))
+		if cur.LastImportID != "" && cur.Count == totalLocalBTs && cur.LastImportID == latestLocalImportID {
+			odooLog("  %sStripe: already in sync (cursor — %d BTs)%s\n",
+				Fmt.Dim, totalLocalBTs, Fmt.Reset)
+			return stripeSummaryCursorMatched, nil
+		}
+	}
+
 	if !useHistory && sinceDate.IsZero() && untilDate.IsZero() && !(dryRun && force) {
 		cursor, cursorErr := fetchLatestStripeOdooImportCursor(creds, uid, acc.OdooJournalID, acc.AccountID)
 		if cursorErr != nil {
@@ -601,6 +636,19 @@ func syncStripeChronological(
 		summary = fmt.Sprintf("%d new, %d statements closed", stats.LinesCreated, stats.Statements)
 	default:
 		summary = fmt.Sprintf("%d new", stats.LinesCreated)
+	}
+	// Stamp the cursor so the next sync's local-first check can
+	// short-circuit. Only when the push fully succeeded, and only
+	// when we were processing the full local set (no --since/--until
+	// window). Uses the pre-filter snapshot so the cursor reflects
+	// what's locally available, not just what we pushed this round.
+	if !dryRun && stats.LinesFailed == 0 && totalLocalBTs > 0 && sinceDate.IsZero() && untilDate.IsZero() {
+		_ = SaveSyncCursor(SyncCursor{
+			Key:           SyncCursorKeyForStripeAccount(acc.AccountID),
+			LastImportID:  latestLocalImportID,
+			LastTimestamp: latestLocalCreated,
+			Count:         totalLocalBTs,
+		})
 	}
 	return summary, nil
 }

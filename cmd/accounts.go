@@ -106,6 +106,10 @@ type accountOdooSyncSnapshot struct {
 type blockchainOdooSyncResult struct {
 	Summary string
 	Synced  int
+	// CursorMatched is true when the push exited via the local cursor
+	// short-circuit (no Odoo RPCs at all). Callers can use this to
+	// skip a follow-up auto-reconcile pass that has nothing to do.
+	CursorMatched bool
 }
 
 type odooSyncPlanRow struct {
@@ -2446,9 +2450,19 @@ func AccountOdooPush(slug string, args []string) error {
 		return wrapOdooAuthError(err)
 	}
 
+	// At end-of-push, refetch any journal caches that the mirror hook
+	// flagged as needing a fresh server snapshot (create/unlink/reconcile
+	// side effects we can't always mirror precisely).
+	defer FlushOdooCacheRefetches(creds, uid)
+
 	dryRun := HasFlag(args, "--dry-run")
 	force := HasFlag(args, "--force")
-	if !dryRun {
+	if !dryRun && !quietOdooContext() {
+		// Skip the standalone "Odoo target: …" banner when running
+		// under PushAllTargets / odooJournalsSyncAll — the outer
+		// "Pushing changes — Odoo: <db>" banner already names the
+		// target, and printing it here would interrupt the per-journal
+		// status-line stream.
 		printOdooWriteBannerOnce(creds.URL, creds.DB)
 	}
 	// Reconciliation policy:
@@ -2601,8 +2615,9 @@ func AccountOdooPush(slug string, args []string) error {
 		if stages.Transactions {
 			syncedCount = parseStripeUploadCount(summary)
 		}
-		if syncErr == nil && shouldReconcileAfterPush(args, syncedCount, "stripe") && !dryRun {
-			if err := odooJournalReconcile(creds, uid, acc.OdooJournalID, assumeYes, dryRun, false); err != nil {
+		stripeCursorMatched := strings.Contains(summary, "(cursor)")
+		if syncErr == nil && shouldReconcileAfterPush(args, syncedCount, "stripe") && !dryRun && !stripeCursorMatched {
+			if err := odooJournalReconcile(creds, uid, acc.OdooJournalID, true, dryRun, false); err != nil {
 				syncErr = err
 			} else {
 				summary += ", reconcile pass complete"
@@ -2630,10 +2645,24 @@ func AccountOdooPush(slug string, args []string) error {
 		kbcCreated, syncErr = mergeKBCJournalWithCSV(creds, uid, acc.OdooJournalID, acc, dryRun, assumeYes, false)
 		syncedCount = kbcCreated
 		if syncErr == nil {
-			summary = "merged from CSV"
+			switch {
+			case dryRun:
+				// applyKBCMerge is short-circuited in dry-run, so
+				// "merged" would be a lie. Surface what the planner
+				// found instead.
+				if kbcCreated > 0 {
+					summary = fmt.Sprintf("dry-run: %d line%s would be merged", kbcCreated, plural(kbcCreated))
+				} else {
+					summary = "dry-run: nothing to merge"
+				}
+			case kbcCreated > 0:
+				summary = fmt.Sprintf("merged %d line%s from CSV", kbcCreated, plural(kbcCreated))
+			default:
+				summary = "already in sync"
+			}
 		}
 		if syncErr == nil && shouldReconcileAfterPush(args, syncedCount, "kbc") && !dryRun {
-			if err := odooJournalReconcile(creds, uid, acc.OdooJournalID, assumeYes, dryRun, false); err != nil {
+			if err := odooJournalReconcile(creds, uid, acc.OdooJournalID, true, dryRun, false); err != nil {
 				syncErr = err
 			} else {
 				summary += ", reconcile pass complete"
@@ -2648,11 +2677,13 @@ func AccountOdooPush(slug string, args []string) error {
 		if stages.Explicit && (stages.Partners || stages.Accounts) {
 			return fmt.Errorf("for this account, only --transactions and --metadata are supported; run reconcile separately with `chb odoo journals %d reconcile`", acc.OdooJournalID)
 		}
+		cursorMatched := false
 		if !stages.Explicit || stages.Transactions {
 			var result blockchainOdooSyncResult
-			result, syncErr = syncBlockchainToOdoo(acc, creds, uid, monthsLimit, dryRun, skipReconciliation, sinceDate, untilDate, useHistory, previewLimit)
+			result, syncErr = syncBlockchainToOdoo(acc, creds, uid, monthsLimit, dryRun, skipReconciliation, sinceDate, untilDate, useHistory, previewLimit, HasFlag(args, "--reapply-partners"))
 			summary = result.Summary
 			syncedCount = result.Synced
+			cursorMatched = result.CursorMatched
 		}
 		if syncErr == nil && stages.Explicit && stages.Metadata {
 			reviewed, updated, err := syncBlockchainOdooMetadataStage(creds, uid, acc, effectiveSinceDate, untilDate, dryRun, assumeYes)
@@ -2665,8 +2696,8 @@ func AccountOdooPush(slug string, args []string) error {
 				summary += fmt.Sprintf("metadata %d/%d", updated, reviewed)
 			}
 		}
-		if syncErr == nil && shouldReconcileAfterPush(args, syncedCount, acc.Slug) && !dryRun && (!stages.Explicit || stages.Transactions) {
-			if err := odooJournalReconcile(creds, uid, acc.OdooJournalID, assumeYes, dryRun, false); err != nil {
+		if syncErr == nil && shouldReconcileAfterPush(args, syncedCount, acc.Slug) && !dryRun && (!stages.Explicit || stages.Transactions) && !cursorMatched {
+			if err := odooJournalReconcile(creds, uid, acc.OdooJournalID, true, dryRun, false); err != nil {
 				syncErr = err
 			} else {
 				summary += ", reconcile pass complete"
@@ -2704,6 +2735,7 @@ func AccountOdooPush(slug string, args []string) error {
 
 	var mismatch string
 	if !dryRun {
+		Progress("verifying live balance")
 		live, detail := verifyJournalBalanceAgainstLive(acc, creds, uid)
 		mismatch = detail
 		if !quietOdooContext() && live != 0 {
@@ -2719,10 +2751,16 @@ func AccountOdooPush(slug string, args []string) error {
 	}
 
 	if quietOdooContext() {
-		after, snapErr := fetchOdooJournalSnapshot(creds, uid, acc.OdooJournalID, accCurrency(acc))
+		// Prefer the local journal-lines cache for the row render — we
+		// just stamped it as part of this push (either via the cursor
+		// short-circuit path or the watermark refresh). Zero RPCs, ~1ms
+		// vs ~500ms-1s for the 3-RPC fetchOdooJournalSnapshot fallback.
 		balanceStr := "?"
 		txCount := 0
-		if snapErr == nil {
+		if after, ok := fetchOdooJournalSnapshotLocal(acc.OdooJournalID, accCurrency(acc)); ok {
+			balanceStr = formatAccountDataBalance(after.Balance, after.Currency)
+			txCount = after.TxCount
+		} else if after, snapErr := fetchOdooJournalSnapshot(creds, uid, acc.OdooJournalID, accCurrency(acc)); snapErr == nil {
 			balanceStr = formatAccountDataBalance(after.Balance, after.Currency)
 			txCount = after.TxCount
 		}
@@ -2933,6 +2971,40 @@ func accountLocalOdooSyncSnapshot(acc *AccountConfig) accountOdooSyncSnapshot {
 		}
 	}
 	return accountLocalOdooSnapshot(acc, loadAccountTransactionsForOdoo(acc))
+}
+
+// fetchOdooJournalSnapshotLocal builds the same snapshot from the
+// local journal-lines cache — zero Odoo RPCs. Used after a push when
+// the cache is known fresh (we just stamped it). Returns ok=false
+// when no cache exists or it's empty, so the caller can fall back to
+// the RPC version.
+func fetchOdooJournalSnapshotLocal(journalID int, currency string) (accountOdooSyncSnapshot, bool) {
+	snap := accountOdooSyncSnapshot{
+		Label:    fmt.Sprintf("Odoo journal #%d", journalID),
+		Currency: currency,
+	}
+	cache, ok := loadLatestOdooJournalLinesCache(journalID)
+	if !ok || len(cache) == 0 {
+		return snap, false
+	}
+	var balance float64
+	var first, last time.Time
+	for _, ln := range cache {
+		balance += ln.Amount
+		if t, err := time.Parse("2006-01-02", ln.Date); err == nil {
+			if first.IsZero() || t.Before(first) {
+				first = t
+			}
+			if t.After(last) {
+				last = t
+			}
+		}
+	}
+	snap.TxCount = len(cache)
+	snap.Balance = roundCents(balance)
+	snap.FirstTxAt = first
+	snap.LastTxAt = last
+	return snap, true
 }
 
 func fetchOdooJournalSnapshot(creds *OdooCredentials, uid int, journalID int, currency string) (accountOdooSyncSnapshot, error) {
@@ -3649,7 +3721,7 @@ func odooJournalLineSum(creds *OdooCredentials, uid int, journalID int) (float64
 }
 
 // syncBlockchainToOdoo syncs blockchain/monerium transactions to Odoo (no statements, just lines).
-func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, monthsLimit int, dryRun bool, skipReconciliation bool, sinceDate, untilDate time.Time, useHistory bool, previewLimit int) (blockchainOdooSyncResult, error) {
+func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, monthsLimit int, dryRun bool, skipReconciliation bool, sinceDate, untilDate time.Time, useHistory bool, previewLimit int, reapplyPartners bool) (blockchainOdooSyncResult, error) {
 	localTxs := loadAccountTransactionsForOdoo(acc)
 	sort.SliceStable(localTxs, func(i, j int) bool {
 		if localTxs[i].Timestamp == localTxs[j].Timestamp {
@@ -3690,11 +3762,27 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 		localTxs = filtered
 	}
 
+	// Local-first cursor check: if the saved cursor says the latest
+	// local tx + count matches what we last pushed, there's nothing
+	// to do — skip every Odoo RPC. Catches the common "nothing new
+	// since last sync" case in zero round-trips. --history / --force
+	// bypass this since they explicitly request a full re-check.
+	if !useHistory && acc.OdooJournalID != 0 && len(localTxs) > 0 && !dryRun {
+		cur := LoadSyncCursor(SyncCursorKeyForOdooJournal(acc.OdooJournalID))
+		if cur.LastImportID != "" && cur.Count == len(localTxs) {
+			latestLocalID := buildUniqueImportID(acc, localTxs[len(localTxs)-1])
+			if cur.LastImportID == latestLocalID {
+				return blockchainOdooSyncResult{Summary: "already in sync (cursor)", CursorMatched: true}, nil
+			}
+		}
+	}
+
 	// Auto-escalate to history mode when local has more txs than Odoo.
 	// The cursor-based pass only looks at local txs newer than the latest
 	// Odoo line, so older missing txs (e.g. a tx that was deleted in
 	// Odoo, or a gap from an older partial sync) would be invisible.
 	if !useHistory && acc.OdooJournalID != 0 {
+		Progress("checking Odoo line count")
 		if odooCount, err := odooStatementLineCount(creds, uid, acc.OdooJournalID); err == nil && len(localTxs) > odooCount {
 			odooLog("  %sDrift detected: local has %s, Odoo has %s — escalating to full history check.%s\n",
 				Fmt.Dim, Pluralize(len(localTxs), "tx", ""), Pluralize(odooCount, "line", ""), Fmt.Reset)
@@ -3706,6 +3794,7 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 	if useHistory {
 		scopeLabel = "--history"
 	} else {
+		Progress("reading latest Odoo cursor")
 		cursor, err := fetchLatestOdooImportCursor(creds, uid, acc.OdooJournalID)
 		if err != nil {
 			Warnf("  %s⚠ Could not read latest Odoo line, falling back to full duplicate check: %v%s", Fmt.Yellow, err, Fmt.Reset)
@@ -3726,8 +3815,10 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 	var existingIDs map[string]bool
 	var err error
 	if useHistory {
+		Progress("fetching all Odoo import ids")
 		existingIDs, err = fetchOdooImportIDs(creds.URL, creds.DB, uid, creds.Password, acc.OdooJournalID)
 	} else {
+		Progress(fmt.Sprintf("checking %d import ids against Odoo", len(localTxs)))
 		existingIDs, err = fetchOdooImportIDsForTransactions(creds, uid, acc.OdooJournalID, acc, localTxs)
 	}
 	if err != nil {
@@ -3741,7 +3832,14 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 		importID := buildUniqueImportID(acc, tx)
 		localByImportID[importID] = append(localByImportID[importID], tx)
 		if existingIDs[importID] {
-			if !dryRun {
+			// Reapply-partners loop: previously this ran on every sync
+			// for every existing line — 2–3 RPCs per tx, sequentially,
+			// turning a 0-new-line push of a 700-line journal into
+			// minutes of round-trips. Now gated behind --reapply-partners
+			// so the normal "nothing new" sync stays instant. The flag
+			// is the right tool for a one-time backfill after a new
+			// rule lands or after Monerium enrichment fills in IBANs.
+			if !dryRun && reapplyPartners {
 				if updated, err := ensureOdooStatementLinePartnerBank(creds, uid, acc.OdooJournalID, importID, tx); err == nil && updated {
 					partnerUpdates++
 				} else if err != nil {
@@ -3763,6 +3861,10 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 				return blockchainOdooSyncResult{}, err
 			}
 		}
+		// Persist cursor even on the "nothing new" path so the next
+		// sync hits the cheap local-first short-circuit instead of
+		// going through this full re-check.
+		saveOdooJournalPushCursor(acc, localTxs, false)
 		if partnerUpdates > 0 {
 			return blockchainOdooSyncResult{Summary: fmt.Sprintf("already in sync, %d partner links updated", partnerUpdates)}, nil
 		}
@@ -3783,6 +3885,7 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 	// via applyOdooMapping; this loop trusts them as-is and does not
 	// re-run the OdooMapping lookup chain.
 	for i, tx := range missing {
+		Progress(fmt.Sprintf("uploading line %d/%d", i+1, len(missing)))
 		t := time.Unix(tx.Timestamp, 0).In(BrusselsTZ())
 		amt := signedOdooAmountForTransaction(acc, tx)
 
@@ -3875,7 +3978,26 @@ func syncBlockchainToOdoo(acc *AccountConfig, creds *OdooCredentials, uid int, m
 	if errors > 0 {
 		summary = fmt.Sprintf("%d new, %d failed", synced, errors)
 	}
+	// Persist the cursor so the next sync's local-first check can
+	// short-circuit. Only when at least one line was actually written.
+	saveOdooJournalPushCursor(acc, localTxs, errors > 0)
 	return blockchainOdooSyncResult{Summary: summary, Synced: synced}, nil
+}
+
+// saveOdooJournalPushCursor stamps the latest local tx + count onto
+// the cursor file for this journal. Skipped when the push had errors
+// (partial state would mark us as "in sync" while still missing lines).
+func saveOdooJournalPushCursor(acc *AccountConfig, localTxs []TransactionEntry, hadErrors bool) {
+	if hadErrors || len(localTxs) == 0 || acc.OdooJournalID == 0 {
+		return
+	}
+	latest := localTxs[len(localTxs)-1]
+	_ = SaveSyncCursor(SyncCursor{
+		Key:           SyncCursorKeyForOdooJournal(acc.OdooJournalID),
+		LastImportID:  buildUniqueImportID(acc, latest),
+		LastTimestamp: latest.Timestamp,
+		Count:         len(localTxs),
+	})
 }
 
 // syncBlockchainOdooMetadataStage walks every Odoo bank-statement-line
@@ -4095,13 +4217,13 @@ func syncBlockchainOdooMetadataStage(creds *OdooCredentials, uid int, acc *Accou
 		return reviewed, 0, nil
 	}
 
-	if !assumeYes {
-		fmt.Printf("\n  %sApply %d update%s to %s? [y/N] %s",
+	if !assumeYes && isInteractiveTTY() {
+		fmt.Printf("\n  %sApply %d update%s to %s? [Y/n] %s",
 			Fmt.Bold, len(plan), plural(len(plan)), acc.Slug, Fmt.Reset)
 		reader := bufio.NewReader(os.Stdin)
 		resp, _ := reader.ReadString('\n')
 		resp = strings.TrimSpace(strings.ToLower(resp))
-		if resp != "y" && resp != "yes" {
+		if resp == "n" || resp == "no" {
 			fmt.Println("  Aborted.")
 			return reviewed, 0, nil
 		}
@@ -4114,9 +4236,40 @@ func syncBlockchainOdooMetadataStage(creds *OdooCredentials, uid int, acc *Accou
 	// Draft → write → repost is the standard workaround, same shape as
 	// applyOdooMappingAccount uses for counterpart-account rewrites.
 	//
-	// Per-line progress: each iteration costs 3 RPCs (draft / write /
-	// post), so a 200-line batch easily takes 30s+. Without a live
+	// Fetch the current state of every move up front so we don't try to
+	// button_draft a move that's already in draft (Odoo rejects that
+	// with "Seules les pièces comptabilisées/annulées peuvent être
+	// remises en brouillon"). For draft moves we write directly and
+	// only post when the move was posted to begin with.
+	//
+	// Per-line progress: each iteration costs 1–3 RPCs (write, optional
+	// draft + post), so a 200-line batch easily takes 30s+. Without a live
 	// counter the loop looks frozen — surface it on stderr.
+	moveStates := map[int]string{}
+	moveIDs := make([]interface{}, 0, len(plan))
+	seenMoves := map[int]bool{}
+	for _, p := range plan {
+		if p.MoveID == 0 || seenMoves[p.MoveID] {
+			continue
+		}
+		seenMoves[p.MoveID] = true
+		moveIDs = append(moveIDs, p.MoveID)
+	}
+	if len(moveIDs) > 0 {
+		rows, err := odooSearchReadAllMaps(creds, uid, "account.move",
+			[]interface{}{[]interface{}{"id", "in", moveIDs}},
+			[]string{"id", "state"}, "")
+		if err != nil {
+			return reviewed, 0, fmt.Errorf("fetch move states: %v", err)
+		}
+		for _, row := range rows {
+			id := odooInt(row["id"])
+			if id > 0 {
+				moveStates[id] = odooString(row["state"])
+			}
+		}
+	}
+
 	status := newStatusLine()
 	defer status.Clear()
 	failed := 0
@@ -4127,12 +4280,34 @@ func syncBlockchainOdooMetadataStage(creds *OdooCredentials, uid int, acc *Accou
 			failed++
 			continue
 		}
-		if _, werr := odooExec(creds.URL, creds.DB, uid, creds.Password,
-			"account.move", "button_draft",
-			[]interface{}{[]interface{}{p.MoveID}}, nil); werr != nil {
-			Warnf("    %s⚠ line #%d draft: %v%s", Fmt.Yellow, p.LineID, werr, Fmt.Reset)
+		state := moveStates[p.MoveID]
+		switch state {
+		case "draft":
+			// Already in draft: write directly, don't try to draft again.
+		case "posted":
+			if _, werr := odooExec(creds.URL, creds.DB, uid, creds.Password,
+				"account.move", "button_draft",
+				[]interface{}{[]interface{}{p.MoveID}}, nil); werr != nil {
+				Warnf("    %s⚠ line #%d draft: %v%s", Fmt.Yellow, p.LineID, werr, Fmt.Reset)
+				failed++
+				continue
+			}
+		case "cancel":
+			// Cancelled moves can be drafted back, but writing to them is
+			// usually not what the operator intended — surface and skip.
+			Warnf("    %s⚠ line #%d: move is cancelled; skipping%s", Fmt.Yellow, p.LineID, Fmt.Reset)
 			failed++
 			continue
+		default:
+			// Unknown state — try the legacy draft → write → post sequence
+			// and let Odoo's error surface naturally.
+			if _, werr := odooExec(creds.URL, creds.DB, uid, creds.Password,
+				"account.move", "button_draft",
+				[]interface{}{[]interface{}{p.MoveID}}, nil); werr != nil {
+				Warnf("    %s⚠ line #%d draft (state=%q): %v%s", Fmt.Yellow, p.LineID, state, werr, Fmt.Reset)
+				failed++
+				continue
+			}
 		}
 		patch := map[string]interface{}{"payment_ref": p.New}
 		if p.NarrChange {
@@ -4144,14 +4319,18 @@ func syncBlockchainOdooMetadataStage(creds *OdooCredentials, uid int, acc *Accou
 				[]interface{}{[]interface{}{p.LineID}, patch}, nil)
 			return e
 		}()
-		// Always re-post, even when the write failed, so we don't leave
-		// the move in draft state.
-		if _, postErr := odooExec(creds.URL, creds.DB, uid, creds.Password,
-			"account.move", "action_post",
-			[]interface{}{[]interface{}{p.MoveID}}, nil); postErr != nil {
-			Warnf("    %s⚠ line #%d repost: %v%s", Fmt.Yellow, p.LineID, postErr, Fmt.Reset)
-			failed++
-			continue
+		// Re-post only when we left the move posted to begin with —
+		// otherwise we'd promote a draft move the operator didn't want
+		// posted. Always run the post even if the write failed, so we
+		// don't leave a move stuck in draft due to a partial run.
+		if state == "posted" {
+			if _, postErr := odooExec(creds.URL, creds.DB, uid, creds.Password,
+				"account.move", "action_post",
+				[]interface{}{[]interface{}{p.MoveID}}, nil); postErr != nil {
+				Warnf("    %s⚠ line #%d repost: %v%s", Fmt.Yellow, p.LineID, postErr, Fmt.Reset)
+				failed++
+				continue
+			}
 		}
 		if writeErr != nil {
 			Warnf("    %s⚠ line #%d write: %v%s", Fmt.Yellow, p.LineID, writeErr, Fmt.Reset)

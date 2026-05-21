@@ -667,6 +667,7 @@ const (
 	txColumnCounterparty txTableColumnKind = "counterparty"
 	txColumnDescription  txTableColumnKind = "description"
 	txColumnAmount       txTableColumnKind = "amount"
+	txColumnReconciled   txTableColumnKind = "reconciled"
 )
 
 type txTableColumn struct {
@@ -691,6 +692,7 @@ func transactionTableColumns(showAccount bool, includeSelection bool) []txTableC
 		txTableColumn{Header: "Counterparty", Kind: txColumnCounterparty, Ratio: 5, MinWidth: 12},
 		txTableColumn{Header: "Description", Kind: txColumnDescription, Ratio: 8, MinWidth: 12},
 		txTableColumn{Header: "Amount", Kind: txColumnAmount, Ratio: 4, MinWidth: 9},
+		txTableColumn{Header: "Reconciled", Kind: txColumnReconciled, Ratio: 3, MinWidth: 10},
 	)
 	return cols
 }
@@ -775,6 +777,11 @@ func transactionCellValue(tx TransactionEntry, kind txTableColumnKind, selected 
 			return virtualAmountCell(tx, styled)
 		}
 		return txAmountCell(tx, styled)
+	case txColumnReconciled:
+		if virtual {
+			return ""
+		}
+		return getTxReconciliationLookup().ReconciledRef(tx)
 	default:
 		return ""
 	}
@@ -2828,6 +2835,8 @@ func printTransactionsTable(filter TxFilter, txs []TransactionEntry) {
 				cell = Truncate(cell, 14)
 			case txColumnSource:
 				cell = Truncate(cell, 14)
+			case txColumnReconciled:
+				cell = Truncate(cell, 20)
 			}
 			row[i] = cell
 		}

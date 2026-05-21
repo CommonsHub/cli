@@ -657,6 +657,15 @@ func Generate(args []string) error {
 	}
 
 	verbose := HasFlag(args, "--verbose", "-v") || HasFlag(args, "--debug")
+	// Per-phase diagnostic capture: each genStep buckets its own
+	// Warnf calls so the row can show a ⚠ mark. The per-phase
+	// "Issues" block has been removed — warnings stay in the log
+	// file and the count is summarised once at process exit. Reset
+	// at the start so this phase's buckets don't pick up stale
+	// state from the pull phase.
+	if !verbose {
+		ResetCapturedStepDiagnostics()
+	}
 	dataDir := DataDir()
 	now := time.Now().In(BrusselsTZ())
 	posStartMonth, posEndMonth, posFound := ParseMonthRangeArg(args)
@@ -679,8 +688,16 @@ func Generate(args []string) error {
 		return nil
 	}
 
-	scopes := collectGenerateScopes(dataDir, years, startMonth, endMonth)
-	scopeYears := uniqueGenerateScopeYears(scopes)
+	allScopes := collectGenerateScopes(dataDir, years, startMonth, endMonth)
+	scopeYears := uniqueGenerateScopeYears(allScopes)
+
+	// Dirty-scope filter: drop months whose source files haven't moved
+	// since the last successful generate. --force / --history opts back
+	// into rebuilding everything in the window. The original window's
+	// scopeYears is preserved so cross-month rollups still iterate the
+	// full year set even when individual months are clean.
+	force := HasFlag(args, "--force")
+	scopes, cleanScopes := filterDirtyGenerateScopes(dataDir, allScopes, force || isHistory)
 
 	if verbose {
 		fmt.Printf("\n%s🔧 Generating derived data files...%s\n", Fmt.Bold, Fmt.Reset)
@@ -693,16 +710,23 @@ func Generate(args []string) error {
 		}
 	} else {
 		header := "Generating derived data"
-		if len(scopes) > 0 {
-			first := scopes[0].Year + "-" + scopes[0].Month
-			last := scopes[len(scopes)-1].Year + "-" + scopes[len(scopes)-1].Month
+		if len(allScopes) > 0 {
+			first := allScopes[0].Year + "-" + allScopes[0].Month
+			last := allScopes[len(allScopes)-1].Year + "-" + allScopes[len(allScopes)-1].Month
 			if first == last {
 				header += " for " + first
 			} else {
 				header += " for " + first + " → " + last
 			}
 		}
-		fmt.Printf("\n%s%s%s\n\n", Fmt.Bold, header, Fmt.Reset)
+		if len(scopes) == 0 && len(cleanScopes) > 0 {
+			header += " — all sources unchanged, rebuilding rollups only"
+		}
+		// Match the pull/push banner shape: 2-space gutter + bold, no
+		// trailing blank line. Keeps the three sync phases visually
+		// consistent and avoids the 3-blank-line gap that the old
+		// double-newline produced.
+		fmt.Printf("\n  %s%s%s\n", Fmt.Bold, header, Fmt.Reset)
 	}
 
 	// Write latest/generated/ README
@@ -722,13 +746,18 @@ func Generate(args []string) error {
 			}
 			return
 		}
+		diag := BeginStepDiagnostics(label)
 		sl := NewStatusLine(label)
 		SetActiveStatusLine(sl)
 		restore := silenceStdout()
 		summary := fn()
 		restore()
 		SetActiveStatusLine(nil)
-		sl.Final(Fmt.Green+"✓"+Fmt.Reset, summary)
+		EndStepDiagnostics()
+		// Generate sub-steps never return errors directly; the ⚠ mark
+		// surfaces any Warnf emitted inside fn (e.g. PII guard) and the
+		// detail lands in the footer.
+		sl.Final(StepMark(nil, diag), summary)
 	}
 	_ = genStep // referenced below in step blocks
 
@@ -884,9 +913,19 @@ func Generate(args []string) error {
 		return fmt.Sprintf("%d collective row%s", n, plural(n))
 	})
 
+	// Stamp cursors for the months we just regenerated so subsequent
+	// runs can skip them when no source file moved.
+	for _, s := range scopes {
+		stampGenerateMonthCursor(dataDir, s.Year, s.Month)
+	}
+
 	if verbose {
 		fmt.Printf("\n%s✅ All data generation complete!%s\n\n", Fmt.Green, Fmt.Reset)
 	} else {
+		if len(cleanScopes) > 0 {
+			fmt.Printf("  %s%d month%s skipped (sources unchanged; --force to rebuild)%s\n",
+				Fmt.Dim, len(cleanScopes), plural(len(cleanScopes)), Fmt.Reset)
+		}
 		fmt.Println()
 	}
 	return nil
@@ -1126,6 +1165,58 @@ func collectGenerateScopes(dataDir string, years []string, startMonth, endMonth 
 		}
 	}
 	return scopes
+}
+
+// monthSourceMaxMTime returns the most recent mtime of any file under
+// the month's providers/ + sources/ trees. Used to short-circuit the
+// generate pipeline for months that haven't received fresh provider
+// data since the last run.
+func monthSourceMaxMTime(dataDir, year, month string) time.Time {
+	var latest time.Time
+	for _, sub := range []string{"providers", "sources"} {
+		root := filepath.Join(dataDir, year, month, sub)
+		_ = filepath.Walk(root, func(_ string, info os.FileInfo, err error) error {
+			if err != nil || info == nil || info.IsDir() {
+				return nil
+			}
+			if t := info.ModTime(); t.After(latest) {
+				latest = t
+			}
+			return nil
+		})
+	}
+	return latest
+}
+
+// filterDirtyGenerateScopes returns only scopes whose source files have
+// changed since the last generate run for that month, plus any scope
+// for which we have no cursor yet. force=true returns all scopes
+// unchanged.
+func filterDirtyGenerateScopes(dataDir string, scopes []generateScope, force bool) (dirty, clean []generateScope) {
+	if force {
+		return scopes, nil
+	}
+	for _, s := range scopes {
+		cur := LoadSyncCursor(SyncCursorKeyForGenerateMonth(s.Year, s.Month))
+		mtime := monthSourceMaxMTime(dataDir, s.Year, s.Month)
+		if cur.UpdatedAt.IsZero() || mtime.After(cur.MaxSourceMTime) || cur.MaxSourceMTime.IsZero() {
+			dirty = append(dirty, s)
+			continue
+		}
+		clean = append(clean, s)
+	}
+	return dirty, clean
+}
+
+// stampGenerateMonthCursor records that we've processed a month and
+// the max source mtime at the time of processing. Subsequent runs use
+// this to skip months whose sources haven't moved.
+func stampGenerateMonthCursor(dataDir, year, month string) {
+	mtime := monthSourceMaxMTime(dataDir, year, month)
+	_ = SaveSyncCursor(SyncCursor{
+		Key:            SyncCursorKeyForGenerateMonth(year, month),
+		MaxSourceMTime: mtime,
+	})
 }
 
 func uniqueGenerateScopeYears(scopes []generateScope) []string {

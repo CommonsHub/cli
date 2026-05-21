@@ -187,15 +187,44 @@ func CalendarsSync(args []string) (int, int, error) {
 
 		fmt.Printf("  Fetching %s calendar...\n", cs.Slug)
 		Progress(fmt.Sprintf("fetching %s calendar", cs.Slug))
-		icsData, err := fetchURL(cs.URL)
-		if err != nil {
+		// Conditional fetch: send If-None-Match / If-Modified-Since
+		// using the cursor stored from the previous pull. On 304 we
+		// reuse the events we parsed last time from the archived .ics.
+		cursorKey := SyncCursorKeyForICSCalendar(cs.Slug)
+		cur := LoadSyncCursor(cursorKey)
+		icsData, respCur, err := fetchURLConditional(cs.URL, cur.ContentHash, cur.LastWriteDate)
+		var events []ical.Event
+		if err == errICSNotModified {
+			// Parse the archived .ics file we wrote last time.
+			cached, parseErr := loadCachedICSEvents(dataDir, cs.Slug)
+			if parseErr != nil || len(cached) == 0 {
+				// Cache missing — force re-fetch unconditionally.
+				icsData, respCur, err = fetchURLConditional(cs.URL, "", "")
+				if err == nil {
+					events, err = ical.ParseICS(icsData)
+				}
+			} else {
+				events = cached
+				fmt.Printf("  %s↻%s %s calendar: 304 Not Modified, reused %d cached events\n",
+					Fmt.Dim, Fmt.Reset, cs.Slug, len(events))
+			}
+		} else if err == nil {
+			events, err = ical.ParseICS(icsData)
+		}
+		if err != nil && err != errICSNotModified {
 			diagnostics.Warn("fetch calendar failed", "%s: %v", cs.Slug, err)
 			continue
 		}
-		events, err := ical.ParseICS(icsData)
-		if err != nil {
-			diagnostics.Warn("parse calendar failed", "%s: %v", cs.Slug, err)
-			continue
+		// On a fresh 200, stamp the cursor with the new ETag /
+		// Last-Modified, and persist the raw body so the next 304 has
+		// something to load.
+		if err == nil && icsData != "" {
+			_ = SaveSyncCursor(SyncCursor{
+				Key:           cursorKey,
+				ContentHash:   respCur.ETag,
+				LastWriteDate: respCur.LastModified,
+			})
+			_ = saveCachedICSRaw(dataDir, cs.Slug, icsData)
 		}
 		eventsInRange := countICALEventsInMonthRange(events, sinceMonth, untilMonth)
 		publicInRange := countPublicICALEventsInMonthRange(events, sinceMonth, untilMonth, visibility)
@@ -391,19 +420,87 @@ func isAllowedPublicEventURL(raw string) bool {
 }
 
 func fetchURL(rawURL string) (string, error) {
-	resp, err := calendarHTTPClient.Get(rawURL)
+	body, _, err := fetchURLConditional(rawURL, "", "")
+	return body, err
+}
+
+// fetchURLConditional fetches a URL, sending If-None-Match /
+// If-Modified-Since when the caller has cached ETag / Last-Modified
+// values. Returns (body, headerCursor, error):
+//
+//   - On 200: body is populated, headerCursor carries the new
+//     ETag/Last-Modified to persist for next time.
+//   - On 304: body is "", err is icsNotModified — caller should reuse
+//     whatever they cached.
+//   - On any other error: body is "" and err is set.
+//
+// Used by the ICS pull to skip parsing when the upstream calendar
+// hasn't changed since the previous sync.
+func fetchURLConditional(rawURL, etag, lastModified string) (string, icsResponseCursor, error) {
+	req, err := http.NewRequest(http.MethodGet, rawURL, nil)
 	if err != nil {
-		return "", err
+		return "", icsResponseCursor{}, err
+	}
+	if etag != "" {
+		req.Header.Set("If-None-Match", etag)
+	}
+	if lastModified != "" {
+		req.Header.Set("If-Modified-Since", lastModified)
+	}
+	resp, err := calendarHTTPClient.Do(req)
+	if err != nil {
+		return "", icsResponseCursor{}, err
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return "", fmt.Errorf("HTTP %d", resp.StatusCode)
+	if resp.StatusCode == http.StatusNotModified {
+		return "", icsResponseCursor{}, errICSNotModified
+	}
+	if resp.StatusCode != http.StatusOK {
+		return "", icsResponseCursor{}, fmt.Errorf("HTTP %d", resp.StatusCode)
 	}
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", err
+		return "", icsResponseCursor{}, err
 	}
-	return string(data), nil
+	cur := icsResponseCursor{
+		ETag:         resp.Header.Get("ETag"),
+		LastModified: resp.Header.Get("Last-Modified"),
+	}
+	return string(data), cur, nil
+}
+
+// icsResponseCursor carries the HTTP caching headers we persist per
+// calendar URL so the next pull can send them back as If-None-Match /
+// If-Modified-Since and skip the body when the upstream is unchanged.
+type icsResponseCursor struct {
+	ETag         string
+	LastModified string
+}
+
+// errICSNotModified is a sentinel signalling the upstream returned 304.
+// Caller skips the parse + use the cached events.
+var errICSNotModified = fmt.Errorf("ics: not modified")
+
+// cachedICSRawPath is where the raw ICS body lives between syncs —
+// loaded on 304 so we can return events without re-fetching.
+func cachedICSRawPath(dataDir, slug string) string {
+	return filepath.Join(dataDir, "latest", "providers", "ics", slug+".raw.ics")
+}
+
+func saveCachedICSRaw(dataDir, slug, body string) error {
+	path := cachedICSRawPath(dataDir, slug)
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(body), 0644)
+}
+
+func loadCachedICSEvents(dataDir, slug string) ([]ical.Event, error) {
+	data, err := os.ReadFile(cachedICSRawPath(dataDir, slug))
+	if err != nil {
+		return nil, err
+	}
+	return ical.ParseICS(string(data))
 }
 
 // ── Calendar source resolution ──────────────────────────────────────────────

@@ -142,39 +142,49 @@ func TransactionsPublish(args []string) error {
 		}
 	}
 
+	verbose := HasFlag(args, "--verbose", "-v") || HasFlag(args, "--debug")
+	aggregated := quietOdooContext() // running as part of `chb push` / `chb sync`
+
 	if len(pending) == 0 {
-		fmt.Printf("\n%s✓ Nothing to publish%s — all categorized transactions already have Nostr annotations.\n\n", Fmt.Green, Fmt.Reset)
+		if !aggregated {
+			fmt.Printf("\n%s✓ Nothing to publish%s — all categorized transactions already have Nostr annotations.\n\n", Fmt.Green, Fmt.Reset)
+		}
 		return nil
 	}
 
-	// Preview
-	fmt.Printf("\n%s📡 Transactions to publish to:%s\n", Fmt.Bold, Fmt.Reset)
-	for _, r := range relays {
-		fmt.Printf("    %s%s%s\n", Fmt.Dim, r, Fmt.Reset)
+	// Compact header — only one line by default. Verbose adds the relay
+	// list and per-event preview table.
+	if !aggregated {
+		fmt.Printf("\n%s📡 Publishing %d transaction annotation%s to %d relay%s%s\n",
+			Fmt.Bold, len(pending), plural(len(pending)),
+			len(relays), plural(len(relays)), Fmt.Reset)
+	}
+	if verbose && !aggregated {
+		for _, r := range relays {
+			fmt.Printf("    %s%s%s\n", Fmt.Dim, r, Fmt.Reset)
+		}
+		fmt.Printf("\n  %s%-40s %-14s %-14s %s%s\n",
+			Fmt.Dim, "URI", "Category", "Collective", "Amount", Fmt.Reset)
+		fmt.Printf("  %s%s%s\n", Fmt.Dim, strings.Repeat("─", 90), Fmt.Reset)
+		for _, p := range pending {
+			uri := p.URI
+			if len(uri) > 38 {
+				uri = uri[:35] + "..."
+			}
+			collective := p.Collective
+			if collective == "" {
+				collective = "-"
+			}
+			currency := p.Currency
+			if currency == "" {
+				currency = "EUR"
+			}
+			fmt.Printf("  %-40s %-14s %-14s %s %s\n",
+				uri, p.Category, collective, p.Amount, currency)
+		}
+		fmt.Println()
 	}
 
-	fmt.Printf("\n  %s%-40s %-14s %-14s %s%s\n",
-		Fmt.Dim, "URI", "Category", "Collective", "Amount", Fmt.Reset)
-	fmt.Printf("  %s%s%s\n", Fmt.Dim, strings.Repeat("─", 90), Fmt.Reset)
-
-	for _, p := range pending {
-		uri := p.URI
-		if len(uri) > 38 {
-			uri = uri[:35] + "..."
-		}
-		collective := p.Collective
-		if collective == "" {
-			collective = "-"
-		}
-		currency := p.Currency
-		if currency == "" {
-			currency = "EUR"
-		}
-		fmt.Printf("  %-40s %-14s %-14s %s %s\n",
-			uri, p.Category, collective, p.Amount, currency)
-	}
-
-	fmt.Println()
 	// Non-interactive: the operator already opted in by typing
 	// `chb nostr push` / `chb push` / `chb sync`. Cron-friendly. Use
 	// --dry-run earlier in the args list (handled by the caller) to
@@ -184,10 +194,15 @@ func TransactionsPublish(args []string) error {
 		return nil
 	}
 
-	// Publish
+	// Publish — live status so the operator can see progress instead
+	// of staring at a frozen terminal. Each event takes ≤ relayPublishTimeout
+	// across all relays.
+	status := newStatusLine()
+	defer status.Clear()
 	published := 0
 	failed := 0
 	for i, p := range pending {
+		status.Update("Publishing Nostr annotations %d/%d (%d ok, %d failed)", i+1, len(pending), published, failed)
 		// Build kind 1111 event
 		tags := nostr.Tags{
 			{"I", p.URI},
@@ -215,26 +230,30 @@ func TransactionsPublish(args []string) error {
 		accepted, err := publishNostrEventWithOutbox(keys, p.URI, ev)
 		if err != nil {
 			failed++
-			fmt.Printf("  %s✗ %s%s\n", Fmt.Red, p.URI, Fmt.Reset)
+			if verbose {
+				fmt.Printf("  %s✗ %s%s\n", Fmt.Red, p.URI, Fmt.Reset)
+			}
 		} else {
 			published++
 			_ = accepted
 		}
-
-		if (i+1)%10 == 0 {
-			fmt.Printf("  %s... %d/%d%s\n", Fmt.Dim, i+1, len(pending), Fmt.Reset)
+		// 100 ms politeness sleep, but only every 20 events — the
+		// individual relay publishes already have their own timeouts
+		// + serialization, so we don't need to throttle every event.
+		if (i+1)%20 == 0 {
+			time.Sleep(100 * time.Millisecond)
 		}
-
-		// Small delay between publishes
-		time.Sleep(100 * time.Millisecond)
 	}
+	status.Clear()
 
-	fmt.Printf("\n%s✓ Published %d annotations%s", Fmt.Green, published, Fmt.Reset)
-	if failed > 0 {
-		fmt.Printf(" (%s%d failed%s)", Fmt.Red, failed, Fmt.Reset)
+	if !aggregated {
+		fmt.Printf("\n%s✓ Published %d annotations%s", Fmt.Green, published, Fmt.Reset)
+		if failed > 0 {
+			fmt.Printf(" (%s%d failed%s)", Fmt.Red, failed, Fmt.Reset)
+		}
+		fmt.Println()
+		fmt.Println()
 	}
-	fmt.Println()
-	fmt.Println()
 
 	return nil
 }

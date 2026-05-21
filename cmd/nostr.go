@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -355,12 +356,19 @@ func FetchNostrAnnotations(uris []string, since *time.Time) (map[string]*TxAnnot
 	eventsMu := sync.Mutex{}
 	allEvents := map[string]NostrEvent{}
 
+	// Progress: surface how many relays are in flight + how many have
+	// returned. Replaces the previous 14s of silent spinner-only output.
+	Progress(fmt.Sprintf("querying %d relay%s", len(relays), plural(len(relays))))
+	var done int32
+
 	var wg sync.WaitGroup
 	for _, relay := range relays {
 		wg.Add(1)
 		go func(relayURL string) {
 			defer wg.Done()
 			events, err := fetchFromRelay(relayURL, batches, since)
+			n := atomic.AddInt32(&done, 1)
+			Progress(fmt.Sprintf("relay %d/%d done", n, len(relays)))
 			if err != nil {
 				return
 			}

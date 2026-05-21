@@ -3,9 +3,11 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // Provider owns one external upstream. A provider syncs data into the monthly
@@ -105,8 +107,11 @@ type providerCommandSpec struct {
 	Name        string
 	Description string
 	Commands    []string
-	Sync        func([]string) error
-	Generate    func([]string) error
+	// Sync runs the provider's pull and returns a short one-line summary
+	// suitable for the streaming row in the "Fetching latest data" table
+	// (e.g. "12 new transactions" or "already synced").
+	Sync     func([]string) (string, error)
+	Generate func([]string) error
 }
 
 func providerCommandSpecs() []providerCommandSpec {
@@ -115,9 +120,9 @@ func providerCommandSpecs() []providerCommandSpec {
 			Name:        "ics",
 			Description: "Calendar ICS feeds for room bookings and public events.",
 			Commands:    []string{"sync", "generate"},
-			Sync: func(args []string) error {
-				_, _, err := CalendarsSync(args)
-				return err
+			Sync: func(args []string) (string, error) {
+				b, e, err := CalendarsSync(args)
+				return formatNewSummary(b, "booking", "bookings", e, "event", "events"), err
 			},
 			Generate: GenerateEvents,
 		},
@@ -146,12 +151,13 @@ func providerCommandSpecs() []providerCommandSpec {
 			Name:        "discord",
 			Description: "Discord message and image attachment archives.",
 			Commands:    []string{"sync", "generate"},
-			Sync: func(args []string) error {
-				if _, err := MessagesSync(args); err != nil {
-					return err
+			Sync: func(args []string) (string, error) {
+				msgs, err := MessagesSync(args)
+				if err != nil {
+					return formatCountSummary(msgs, "new message", "new messages"), err
 				}
-				_, err := ImagesSync(args)
-				return err
+				imgs, err := ImagesSync(args)
+				return formatNewSummary(msgs, "new message", "new messages", imgs, "new image", "new images"), err
 			},
 			Generate: GenerateMessages,
 		},
@@ -159,8 +165,10 @@ func providerCommandSpecs() []providerCommandSpec {
 			Name:        "odoo",
 			Description: "Odoo invoices, bills, attachments, and accounting metadata.",
 			Commands:    []string{"sync", "generate"},
-			Sync:        OdooProviderSync,
-			Generate:    GenerateMembers,
+			Sync: func(args []string) (string, error) {
+				return "", OdooProviderSync(args)
+			},
+			Generate: GenerateMembers,
 		},
 		{
 			Name:        "nostr",
@@ -169,19 +177,21 @@ func providerCommandSpecs() []providerCommandSpec {
 			// Pull-only here: chb pull (= run every provider's Sync) must
 			// never trigger Nostr writes. The push side is reached via
 			// `chb nostr push` / `chb push`.
-			Sync:     NostrPull,
+			Sync: func(args []string) (string, error) {
+				return "", NostrPull(args)
+			},
 			Generate: GenerateTransactions,
 		},
 	}
 }
 
-func syncTransactionsProvider(source string) func([]string) error {
-	return func(args []string) error {
+func syncTransactionsProvider(source string) func([]string) (string, error) {
+	return func(args []string) (string, error) {
 		if GetOption(args, "--source") == "" {
 			args = append([]string{"--source", source}, args...)
 		}
-		_, err := TransactionsSync(args)
-		return err
+		n, err := TransactionsSync(args)
+		return formatCountSummary(n, "new transaction", "new transactions"), err
 	}
 }
 
@@ -270,7 +280,8 @@ func ProvidersCommand(args []string) error {
 			if spec.Sync == nil {
 				return fmt.Errorf("provider %q does not support pull", provider)
 			}
-			return spec.Sync(rest)
+			_, err := spec.Sync(rest)
+			return err
 		case "generate":
 			if spec.Generate == nil {
 				return fmt.Errorf("provider %q does not support generate", provider)
@@ -306,37 +317,129 @@ func providerSpec(name string) (providerCommandSpec, bool) {
 
 func runAllProviderSync(args []string) error {
 	verbose := HasFlag(args, "--verbose", "-v") || HasFlag(args, "--debug")
-	for _, spec := range providerCommandSpecs() {
+	ResetCapturedStepDiagnostics()
+	startedAt := time.Now()
+	defer func() {
+		// Per-phase wall-clock footer. Warnings/errors stay buffered
+		// on the row's ⚠/✗ mark and in the daily log; the per-phase
+		// "Issues" block has been removed — it became noisy on
+		// runs with lots of processor warnings. The single
+		// "N errors and M warnings, written in <log>" tail printed
+		// by PrintDiagnosticsSummary at process exit is enough.
+		fmt.Fprintf(os.Stderr, "\n  %sPull done in %s%s\n",
+			Fmt.Dim, FormatElapsedFixed(time.Since(startedAt).Round(100*time.Millisecond)), Fmt.Reset)
+	}()
+
+	// Sort providers alphabetically by display name so the streaming
+	// progress rows appear in a stable, predictable order.
+	specs := providerCommandSpecs()
+	sort.Slice(specs, func(i, j int) bool {
+		return providerDisplayName(specs[i].Name) < providerDisplayName(specs[j].Name)
+	})
+
+	// Header: bold banner, then a plan table listing every provider
+	// with its accounts/scope. The live progress rows below drop the
+	// account column because the operator already saw it in the plan
+	// — keeping it on every row just forces the summary column to
+	// truncate mid-word (this used to clip "fetching #room/lo…" or
+	// "Odoo: 3632 l…" on a 120-col terminal).
+	fmt.Printf("\n  %sFetching latest data%s%s\n", Fmt.Bold, Fmt.Reset, odooTargetHeaderSuffix())
+	renderPullPlan(specs, pullProviderHeaderItems())
+	fmt.Fprintln(os.Stderr)
+
+	for _, spec := range specs {
 		if spec.Sync == nil {
 			continue
 		}
 		display := providerDisplayName(spec.Name)
 		if verbose {
 			fmt.Printf("\n%s━━━ %s ━━━%s\n", Fmt.Bold, display, Fmt.Reset)
-			if err := spec.Sync(args); err != nil {
+			if _, err := spec.Sync(args); err != nil {
 				return err
 			}
 			continue
 		}
 		// Compact: live status line on stderr, swallow stdout chatter.
+		// Wrap with diagnostic capture so any warning emitted during this
+		// spec.Sync ends up in the footer (and as a ⚠ mark on the row)
+		// instead of interrupting the spinner mid-frame.
+		diag := BeginStepDiagnostics(display)
 		sl := NewStatusLine(display)
 		SetActiveStatusLine(sl)
 		restore := silenceStdout()
-		err := spec.Sync(args)
+		summary, err := spec.Sync(args)
 		restore()
 		SetActiveStatusLine(nil)
-		mark := Fmt.Green + "✓" + Fmt.Reset
-		summary := ""
-		if err != nil {
-			mark = Fmt.Red + "✗" + Fmt.Reset
+		EndStepDiagnostics()
+		if err != nil && summary == "" {
 			summary = "error: " + truncErr(err)
 		}
-		sl.Final(mark, summary)
+		if summary == "" {
+			summary = "already synced"
+		}
+		sl.Final(StepMark(err, diag), summary)
 		if err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// renderPullPlan renders the plan table for `chb pull` / `chb sync`'s
+// pull phase. One row per provider that will actually run (driven by
+// providerCommandSpecs), with the per-account detail rows from
+// pullProviderHeaderItems folded in below their parent provider. The
+// table-from-items helper used by push would silently drop providers
+// without an Odoo-style scope (Nostr, Monerium-with-no-slug, Odoo)
+// because compact mode skips empty-scope rows — and that gave the
+// operator a misleading "this is everything" plan.
+func renderPullPlan(specs []providerCommandSpec, items []SyncHeaderItem) {
+	itemsByLabel := map[string][]SyncHeaderItem{}
+	for _, it := range items {
+		itemsByLabel[it.Label] = append(itemsByLabel[it.Label], it)
+	}
+	type planRow struct {
+		Label    string
+		Scope    string
+		LastSync time.Time
+	}
+	var rows []planRow
+	for _, spec := range specs {
+		if spec.Sync == nil {
+			continue
+		}
+		label := providerDisplayName(spec.Name)
+		matches := itemsByLabel[label]
+		if len(matches) == 0 {
+			rows = append(rows, planRow{Label: label})
+			continue
+		}
+		for _, m := range matches {
+			rows = append(rows, planRow{Label: label, Scope: m.Scope, LastSync: m.LastSync})
+		}
+	}
+	if len(rows) == 0 {
+		return
+	}
+	labelW, scopeW := 0, 0
+	for _, r := range rows {
+		if n := displayWidth(r.Label); n > labelW {
+			labelW = n
+		}
+		if n := displayWidth(r.Scope); n > scopeW {
+			scopeW = n
+		}
+	}
+	if scopeW > 40 {
+		scopeW = 40
+	}
+	for _, r := range rows {
+		last := formatRelativeAndAbsolute(r.LastSync)
+		fmt.Printf("    %-*s  %-*s  %s%s%s\n",
+			labelW, r.Label,
+			scopeW, truncate(r.Scope, scopeW),
+			Fmt.Dim, last, Fmt.Reset)
+	}
 }
 
 func providerDisplayName(name string) string {

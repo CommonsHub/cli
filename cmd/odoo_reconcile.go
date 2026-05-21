@@ -82,6 +82,7 @@ func odooJournalReconcileInteractive(creds *OdooCredentials, uid int, journalID 
 	}
 	fmt.Printf("\n  %s"+header+"%s\n\n", Fmt.Bold, journalID, Fmt.Reset)
 
+	Progress("computing reconcile matches")
 	set, _, err := computeReconcileMatches(journalID, interactive)
 	if err != nil {
 		if err == errNoLocalCandidates {
@@ -109,13 +110,13 @@ func odooJournalReconcileInteractive(creds *OdooCredentials, uid int, journalID 
 		return nil
 	}
 
-	if !assumeYes {
-		fmt.Printf("\n  %sReconcile %d match%s on Odoo?%s [y/N] ",
+	if !assumeYes && isInteractiveTTY() {
+		fmt.Printf("\n  %sReconcile %d match%s on Odoo?%s [Y/n] ",
 			Fmt.Bold, len(winners), plural(len(winners)), Fmt.Reset)
 		reader := bufio.NewReader(os.Stdin)
 		resp, _ := reader.ReadString('\n')
 		resp = strings.TrimSpace(strings.ToLower(resp))
-		if resp != "y" && resp != "yes" {
+		if resp == "n" || resp == "no" {
 			fmt.Println("  Aborted.")
 			return nil
 		}
@@ -129,6 +130,7 @@ func odooJournalReconcileInteractive(creds *OdooCredentials, uid int, journalID 
 	for _, w := range winners {
 		resetTargets = append(resetTargets, odooStatementLineForReconcile{ID: w.Line.ID, MoveID: w.Line.MoveID})
 	}
+	Progress(fmt.Sprintf("resetting %d counterpart(s) to suspense", len(resetTargets)))
 	if _, err := resetOverCategorizedToSuspense(creds, uid, journalID, resetTargets, false, verbose); err != nil {
 		return fmt.Errorf("reset over-categorized lines: %v", err)
 	}
@@ -139,7 +141,8 @@ func odooJournalReconcileInteractive(creds *OdooCredentials, uid int, journalID 
 	// candidate.ID + AmountResidual are the only fields it uses on `move`.
 	var reconciled, alreadyDone, failed int
 	touchedInvoiceMoveIDs := make([]int, 0, len(winners))
-	for _, w := range winners {
+	for i, w := range winners {
+		Progress(fmt.Sprintf("reconciling %d/%d", i+1, len(winners)))
 		line := odooStatementLineForReconcile{
 			ID:     w.Line.ID,
 			MoveID: w.Line.MoveID,
@@ -178,6 +181,11 @@ func odooJournalReconcileInteractive(creds *OdooCredentials, uid int, journalID 
 			continue
 		}
 		failed++
+		// Always record the per-line failure in the daily log so it
+		// survives the compact UI (status lines don't preserve detail).
+		// Verbose mode additionally echoes to stderr.
+		LogErrorf("reconcile failed: journal #%d line #%d → %s %s: %v",
+			journalID, line.ID, cand.Kind, cand.label(), err)
 		if verbose {
 			fmt.Printf("  %s✗%s line #%d → %s %s: %v\n", Fmt.Red, Fmt.Reset, line.ID, cand.Kind, cand.label(), err)
 		}
@@ -1163,22 +1171,33 @@ func reconcileStatementLineWithMove(creds *OdooCredentials, uid int, line odooSt
 		return fmt.Errorf("could not identify counterpart move line on move #%d", line.MoveID)
 	}
 
+	// Defensive: verify the counterpart we're about to rewrite is NOT
+	// the bank/cash side of the move. Rewriting that line removes the
+	// only line on journal.default_account_id and trips Odoo's "exactly
+	// one bank/cash entry" constraint. findStatementCounterpartMoveLine
+	// already excludes those by account_type, so this catches the
+	// "fetched a stale or unexpected line" case before we attempt the
+	// write — the dry-run preview would have looked clean but the live
+	// apply would have failed with an opaque French error.
+	if err := assertNotBankCashLine(creds, uid, counterpartID); err != nil {
+		return fmt.Errorf("counterpart line #%d: %v", counterpartID, err)
+	}
+
 	// Draft → rewrite counterpart account → repost. Same shape as
 	// applyOdooMappingAccount / markStatementLineInternalTransfer.
-	if _, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
-		"account.move", "button_draft",
-		[]interface{}{[]interface{}{line.MoveID}}, nil); err != nil {
-		return fmt.Errorf("draft bank move #%d: %v", line.MoveID, err)
-	}
-	if _, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
-		"account.move.line", "write",
-		[]interface{}{[]interface{}{counterpartID}, map[string]interface{}{"account_id": arAccountID}}, nil); err != nil {
-		return fmt.Errorf("rewrite counterpart line #%d: %v", counterpartID, err)
-	}
-	if _, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
-		"account.move", "action_post",
-		[]interface{}{[]interface{}{line.MoveID}}, nil); err != nil {
-		return fmt.Errorf("repost bank move #%d: %v", line.MoveID, err)
+	// withOdooMoveTemporarilyDraft handles the "already in draft" case
+	// (Odoo otherwise rejects button_draft) and re-posts only when the
+	// move was posted to begin with.
+	if err := withOdooMoveTemporarilyDraft(creds, uid, line.MoveID, func() error {
+		_, werr := odooExec(creds.URL, creds.DB, uid, creds.Password,
+			"account.move.line", "write",
+			[]interface{}{[]interface{}{counterpartID}, map[string]interface{}{"account_id": arAccountID}}, nil)
+		if werr != nil {
+			return fmt.Errorf("rewrite counterpart line #%d: %v", counterpartID, werr)
+		}
+		return nil
+	}); err != nil {
+		return err
 	}
 
 	// Now counterpart and invoice line are on the same A/R account.
@@ -1643,19 +1662,12 @@ func markStatementLineInternalTransfer(creds *OdooCredentials, uid int, line odo
 	if counterpartID == 0 {
 		return fmt.Errorf("could not identify counterpart move line")
 	}
-	_, _ = odooExec(creds.URL, creds.DB, uid, creds.Password,
-		"account.move", "button_draft",
-		[]interface{}{[]interface{}{line.MoveID}}, nil)
-	_, err = odooExec(creds.URL, creds.DB, uid, creds.Password,
-		"account.move.line", "write",
-		[]interface{}{[]interface{}{counterpartID}, map[string]interface{}{"account_id": accountID}}, nil)
-	if err != nil {
-		return err
-	}
-	_, err = odooExec(creds.URL, creds.DB, uid, creds.Password,
-		"account.move", "action_post",
-		[]interface{}{[]interface{}{line.MoveID}}, nil)
-	return err
+	return withOdooMoveTemporarilyDraft(creds, uid, line.MoveID, func() error {
+		_, werr := odooExec(creds.URL, creds.DB, uid, creds.Password,
+			"account.move.line", "write",
+			[]interface{}{[]interface{}{counterpartID}, map[string]interface{}{"account_id": accountID}}, nil)
+		return werr
+	})
 }
 
 func findInternalTransferAccountID(creds *OdooCredentials, uid int) (int, error) {
@@ -1674,14 +1686,29 @@ func findInternalTransferAccountID(creds *OdooCredentials, uid int) (int, error)
 }
 
 func findStatementCounterpartMoveLine(creds *OdooCredentials, uid int, line odooStatementLineForReconcile) (int, error) {
+	// Resolve the journal's default_account_id up front. Odoo's
+	// _check_journal_consistency rule requires exactly one move.line on
+	// this specific account — so we must NEVER return a line that's on
+	// it (rewriting its account_id would leave the move with zero
+	// matching lines and trip Odoo's "exactly one entry involving the
+	// bank or cash account" constraint). Type-based filtering
+	// (asset_cash / liability_credit_card) is insufficient because
+	// custom charts of accounts can use other types for the journal's
+	// default account.
+	defaultAccountID, err := fetchJournalDefaultAccount(creds, uid, line.MoveID)
+	if err != nil {
+		return 0, fmt.Errorf("resolve journal default account: %v", err)
+	}
+
 	rows, err := odooSearchReadAllMaps(creds, uid, "account.move.line",
 		[]interface{}{[]interface{}{"move_id", "=", line.MoveID}},
-		[]string{"id", "balance", "debit", "credit", "reconciled"},
+		[]string{"id", "balance", "debit", "credit", "reconciled", "account_id"},
 		"id asc",
 	)
 	if err != nil {
 		return 0, err
 	}
+
 	// Two passes: first prefer the still-unreconciled counterpart (the
 	// typical "fresh bank line" case), then accept any if no unreconciled
 	// candidate exists. The unreconciled pass handles partially-reconciled
@@ -1690,6 +1717,13 @@ func findStatementCounterpartMoveLine(creds *OdooCredentials, uid int, line odoo
 	var unreconciled, all []int
 	for _, row := range rows {
 		id := odooInt(row["id"])
+		accID := odooFieldID(row["account_id"])
+		// Skip the bank line itself — the one on
+		// journal.default_account_id — so a rewrite never violates the
+		// one-bank-line-per-move invariant.
+		if defaultAccountID > 0 && accID == defaultAccountID {
+			continue
+		}
 		balance := odooFloat(row["balance"])
 		debit := odooFloat(row["debit"])
 		credit := odooFloat(row["credit"])
@@ -1710,6 +1744,40 @@ func findStatementCounterpartMoveLine(creds *OdooCredentials, uid int, line odoo
 		return all[0], nil
 	}
 	return 0, nil
+}
+
+// fetchJournalDefaultAccount returns the journal.default_account_id of
+// the journal that owns the given move. Used to identify the bank line
+// of a bank-statement move so reconcile code never picks it as the
+// counterpart to rewrite. Returns 0 without error when the lookup
+// fails (e.g. move not found, journal has no default account).
+func fetchJournalDefaultAccount(creds *OdooCredentials, uid, moveID int) (int, error) {
+	if moveID <= 0 {
+		return 0, nil
+	}
+	moveRows, err := odooSearchReadAllMaps(creds, uid, "account.move",
+		[]interface{}{[]interface{}{"id", "=", moveID}},
+		[]string{"id", "journal_id"}, "")
+	if err != nil {
+		return 0, err
+	}
+	if len(moveRows) == 0 {
+		return 0, nil
+	}
+	journalID := odooFieldID(moveRows[0]["journal_id"])
+	if journalID == 0 {
+		return 0, nil
+	}
+	jrnRows, err := odooSearchReadAllMaps(creds, uid, "account.journal",
+		[]interface{}{[]interface{}{"id", "=", journalID}},
+		[]string{"id", "default_account_id"}, "")
+	if err != nil {
+		return 0, err
+	}
+	if len(jrnRows) == 0 {
+		return 0, nil
+	}
+	return odooFieldID(jrnRows[0]["default_account_id"]), nil
 }
 
 func looksLikeInternalTransferLine(line odooStatementLineForReconcile) bool {

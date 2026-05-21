@@ -106,26 +106,35 @@ func publishMoves(kind moveKind, args []string) error {
 	if err != nil {
 		return err
 	}
+	verbose := HasFlag(args, "--verbose", "-v") || HasFlag(args, "--debug")
+	aggregated := quietOdooContext()
 	if len(plan) == 0 {
-		fmt.Printf("\n%s✓ Nothing to publish%s — all annotated %s already have Nostr annotations.\n\n",
-			Fmt.Green, Fmt.Reset, kind.labelPl)
+		if !aggregated {
+			fmt.Printf("\n%s✓ Nothing to publish%s — all annotated %s already have Nostr annotations.\n\n",
+				Fmt.Green, Fmt.Reset, kind.labelPl)
+		}
 		return nil
 	}
 
-	fmt.Printf("\n%s📡 %s annotations to publish to:%s\n",
-		Fmt.Bold, strings.Title(kind.labelPl), Fmt.Reset)
-	for _, r := range relays {
-		fmt.Printf("    %s%s%s\n", Fmt.Dim, r, Fmt.Reset)
+	if !aggregated {
+		fmt.Printf("\n%s📡 Publishing %d %s annotation%s to %d relay%s%s\n",
+			Fmt.Bold, len(plan), kind.label, plural(len(plan)),
+			len(relays), plural(len(relays)), Fmt.Reset)
 	}
-	fmt.Println()
-	for _, p := range plan {
-		collective := firstNonEmptyStr(p.Collective, "-")
-		event := firstNonEmptyStr(p.Event, "-")
-		fmt.Printf("  %s%-50s%s  cat=%-12s col=%-14s evt=%s\n",
-			Fmt.Dim, truncate(p.Label, 50), Fmt.Reset,
-			firstNonEmptyStr(p.Category, "-"), collective, event)
+	if verbose && !aggregated {
+		for _, r := range relays {
+			fmt.Printf("    %s%s%s\n", Fmt.Dim, r, Fmt.Reset)
+		}
+		fmt.Println()
+		for _, p := range plan {
+			collective := firstNonEmptyStr(p.Collective, "-")
+			event := firstNonEmptyStr(p.Event, "-")
+			fmt.Printf("  %s%-50s%s  cat=%-12s col=%-14s evt=%s\n",
+				Fmt.Dim, truncate(p.Label, 50), Fmt.Reset,
+				firstNonEmptyStr(p.Category, "-"), collective, event)
+		}
+		fmt.Println()
 	}
-	fmt.Println()
 
 	// Non-interactive: caller (`chb nostr push` / `chb push` / `chb sync`)
 	// has already opted in. Use --dry-run upstream to preview.
@@ -134,8 +143,11 @@ func publishMoves(kind moveKind, args []string) error {
 		return nil
 	}
 
+	status := newStatusLine()
+	defer status.Clear()
 	published, failed := 0, 0
 	for i, p := range plan {
+		status.Update("Publishing %s annotations %d/%d (%d ok, %d failed)", kind.labelPl, i+1, len(plan), published, failed)
 		tags := nostr.Tags{
 			{"I", p.URI},
 			{"K", uriKind(p.URI)},
@@ -159,22 +171,26 @@ func publishMoves(kind moveKind, args []string) error {
 		accepted, err := publishNostrEventWithOutbox(keys, p.URI, ev)
 		if err != nil {
 			failed++
-			fmt.Printf("  %s✗ %s%s\n", Fmt.Red, p.URI, Fmt.Reset)
+			if verbose {
+				fmt.Printf("  %s✗ %s%s\n", Fmt.Red, p.URI, Fmt.Reset)
+			}
 		} else {
 			published++
 			_ = accepted
 		}
-		if (i+1)%10 == 0 {
-			fmt.Printf("  %s... %d/%d%s\n", Fmt.Dim, i+1, len(plan), Fmt.Reset)
+		if (i+1)%20 == 0 {
+			time.Sleep(100 * time.Millisecond)
 		}
-		time.Sleep(100 * time.Millisecond)
 	}
-	fmt.Printf("\n%s✓ Published %d %s annotations%s", Fmt.Green, published, kind.label, Fmt.Reset)
-	if failed > 0 {
-		fmt.Printf(" (%s%d failed%s)", Fmt.Red, failed, Fmt.Reset)
+	status.Clear()
+	if !aggregated {
+		fmt.Printf("\n%s✓ Published %d %s annotations%s", Fmt.Green, published, kind.label, Fmt.Reset)
+		if failed > 0 {
+			fmt.Printf(" (%s%d failed%s)", Fmt.Red, failed, Fmt.Reset)
+		}
+		fmt.Println()
+		fmt.Println()
 	}
-	fmt.Println()
-	fmt.Println()
 	return nil
 }
 

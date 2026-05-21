@@ -3,6 +3,7 @@ package cmd
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sort"
@@ -39,11 +40,120 @@ type OdooCacheLine struct {
 }
 
 func writeOdooJournalLinesCache(creds *OdooCredentials, uid int, journalID int) (int, error) {
-	lines, err := fetchOdooJournalLinesForCache(creds, uid, journalID)
+	// Watermark-based incremental refresh: fetch only lines whose
+	// write_date is newer than the last cached max, merge into the
+	// existing cache, and stamp the new watermark on the cursor.
+	// Falls back to a full fetch when no cursor exists (first run)
+	// or when the cache is missing. A 700-line journal with one new
+	// line drops from "page all 700 rows" to "fetch 1 row".
+	cur := LoadSyncCursor(SyncCursorKeyForOdooJournal(journalID))
+	existing, haveCache := loadLatestOdooJournalLinesCache(journalID)
+	if !haveCache || cur.LastWriteDate == "" {
+		lines, maxWriteDate, err := fetchOdooJournalLinesForCacheFull(creds, uid, journalID)
+		if err != nil {
+			return 0, err
+		}
+		count, err := writeOdooJournalLinesCacheFile(journalID, lines)
+		if err != nil {
+			return 0, err
+		}
+		cur.LastWriteDate = maxWriteDate
+		cur.Count = count
+		_ = SaveSyncCursor(cur)
+		return count, nil
+	}
+
+	newLines, maxWriteDate, err := fetchOdooJournalLinesSince(creds, uid, journalID, cur.LastWriteDate)
 	if err != nil {
 		return 0, err
 	}
-	return writeOdooJournalLinesCacheFile(journalID, lines)
+	if len(newLines) == 0 {
+		// Nothing changed; existing cache is still authoritative.
+		return len(existing), nil
+	}
+
+	// Merge: replace any existing line with the same id, otherwise
+	// append. This handles edits (write_date bumped) as well as new
+	// arrivals. Doesn't handle deletes — for those, run with
+	// --full-sync (TODO) or just delete the cache file.
+	byID := make(map[int]OdooCacheLine, len(existing)+len(newLines))
+	for _, l := range existing {
+		byID[l.ID] = l
+	}
+	for _, l := range newLines {
+		byID[l.ID] = l
+	}
+	merged := make([]OdooCacheLine, 0, len(byID))
+	for _, l := range byID {
+		merged = append(merged, l)
+	}
+
+	count, err := writeOdooJournalLinesCacheFile(journalID, merged)
+	if err != nil {
+		return 0, err
+	}
+	cur.LastWriteDate = maxWriteDate
+	cur.Count = count
+	_ = SaveSyncCursor(cur)
+	return count, nil
+}
+
+// fetchOdooJournalLinesSince returns lines on the journal whose
+// write_date is strictly newer than sinceWriteDate (passed in Odoo's
+// "2006-01-02 15:04:05" format). Also returns the max write_date seen
+// in the result set, which the caller stamps onto the cursor.
+func fetchOdooJournalLinesSince(creds *OdooCredentials, uid int, journalID int, sinceWriteDate string) ([]OdooCacheLine, string, error) {
+	rows, err := odooSearchReadAllMapsLabeled(creds, uid, "account.bank.statement.line",
+		[]interface{}{
+			[]interface{}{"journal_id", "=", journalID},
+			[]interface{}{"write_date", ">", sinceWriteDate},
+		},
+		[]string{"id", "partner_id", "move_id", "unique_import_id", "date", "payment_ref", "amount", "narration", "is_reconciled", "write_date"},
+		"write_date asc, id asc",
+		fmt.Sprintf("Odoo journal #%d updates", journalID))
+	if err != nil {
+		return nil, "", err
+	}
+	if len(rows) == 0 {
+		return nil, sinceWriteDate, nil
+	}
+	moveIDs := make([]int, 0, len(rows))
+	for _, row := range rows {
+		if moveID := odooFieldID(row["move_id"]); moveID > 0 {
+			moveIDs = append(moveIDs, moveID)
+		}
+	}
+	counterpartByMoveID, _ := fetchCounterpartMoveLinesByMoveID(creds, uid, moveIDs)
+
+	maxWrite := sinceWriteDate
+	lines := make([]OdooCacheLine, 0, len(rows))
+	for _, row := range rows {
+		narration := odooString(row["narration"])
+		moveID := odooFieldID(row["move_id"])
+		counterpart := counterpartByMoveID[moveID]
+		line := OdooCacheLine{
+			ID:             odooInt(row["id"]),
+			MoveID:         moveID,
+			PartnerID:      odooFieldID(row["partner_id"]),
+			AccountID:      counterpart.AccountID,
+			CounterpartID:  counterpart.LineID,
+			Date:           odooString(row["date"]),
+			PaymentRef:     odooString(row["payment_ref"]),
+			UniqueImportID: odooString(row["unique_import_id"]),
+			Amount:         odooFloat(row["amount"]),
+			IsReconciled:   odooBool(row["is_reconciled"]),
+			Narration:      narration,
+			Metadata:       parseOdooLineNarration(narration),
+		}
+		if line.UniqueImportID == "" {
+			line.UniqueImportID = metaString(line.Metadata, "uniqueImportId")
+		}
+		if wd := odooString(row["write_date"]); wd > maxWrite {
+			maxWrite = wd
+		}
+		lines = append(lines, line)
+	}
+	return lines, maxWrite, nil
 }
 
 // odooJournalAggregate is a one-RPC server-side aggregation of a journal's
@@ -86,15 +196,19 @@ func odooJournalAggregate(creds *OdooCredentials, uid int, journalID int) (count
 // state, which would silently create duplicates or write against deleted
 // lines. The error suggests `chb odoo pull` as the fix.
 func verifyOdooJournalCacheFresh(creds *OdooCredentials, uid int, journalID int) error {
+	Progress("verifying cache freshness")
 	cached, ok := loadLatestOdooJournalLinesCache(journalID)
 	if !ok {
 		return fmt.Errorf("no local cache for journal #%d — run `chb odoo pull` first", journalID)
 	}
-	var cachedBalance float64
+	// Sum cents as int64 — float64 accumulation drifts by ±1 cent over
+	// hundreds of lines, which would falsely flag the cache as stale
+	// against Odoo's exact server-side NUMERIC sum.
+	var cachedCents int64
 	for _, ln := range cached {
-		cachedBalance += ln.Amount
+		cachedCents += int64(math.Round(ln.Amount * 100))
 	}
-	cachedBalance = roundCents(cachedBalance)
+	cachedBalance := float64(cachedCents) / 100.0
 
 	liveCount, liveBalance, err := odooJournalAggregate(creds, uid, journalID)
 	if err != nil {
@@ -135,6 +249,56 @@ func writeOdooJournalLinesCacheFile(journalID int, lines []OdooCacheLine) (int, 
 		return 0, err
 	}
 	return len(lines), nil
+}
+
+// fetchOdooJournalLinesForCacheFull does the same paginated full fetch
+// as fetchOdooJournalLinesForCache but also returns the max write_date
+// across the result set so the caller can seed the watermark cursor.
+func fetchOdooJournalLinesForCacheFull(creds *OdooCredentials, uid int, journalID int) ([]OdooCacheLine, string, error) {
+	rows, err := odooSearchReadAllMapsLabeled(creds, uid, "account.bank.statement.line",
+		[]interface{}{[]interface{}{"journal_id", "=", journalID}},
+		[]string{"id", "partner_id", "move_id", "unique_import_id", "date", "payment_ref", "amount", "narration", "is_reconciled", "write_date"},
+		"date asc, id asc",
+		fmt.Sprintf("Odoo journal #%d lines", journalID))
+	if err != nil {
+		return nil, "", err
+	}
+	moveIDs := make([]int, 0, len(rows))
+	for _, row := range rows {
+		if moveID := odooFieldID(row["move_id"]); moveID > 0 {
+			moveIDs = append(moveIDs, moveID)
+		}
+	}
+	counterpartByMoveID, _ := fetchCounterpartMoveLinesByMoveID(creds, uid, moveIDs)
+	maxWrite := ""
+	lines := make([]OdooCacheLine, 0, len(rows))
+	for _, row := range rows {
+		narration := odooString(row["narration"])
+		moveID := odooFieldID(row["move_id"])
+		counterpart := counterpartByMoveID[moveID]
+		line := OdooCacheLine{
+			ID:             odooInt(row["id"]),
+			MoveID:         moveID,
+			PartnerID:      odooFieldID(row["partner_id"]),
+			AccountID:      counterpart.AccountID,
+			CounterpartID:  counterpart.LineID,
+			Date:           odooString(row["date"]),
+			PaymentRef:     odooString(row["payment_ref"]),
+			UniqueImportID: odooString(row["unique_import_id"]),
+			Amount:         odooFloat(row["amount"]),
+			IsReconciled:   odooBool(row["is_reconciled"]),
+			Narration:      narration,
+			Metadata:       parseOdooLineNarration(narration),
+		}
+		if line.UniqueImportID == "" {
+			line.UniqueImportID = metaString(line.Metadata, "uniqueImportId")
+		}
+		if wd := odooString(row["write_date"]); wd > maxWrite {
+			maxWrite = wd
+		}
+		lines = append(lines, line)
+	}
+	return lines, maxWrite, nil
 }
 
 func fetchOdooJournalLinesForCache(creds *OdooCredentials, uid int, journalID int) ([]OdooCacheLine, error) {

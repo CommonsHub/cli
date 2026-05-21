@@ -145,13 +145,10 @@ func (c reconcileCandidate) label() string {
 //  4. amount-only with exactly one open candidate → likely.
 //  5. multiple amount-only candidates → flagged ambiguous.
 func computeReconcileMatches(journalID int, interactive bool) (*reconcileMatchSet, *odooPartnerIndex, error) {
+	Progress("loading journal-lines cache")
 	lines, ok := loadLatestOdooJournalLinesCache(journalID)
 	if !ok {
 		return nil, nil, fmt.Errorf("no local cache for journal #%d — run `chb odoo pull` first", journalID)
-	}
-	candidates, err := loadLocalOpenCandidates()
-	if err != nil {
-		return nil, nil, err
 	}
 	// Strategy 1 (ref-substring match) also looks at paid/in_payment
 	// candidates: the bank line's payment_ref carries the invoice
@@ -159,7 +156,11 @@ func computeReconcileMatches(journalID int, interactive bool) (*reconcileMatchSe
 	// another (potentially wrong) reconciliation. Picking it triggers
 	// unreconcile+reattach in the apply phase — the operator's
 	// surgical override stays trustworthy.
-	allCandidates, _ := loadLocalAllPostedCandidates()
+	Progress("scanning local invoices/bills")
+	candidates, allCandidates, err := loadLocalCandidatePartitions()
+	if err != nil {
+		return nil, nil, err
+	}
 	// Partner index (optional) so the interactive prompt can show the
 	// bank line's counterparty name, not just the integer id.
 	partnerIdx := loadLatestOdooPartnerIndex(DataDir())
@@ -173,10 +174,17 @@ func computeReconcileMatches(journalID int, interactive bool) (*reconcileMatchSe
 		byPartner[c.PartnerID] = append(byPartner[c.PartnerID], c)
 		byAmount[centsKey(c.Residual)] = append(byAmount[centsKey(c.Residual)], c)
 	}
+	// Precompute the ref-matchable subset (numbers with at least one
+	// non-digit, length ≥5) with lowercased Number once. The matcher's
+	// strategy-1 loop otherwise re-filters + ToLower'd this on every
+	// bank line — ~lines × allPosted allocations.
+	refMatchable := buildRefMatchIndex(allCandidates)
 
 	// Phase 1: per-line matching (each line independent). Ambiguous hits
 	// are sorted by date proximity to the bank line — closest first —
 	// so the interactive prompt's first suggestion is the most likely.
+	Progress(fmt.Sprintf("matching %d lines against %d open / %d posted candidates",
+		len(lines), len(candidates), len(allCandidates)))
 	results := make([]reconcileLineMatch, 0, len(lines))
 	for _, ln := range lines {
 		// Already-reconciled lines are skipped. Without this the matcher
@@ -188,7 +196,7 @@ func computeReconcileMatches(journalID int, interactive bool) (*reconcileMatchSe
 		if ln.IsReconciled || isOdooSyntheticLine(ln) || ln.Amount == 0 {
 			continue
 		}
-		hits := matchLineToCandidates(ln, candidates, allCandidates, byPartner, byAmount)
+		hits := matchLineToCandidates(ln, candidates, refMatchable, byPartner, byAmount)
 		if len(hits) > 1 {
 			lineDate := ln.Date
 			sort.SliceStable(hits, func(i, j int) bool {
@@ -903,7 +911,32 @@ func dateDeltaDaysAbs(a, b string) int {
 	return d
 }
 
-func matchLineToCandidates(ln OdooCacheLine, openCandidates, allPosted []reconcileCandidate, byPartner map[int][]reconcileCandidate, byAmount map[int64][]reconcileCandidate) []reconcileCandidate {
+// refMatchEntry is a pre-filtered + pre-lowercased candidate entry used
+// by matchLineToCandidates strategy 1. Built once per match run via
+// buildRefMatchIndex so the hot loop doesn't re-filter or re-lowercase
+// the same allPosted list ~once per bank line.
+type refMatchEntry struct {
+	Kind        string
+	NumberLower string
+	Cand        reconcileCandidate
+}
+
+func buildRefMatchIndex(allPosted []reconcileCandidate) []refMatchEntry {
+	out := make([]refMatchEntry, 0, len(allPosted))
+	for _, c := range allPosted {
+		if !isRefMatchable(c.Number) {
+			continue
+		}
+		out = append(out, refMatchEntry{
+			Kind:        c.Kind,
+			NumberLower: strings.ToLower(c.Number),
+			Cand:        c,
+		})
+	}
+	return out
+}
+
+func matchLineToCandidates(ln OdooCacheLine, openCandidates []reconcileCandidate, refIndex []refMatchEntry, byPartner map[int][]reconcileCandidate, byAmount map[int64][]reconcileCandidate) []reconcileCandidate {
 	amt := math.Abs(ln.Amount)
 	ref := strings.ToLower(ln.PaymentRef)
 
@@ -940,16 +973,16 @@ func matchLineToCandidates(ln OdooCacheLine, openCandidates, allPosted []reconci
 	if ref != "" {
 		var refHits []reconcileCandidate
 		seen := map[int]bool{}
-		for _, c := range allPosted {
-			if c.Kind != wantKind || !isRefMatchable(c.Number) {
+		for _, e := range refIndex {
+			if e.Kind != wantKind {
 				continue
 			}
-			if seen[c.ID] {
+			if seen[e.Cand.ID] {
 				continue
 			}
-			if strings.Contains(ref, strings.ToLower(c.Number)) {
-				refHits = append(refHits, c)
-				seen[c.ID] = true
+			if strings.Contains(ref, e.NumberLower) {
+				refHits = append(refHits, e.Cand)
+				seen[e.Cand.ID] = true
 			}
 		}
 		if len(refHits) > 0 {
@@ -996,12 +1029,104 @@ func matchLineToCandidates(ln OdooCacheLine, openCandidates, allPosted []reconci
 
 func centsKey(v float64) int64 { return int64(math.Round(math.Abs(v) * 100)) }
 
-// loadLocalOpenCandidates walks every month's private invoice + bill
-// cache and returns records that are still open (state=posted,
-// paymentState ≠ paid, residual > 0). Used by the matcher's normal
-// auto-match path.
-func loadLocalOpenCandidates() ([]reconcileCandidate, error) {
-	return loadLocalCandidates(true)
+// loadLocalCandidatePartitions does ONE walk of the data dir and
+// returns both the open-only and all-posted candidate slices the
+// matcher needs. The old code called loadLocalOpenCandidates +
+// loadLocalAllPostedCandidates back-to-back, doubling disk + parse
+// work and re-walking the public side for firstLineByID twice — on a
+// few years of monthly buckets that adds up to many extra seconds.
+func loadLocalCandidatePartitions() ([]reconcileCandidate, []reconcileCandidate, error) {
+	dataDir := DataDir()
+	firstLineByID := loadFirstLineItemIndex(dataDir)
+	var open, all []reconcileCandidate
+
+	walkPath := func(path string, kind string) {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return
+		}
+		if kind == "invoice" {
+			var file OdooOutgoingInvoicesPrivateFile
+			if err := json.Unmarshal(data, &file); err != nil {
+				return
+			}
+			for _, inv := range file.Invoices {
+				if inv.State != "posted" {
+					continue
+				}
+				date, journal, payer, account := candidateLastActivity(inv.Payments, inv.WriteDate, inv.PaymentState)
+				c := reconcileCandidate{
+					ID:                 inv.ID,
+					Kind:               "invoice",
+					Number:             firstNonEmpty(inv.Number, inv.Reference),
+					Residual:           candidateResidual(inv.ResidualAmount, inv.TotalSignedAmount),
+					SignedTotal:        inv.TotalSignedAmount,
+					PartnerID:          inv.Partner.ID,
+					PartnerName:        firstNonEmpty(inv.Partner.DisplayName, inv.Partner.Name),
+					Date:               firstNonEmpty(inv.InvoiceDate, inv.Date),
+					State:              inv.State,
+					PaymentState:       inv.PaymentState,
+					LastPayment:        date,
+					LastPaymentBy:      journal,
+					LastPaymentPayer:   payer,
+					LastPaymentAccount: account,
+					FirstLineItem:      firstLineByID[inv.ID],
+				}
+				all = append(all, c)
+				if invoiceIsOpen(inv) {
+					open = append(open, c)
+				}
+			}
+			return
+		}
+		var file OdooVendorBillsPrivateFile
+		if err := json.Unmarshal(data, &file); err != nil {
+			return
+		}
+		for _, b := range file.Bills {
+			if b.State != "posted" {
+				continue
+			}
+			date, journal, payer, account := candidateLastActivity(b.Payments, b.WriteDate, b.PaymentState)
+			c := reconcileCandidate{
+				ID:                 b.ID,
+				Kind:               "bill",
+				Number:             firstNonEmpty(b.Number, b.Reference),
+				Residual:           candidateResidual(b.ResidualAmount, b.TotalSignedAmount),
+				SignedTotal:        b.TotalSignedAmount,
+				PartnerID:          b.Partner.ID,
+				PartnerName:        firstNonEmpty(b.Partner.DisplayName, b.Partner.Name),
+				Date:               firstNonEmpty(b.InvoiceDate, b.Date),
+				State:              b.State,
+				PaymentState:       b.PaymentState,
+				LastPayment:        date,
+				LastPaymentBy:      journal,
+				LastPaymentPayer:   payer,
+				LastPaymentAccount: account,
+				FirstLineItem:      firstLineByID[b.ID],
+			}
+			all = append(all, c)
+			if invoiceIsOpen(b) {
+				open = append(open, c)
+			}
+		}
+	}
+
+	years, _ := os.ReadDir(dataDir)
+	for _, y := range years {
+		if !y.IsDir() || len(y.Name()) != 4 {
+			continue
+		}
+		months, _ := os.ReadDir(filepath.Join(dataDir, y.Name()))
+		for _, m := range months {
+			if !m.IsDir() || len(m.Name()) != 2 {
+				continue
+			}
+			walkPath(filepath.Join(dataDir, y.Name(), m.Name(), odoosource.PrivateRelPath(odoosource.InvoicesFile)), "invoice")
+			walkPath(filepath.Join(dataDir, y.Name(), m.Name(), odoosource.PrivateRelPath(odoosource.BillsFile)), "bill")
+		}
+	}
+	return open, all, nil
 }
 
 // loadLocalAllPostedCandidates returns every posted invoice/bill —

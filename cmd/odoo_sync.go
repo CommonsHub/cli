@@ -2938,11 +2938,9 @@ func odooJournalSync(journalID int, args []string) error {
 func odooJournalsSyncAll(args []string) error {
 	verbose := HasFlag(args, "--verbose", "-v") || HasFlag(args, "--debug")
 	wasQuiet := quietOdooContext()
-	if !wasQuiet {
-		if creds, err := ResolveOdooCredentials(); err == nil {
-			fmt.Printf("\n%sOdoo: %s (db: %s)%s\n", Fmt.Dim, creds.URL, creds.DB, Fmt.Reset)
-		}
-	}
+	// Note: the Odoo DB is already shown by the surrounding "Pushing
+	// changes — Odoo: <db>" banner (PushAllTargets), so we no longer
+	// reprint it here.
 	setQuietOdooContext(true)
 	if !wasQuiet {
 		defer setQuietOdooContext(false)
@@ -2963,8 +2961,6 @@ func odooJournalsSyncAll(args []string) error {
 		odooLog("\n  %sNo accounts are linked to an Odoo journal%s\n\n", Fmt.Dim, Fmt.Reset)
 		return nil
 	}
-
-	odooSyncHeader("journals")
 
 	// Pre-compute prefix widths so each row's "#<id>  <slug>" column lines
 	// up. Each per-journal sync prints its prefix immediately, runs (with
@@ -2994,6 +2990,7 @@ func odooJournalsSyncAll(args []string) error {
 		// single status-line Final.
 		for _, t := range targets {
 			label := fmt.Sprintf("#%-*d %s", wJID-1, t.journalID, t.slug)
+			diag := BeginStepDiagnostics(label)
 			sl := NewStatusLine(label)
 			SetActiveStatusLine(sl)
 			var row journalSyncRow
@@ -3003,17 +3000,24 @@ func odooJournalsSyncAll(args []string) error {
 			restore()
 			journalRowSink = nil
 			SetActiveStatusLine(nil)
-
-			mark := Fmt.Green + "✓" + Fmt.Reset
+			if err != nil {
+				diag.Errors = append(diag.Errors, err.Error())
+			}
+			if row.HasError && row.Status != "" {
+				diag.Errors = append(diag.Errors, row.Status)
+			}
+			if row.Mismatch != "" {
+				// Balance-mismatch warning was previously printed inline
+				// via Warnf, breaking the per-row layout. Route it to the
+				// footer instead — the row already shows ⚠ via diag.
+				diag.Warnings = append(diag.Warnings, strings.TrimRight(row.Mismatch, "\n"))
+			}
+			EndStepDiagnostics()
 			if err != nil || row.HasError {
-				mark = Fmt.Red + "✗" + Fmt.Reset
 				failed++
 			}
 			summary := formatCompactJournalRow(row, err)
-			sl.Final(mark, summary)
-			if row.Mismatch != "" {
-				Warnf("    %s%s%s", Fmt.Yellow, strings.TrimRight(row.Mismatch, "\n"), Fmt.Reset)
-			}
+			sl.Final(StepMark(err, diag), summary)
 		}
 	} else if wasQuiet {
 		// Serial: preserve one-line-per-item ordering, avoid interleaving.

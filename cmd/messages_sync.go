@@ -59,9 +59,18 @@ func MessagesSync(args []string) (int, error) {
 	recentStartMonth := DefaultRecentStartMonth(time.Now())
 	defaultRecentWindow := !isSince && !posFound && monthFilter == ""
 
+	// Populate the guild-name cache so the sync header can render the
+	// server name (e.g. "CommonsHub") instead of the numeric ID. Cheap
+	// no-op on subsequent runs.
+	_ = FetchAndCacheDiscordGuildName(settings.Discord.GuildID)
+
 	fmt.Printf("\n%s💬 Syncing Discord messages%s\n", Fmt.Bold, Fmt.Reset)
 	fmt.Printf("%sDATA_DIR: %s%s\n", Fmt.Dim, DataDir(), Fmt.Reset)
-	fmt.Printf("%sGuild: %s%s\n\n", Fmt.Dim, settings.Discord.GuildID, Fmt.Reset)
+	guildLabel := settings.Discord.GuildID
+	if name := DiscordGuildName(settings.Discord.GuildID); name != "" {
+		guildLabel = name + " (" + settings.Discord.GuildID + ")"
+	}
+	fmt.Printf("%sGuild: %s%s\n\n", Fmt.Dim, guildLabel, Fmt.Reset)
 
 	// Get all channel IDs from settings
 	channels := GetDiscordChannelIDs(settings)

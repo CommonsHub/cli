@@ -186,10 +186,80 @@ func (s *StatusLine) clear() {
 	s.lastLen = 0
 }
 
-// statusBodyWidth is the fixed printable width of the "label: subtask" body
-// column. Stable so the elapsed-time column to the right never jumps
-// horizontally as the subtask grows or shrinks.
-const statusBodyWidth = 50
+// statusBodyMaxWidth returns the printable width of the "label:
+// subtask" body column. The body is right-padded to this width on
+// every row so the elapsed-time column stays at a constant horizontal
+// position — otherwise the timer jumps left/right every time the
+// subtask label changes length.
+//
+// Reserved columns on the row:
+//
+//	2 (gutter) + 1 (mark) + 1 (space) + body + 2 (spaces) + 5 (4.1s)
+//
+// We pick `terminalWidth − 20` for the body cap (overhead of 11 plus a
+// 9-column safety margin) so the line still fits on one physical row
+// even when the body contains wide characters. `displayWidth` is
+// rune-based and undercounts wide runes like emoji (💶 is one rune
+// but two columns); without the safety margin a body that hits the
+// cap can wrap, and `\r` only erases the last wrapped line — which is
+// what produced the staircase of repeated spinner frames in the
+// scrollback. Floor 40 so even narrow terminals keep a usable column.
+func statusBodyMaxWidth() int {
+	w := TerminalWidth()
+	body := w - 20
+	if body < 40 {
+		body = 40
+	}
+	return body
+}
+
+// fitBody pads or truncates body to exactly statusBodyMaxWidth()
+// columns of visible width. The padding is what keeps the elapsed-
+// time column from jumping; the truncation is what keeps the row
+// from wrapping. Critically, the measurement strips ANSI colour
+// sequences before counting — otherwise a coloured body string (e.g.
+// a red error summary on a ✗ row) gets less padding than an uncoloured
+// one, which is exactly what made the timer jitter horizontally
+// between rows.
+func fitBody(body string) string {
+	max := statusBodyMaxWidth()
+	w := visibleLen(body)
+	if w == max {
+		return body
+	}
+	if w < max {
+		return body + strings.Repeat(" ", max-w)
+	}
+	// Too wide: truncate to max-1 visible columns and append "…". ANSI
+	// escapes are passed through (with their counters preserved) so
+	// colours don't bleed past the truncation point.
+	if max <= 1 {
+		return "…"
+	}
+	out := make([]rune, 0, len(body))
+	used := 0
+	inEsc := false
+	for _, r := range body {
+		if inEsc {
+			out = append(out, r)
+			if r == 'm' {
+				inEsc = false
+			}
+			continue
+		}
+		if r == 0x1b {
+			out = append(out, r)
+			inEsc = true
+			continue
+		}
+		if used >= max-1 {
+			break
+		}
+		out = append(out, r)
+		used++
+	}
+	return string(out) + "…"
+}
 
 func (s *StatusLine) format(spinner, sub string, elapsed time.Duration) string {
 	body := s.label
@@ -198,7 +268,7 @@ func (s *StatusLine) format(spinner, sub string, elapsed time.Duration) string {
 	}
 	return fmt.Sprintf("  %s %s  %s%s%s",
 		spinner,
-		fitWidth(body, statusBodyWidth),
+		fitBody(body),
 		Fmt.Dim, FormatElapsedFixed(elapsed), Fmt.Reset)
 }
 
@@ -209,7 +279,7 @@ func (s *StatusLine) formatFinal(mark, summary string, elapsed time.Duration) st
 	}
 	return fmt.Sprintf("  %s %s  %s%s%s",
 		mark,
-		fitWidth(body, statusBodyWidth),
+		fitBody(body),
 		Fmt.Dim, FormatElapsedFixed(elapsed), Fmt.Reset)
 }
 

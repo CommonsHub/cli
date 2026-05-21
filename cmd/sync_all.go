@@ -110,11 +110,13 @@ func SyncAll(args []string) error {
 	}
 
 	startedAt := time.Now()
+	ResetCapturedStepDiagnostics()
 
 	providerCount := countActivePullProviders()
 	sinceLabel := pullSinceLabel(args)
 	fmt.Printf("\n%sPulling latest data from %d provider%s since %s%s\n\n",
 		Fmt.Bold, providerCount, plural(providerCount), sinceLabel, Fmt.Reset)
+	renderSyncHeader("Sources:", pullProviderHeaderItems(), verbose)
 
 	var newBookings, newEvents, newTx, newInvoices, newBills, newAttachments, newMessages, newImages int
 	errs := map[string]string{}
@@ -128,7 +130,11 @@ func SyncAll(args []string) error {
 			Warnf("⚠ %s: %v", source, err)
 			return
 		}
-		Warnf("%s⚠ %s: %v%s", Fmt.Yellow, source, err, Fmt.Reset)
+		// Inline-quiet: the step's own ✗ mark already flagged this on
+		// the row, and the consolidated footer (PrintCapturedDiagnostics
+		// after the loop) will print the full detail. Logging via
+		// LogErrorf keeps the daily log honest without spamming stderr.
+		LogErrorf("%s: %v", source, err)
 	}
 
 	// step runs fn with stdout swallowed (compact mode) or untouched
@@ -144,22 +150,27 @@ func SyncAll(args []string) error {
 			return
 		}
 		// Compact mode: live status line on stderr, sub-sync stdout
-		// silenced so its chatter doesn't break the layout.
+		// silenced so its chatter doesn't break the layout. Diagnostic
+		// capture buffers any warning emitted inside fn() so the row
+		// can surface a ⚠ mark and the footer renders the detail.
+		diag := BeginStepDiagnostics(label)
 		sl := NewStatusLine(label)
 		SetActiveStatusLine(sl)
 		restore := silenceStdout()
 		summary, err := fn()
 		restore()
 		SetActiveStatusLine(nil)
-		recordErr(key, err)
-		mark := Fmt.Green + "✓" + Fmt.Reset
+		// Attach the returned error onto the step bucket BEFORE ending
+		// it, so the footer surfaces it under this step's label.
 		if err != nil {
-			mark = Fmt.Red + "✗" + Fmt.Reset
-			if summary == "" {
-				summary = "error: " + truncErr(err)
-			}
+			diag.Errors = append(diag.Errors, err.Error())
 		}
-		sl.Final(mark, summary)
+		EndStepDiagnostics()
+		recordErr(key, err)
+		if err != nil && summary == "" {
+			summary = "error: " + truncErr(err)
+		}
+		sl.Final(StepMark(err, diag), summary)
 	}
 
 	step("Calendars", func() (string, error) {
@@ -248,6 +259,10 @@ func SyncAll(args []string) error {
 		touchedPaths,
 		FormatElapsedFixed(elapsed),
 		Fmt.Reset)
+	// Captured warnings/errors are visible via the row marks; the
+	// detailed per-phase Issues block has been removed in favour of
+	// the single "N errors and M warnings, written in <log>" tail
+	// printed at process exit.
 
 	// Record the pull's completion time so the next pull's header can
 	// show "since <last pull>". Persisted via the same mechanism every
@@ -271,13 +286,21 @@ func PushAllTargets(args []string) error {
 		printPushAllHelp()
 		return nil
 	}
+	verbose := HasFlag(args, "--verbose", "-v") || HasFlag(args, "--debug")
+	// Reset captured-diagnostics for a fresh footer at the end. When
+	// PushAllTargets is invoked as the second half of `chb sync`, the
+	// pull half has already printed its own footer, so it's safe to
+	// clear here.
+	ResetCapturedStepDiagnostics()
+	startedAt := time.Now()
+	fmt.Printf("\n  %sPushing changes%s%s\n", Fmt.Bold, Fmt.Reset, odooTargetHeaderSuffix())
+	renderSyncHeader("", pushTargetHeaderItems(), verbose)
 	var firstErr error
 	if os.Getenv("ODOO_URL") != "" {
-		// Show the Odoo target up front so the operator knows where
-		// writes are heading before any sub-step kicks off.
-		if creds, err := ResolveOdooCredentials(); err == nil && !HasFlag(args, "--dry-run") {
-			printOdooWriteBannerOnce(creds.URL, creds.DB)
-		}
+		// Odoo target (URL + DB) is already shown in the "Pushing
+		// changes — Odoo: <db>" banner above and on the row labels,
+		// so the standalone "Odoo target: …" banner that
+		// printOdooWriteBannerOnce used to add is suppressed here.
 		if err := odooJournalsSyncAll(args); err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -285,9 +308,43 @@ func PushAllTargets(args []string) error {
 	// Nostr push uses signing keys configured via `chb setup nostr`. The
 	// inner NostrPush logs and returns nil when nothing to push, so it's
 	// safe to call unconditionally; the no-op case is a one-liner.
-	if err := NostrPush(args); err != nil && firstErr == nil {
-		firstErr = err
+	//
+	// Wrap in a quiet-context + status-line block so its (potentially
+	// long) per-event progress shows as a single live line instead of a
+	// wall of "... N/M" prints. quietOdooContext also tells NostrPush
+	// to skip its standalone preview banner.
+	wasQuiet := quietOdooContext()
+	setQuietOdooContext(true)
+	diag := BeginStepDiagnostics("Nostr")
+	sl := NewStatusLine("Nostr")
+	SetActiveStatusLine(sl)
+	var nostrErr error
+	if verbose {
+		nostrErr = NostrPush(args)
+	} else {
+		restore := silenceStdout()
+		nostrErr = NostrPush(args)
+		restore()
 	}
+	SetActiveStatusLine(nil)
+	if nostrErr != nil {
+		diag.Errors = append(diag.Errors, nostrErr.Error())
+	}
+	EndStepDiagnostics()
+	sl.Final(StepMark(nostrErr, diag), "outbox flushed")
+	setQuietOdooContext(wasQuiet)
+	if nostrErr != nil && firstErr == nil {
+		firstErr = nostrErr
+	}
+
+	// Per-phase wall-clock footer. Warnings/errors are surfaced via
+	// the row's ⚠/✗ mark and the daily log; the per-phase "Issues"
+	// block has been removed — the single tail summary printed by
+	// PrintDiagnosticsSummary at process exit ("N errors and M
+	// warnings, written in <log>") is the one summary line we keep.
+	fmt.Fprintf(os.Stderr, "\n  %sPush done in %s%s\n",
+		Fmt.Dim, FormatElapsedFixed(time.Since(startedAt).Round(100*time.Millisecond)), Fmt.Reset)
+
 	return firstErr
 }
 

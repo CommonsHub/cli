@@ -44,10 +44,19 @@ func odooAuth(odooURL, db, login, password string) (int, error) {
 }
 
 func odooExec(odooURL, db string, uid int, password, model, method string, args []interface{}, kwargs map[string]interface{}) (json.RawMessage, error) {
-	if isMutatingOdooMethod(method) {
+	mutating := isMutatingOdooMethod(method)
+	if mutating {
 		printOdooWriteBannerOnce(odooURL, db)
 	}
-	return odoosource.Exec(odooURL, db, uid, password, model, method, args, kwargs)
+	result, err := odoosource.Exec(odooURL, db, uid, password, model, method, args, kwargs)
+	if err == nil && mutating {
+		// Mirror the write into the local cache so subsequent reads
+		// don't show stale data. Best-effort; reads that need a guaranteed
+		// fresh state should still call writeOdooJournalLinesCache directly
+		// (or rely on FlushOdooCacheRefetches at end of batch).
+		mirrorOdooWriteToLocalCache(model, method, args, result)
+	}
+	return result, err
 }
 
 // isMutatingOdooMethod conservatively classifies Odoo RPC methods.
