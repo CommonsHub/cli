@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -196,10 +197,11 @@ func localSubpath(sub string) string {
 // nil when CHB_SYNC_SOURCE is unset (a no-op so the caller can invoke it
 // unconditionally inside main.go's dispatch).
 //
-// Phase 2 scope: data/ is mirrored (authoritative pull, --delete) AND the
-// nostr/outbox + nostr/sent dirs are bidirectionally synced (--update) so
-// teammates' queued annotations are preserved and other teammates see what
-// we've already published. Settings handling lands in Phase 3.
+// Phase 3 scope: data/ is mirrored authoritatively (--delete), the nostr
+// outbox + sent are synced bidirectionally (--update), and settings/ runs
+// through the merge-with-pending-updates reconciler — unedited files
+// auto-update, locally-edited files surface as PendingDefaultUpdates so
+// `chb settings` shows a diff the operator can accept.
 func MirrorPull(args []string) error {
 	if !MirrorEnabled(args) {
 		return nil
@@ -217,7 +219,12 @@ func MirrorPull(args []string) error {
 			return err
 		}
 		// Outbox: bidirectional (preserve queued local annotations).
-		return mirrorRsyncOutbox(src, verbose)
+		if err := mirrorRsyncOutbox(src, verbose); err != nil {
+			return err
+		}
+		// Settings: merge-with-pending-updates. Per-machine files
+		// (secrets, identity, tracker) are excluded.
+		return mirrorRsyncSettings(src, verbose)
 	})
 	elapsed := time.Since(started).Round(100 * time.Millisecond)
 	if err != nil {
@@ -283,6 +290,165 @@ func mirrorRsyncOutbox(src string, verbose bool) error {
 		}
 	}
 	return nil
+}
+
+// mirrorRsyncSettings pulls $remote/settings/ into a staging dir under
+// $APP_DATA_DIR/.mirror-settings/, then runs reconcileMirroredSettings to
+// merge unedited locals (auto-update) and surface edited locals as pending
+// updates. Per-machine files are excluded from the rsync entirely:
+//
+//   - config.env             — secrets (API keys); each machine owns its own.
+//   - nostr.json             — local Nostr identity.
+//   - .nostr-keys.json       — legacy Nostr identity path.
+//   - .installed-defaults.json — tracker for the embedded-defaults
+//     bootstrap; reused by the mirror reconciler but never sent over
+//     the wire.
+//
+// rsync errors are surfaced as a warning (best-effort, like the outbox)
+// so a transient settings rsync failure can't block the data/ pull.
+func mirrorRsyncSettings(src string, verbose bool) error {
+	localSettings := AppSettingsDir()
+	if err := os.MkdirAll(localSettings, 0755); err != nil {
+		return err
+	}
+	stagingDir := filepath.Join(AppDataDir(), ".mirror-settings")
+	if err := os.MkdirAll(stagingDir, 0755); err != nil {
+		return err
+	}
+	remoteSettings := mirrorRemoteSubpath(src, "settings") + "/"
+	rsyncArgs := baseRsyncFlags(verbose)
+	rsyncArgs = append(rsyncArgs,
+		"--exclude=config.env",
+		"--exclude=nostr.json",
+		"--exclude=.nostr-keys.json",
+		"--exclude=.installed-defaults.json",
+		"--delete-excluded",
+	)
+	rsyncArgs = append(rsyncArgs, remoteSettings, stagingDir+"/")
+	if err := mirrorRunRsync(rsyncArgs, "settings"); err != nil {
+		Warnf("%s⚠ mirror settings: %v (continuing)%s", Fmt.Yellow, err, Fmt.Reset)
+		return nil
+	}
+	reconcileMirroredSettings(stagingDir, localSettings)
+	return nil
+}
+
+// reconcileMirroredSettings walks the staging dir and decides what to do
+// with each file. The decision tree mirrors reconcileDefaultSettings in
+// cmd/settings.go — the .installed-defaults.json tracker records the last
+// content we installed (regardless of whether the upstream was the embedded
+// defaults or the mirror), so an unedited local file auto-updates and an
+// edited local file is preserved with a pending update for `chb settings`.
+//
+// Per file:
+//
+//   - missing locally          → install from mirror, record its hash.
+//   - identical to mirror      → no-op (refresh tracker).
+//   - tracked-hash matches     → user hasn't edited; auto-update.
+//   - tracked-hash differs     → user edited; surface as pending update.
+//
+// If a file is already pending from the embedded-defaults reconciler, the
+// mirror's version wins (the trusted host's settings are the canonical
+// upstream for thin clients; the embedded defaults are the fallback).
+func reconcileMirroredSettings(stagingDir, localSettingsDir string) {
+	tracker := loadInstalledDefaultsRecord(localSettingsDir)
+	pending := append([]PendingDefaultUpdate(nil), pendingDefaultUpdates...)
+	trackerDirty := false
+	entries, err := os.ReadDir(stagingDir)
+	if err != nil {
+		return
+	}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			// Settings nesting isn't used today; skip for now.
+			continue
+		}
+		name := entry.Name()
+		stagedPath := filepath.Join(stagingDir, name)
+		mirrorBytes, err := os.ReadFile(stagedPath)
+		if err != nil {
+			continue
+		}
+		mirrorHash := sha256Hex(mirrorBytes)
+		target := filepath.Join(localSettingsDir, name)
+		localBytes, statErr := os.ReadFile(target)
+		if errors.Is(statErr, os.ErrNotExist) {
+			if err := writeDefaultFile(target, mirrorBytes); err != nil {
+				continue
+			}
+			tracker[name] = mirrorHash
+			trackerDirty = true
+			fmt.Printf("  %s✓%s mirrored %s\n", Fmt.Green, Fmt.Reset, name)
+			continue
+		} else if statErr != nil {
+			continue
+		}
+		localHash := sha256Hex(localBytes)
+		if localHash == mirrorHash {
+			if tracker[name] != mirrorHash {
+				tracker[name] = mirrorHash
+				trackerDirty = true
+			}
+			continue
+		}
+		trackedHash, hadTracker := tracker[name]
+		userEdited := hadTracker && trackedHash != localHash
+		if !userEdited {
+			if err := writeDefaultFile(target, mirrorBytes); err != nil {
+				continue
+			}
+			tracker[name] = mirrorHash
+			trackerDirty = true
+			fmt.Printf("  %s↑%s updated %s from mirror\n", Fmt.Green, Fmt.Reset, name)
+			continue
+		}
+		pending = appendOrReplacePending(pending, PendingDefaultUpdate{
+			Name:          name,
+			LocalContent:  localBytes,
+			UpstreamBytes: mirrorBytes,
+		})
+	}
+	if trackerDirty {
+		_ = saveInstalledDefaultsRecord(localSettingsDir, tracker)
+	}
+	pendingDefaultUpdates = pending
+}
+
+func appendOrReplacePending(list []PendingDefaultUpdate, item PendingDefaultUpdate) []PendingDefaultUpdate {
+	for i, existing := range list {
+		if existing.Name == item.Name {
+			list[i] = item
+			return list
+		}
+	}
+	return append(list, item)
+}
+
+// printMirrorModeHelpBanner prints a short note about mirror mode at the
+// top of `chb pull --help` and `chb sync --help` when CHB_SYNC_SOURCE is
+// set. Operators running on the trusted host see normal help; thin clients
+// see "you're in mirror mode, here's what that means for this command".
+func printMirrorModeHelpBanner() {
+	src := MirrorSource()
+	if src == "" {
+		return
+	}
+	fmt.Printf(`
+%sMIRROR MODE — CHB_SYNC_SOURCE is set%s
+  %sSource:%s %s
+  %sBehaviour:%s
+    - pull / sync rsync data + nostr outbox from the trusted host
+      instead of running every provider locally.
+    - generate is a no-op (the trusted host already generated).
+    - push only flushes the local Nostr outbox; Odoo writes refuse.
+    - %s--no-mirror%s on the same command falls back to the legacy
+      provider-driven path (used on the trusted host itself).
+
+`, Fmt.Bold, Fmt.Reset,
+		Fmt.Dim, Fmt.Reset, src,
+		Fmt.Dim, Fmt.Reset,
+		Fmt.Yellow, Fmt.Reset,
+	)
 }
 
 // PrintMirrorGenerateSkipped prints the one-liner shown when `chb generate`

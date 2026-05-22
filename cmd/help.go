@@ -280,6 +280,7 @@ func PrintDoctorHelp() {
 
 func PrintSyncAllHelp() {
 	f := Fmt
+	printMirrorModeHelpBanner()
 	fmt.Printf(`
 %schb pull%s — Pull data from every configured provider (remote → local)
 

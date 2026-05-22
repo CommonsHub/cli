@@ -119,6 +119,27 @@ Providers split into two roles:
 Sources are read-only mirrors. Targets are reconciled — we own a piece of
 their state, and pending tells you exactly what would change on the next push.
 
+## Mirror mode (thin clients)
+
+Setting `CHB_SYNC_SOURCE=user@host:/abs/.chb` (in
+`$APP_DATA_DIR/settings/config.env`) flips a chb instance into thin-client
+mode. Instead of running every provider locally — which requires API keys
+per teammate — the binary rsyncs the trusted host's already-pulled and
+already-generated state into its own `$APP_DATA_DIR`.
+
+In mirror mode:
+
+- `chb pull` rsyncs `data/`, the nostr `outbox/` + `sent/`, and `settings/`
+  from the trusted host. Provider calls are skipped.
+- `chb generate` is a no-op (the trusted host already generated).
+- `chb push` only flushes the local Nostr outbox; Odoo writes refuse with
+  a "run on the trusted host" hint.
+
+The "sync vs generate" hard rule above is unaffected: mirror mode SKIPS
+both phases locally, but the invariant still holds on the trusted host,
+which is where the real pipeline runs. See [mirror-mode.md](mirror-mode.md)
+for the full architecture and decision tree per directory.
+
 ## Command verbs: pull / generate / push
 
 Each command has exactly one data direction. Don't overload "sync" to mean

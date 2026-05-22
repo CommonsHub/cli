@@ -131,7 +131,7 @@ func TestMirrorPullSkippedWhenNoMirrorFlag(t *testing.T) {
 	}
 }
 
-func TestMirrorPullInvokesRsyncForDataAndOutbox(t *testing.T) {
+func TestMirrorPullInvokesRsyncForDataOutboxAndSettings(t *testing.T) {
 	appDir := filepath.Join(t.TempDir(), "app")
 	t.Setenv("APP_DATA_DIR", appDir)
 	src := filepath.Join(t.TempDir(), "source-mirror")
@@ -143,16 +143,17 @@ func TestMirrorPullInvokesRsyncForDataAndOutbox(t *testing.T) {
 	if err := MirrorPull(nil); err != nil {
 		t.Fatalf("MirrorPull: %v", err)
 	}
-	// Phase 2: data + outbox up/down + sent up/down → 5 invocations.
+	// Phase 3: data + 4 outbox legs + settings → 6 invocations.
 	wantLabels := []string{
 		"data",
 		"nostr/outbox up", "nostr/outbox down",
 		"nostr/sent up", "nostr/sent down",
+		"settings",
 	}
 	if !equalStringSlice(cap.labels, wantLabels) {
 		t.Fatalf("rsync labels = %v, want %v", cap.labels, wantLabels)
 	}
-	// data uses --delete; outbox/sent legs use --update (bidirectional).
+	// data uses --delete; outbox/sent legs use --update.
 	if !sliceContains(cap.argSets[0], "--delete") {
 		t.Fatalf("data rsync args = %v, want --delete", cap.argSets[0])
 	}
@@ -162,6 +163,13 @@ func TestMirrorPullInvokesRsyncForDataAndOutbox(t *testing.T) {
 		}
 		if !sliceContains(cap.argSets[i], "--update") {
 			t.Fatalf("%s rsync did not use --update", cap.labels[i])
+		}
+	}
+	// Settings must exclude the per-machine files.
+	settingsArgs := cap.argSets[5]
+	for _, mustExclude := range []string{"config.env", "nostr.json", ".nostr-keys.json", ".installed-defaults.json"} {
+		if !sliceContains(settingsArgs, "--exclude="+mustExclude) {
+			t.Fatalf("settings rsync args %v missing --exclude=%s", settingsArgs, mustExclude)
 		}
 	}
 }
@@ -192,9 +200,10 @@ func TestMirrorOutboxUpFailureContinuesToDown(t *testing.T) {
 	if err := MirrorPull(nil); err != nil {
 		t.Fatalf("MirrorPull: %v", err)
 	}
-	// Up failures should not abort the loop; we still expect all 5 legs.
-	if len(cap.labels) != 5 {
-		t.Fatalf("expected 5 invocations even when up legs fail, got %d (%v)", len(cap.labels), cap.labels)
+	// Up failures should not abort the loop; we still expect every leg
+	// (data, 4 outbox legs, settings = 6 invocations).
+	if len(cap.labels) != 6 {
+		t.Fatalf("expected 6 invocations even when up legs fail, got %d (%v)", len(cap.labels), cap.labels)
 	}
 }
 
@@ -323,6 +332,95 @@ func TestMirrorOutboxBidirectionalRoundtrip(t *testing.T) {
 	// on the up-leg).
 	if _, err := os.Stat(filepath.Join(srcDir, "nostr/outbox/local-event.json")); err != nil {
 		t.Fatalf("local event did not arrive on the trusted host: %v", err)
+	}
+}
+
+// TestReconcileMirroredSettingsCoversFourCases drives the per-file decision
+// tree directly. Four staged files representing each branch:
+//
+//  1. missing locally       → installed (no tracker entry yet)
+//  2. identical to mirror   → no-op
+//  3. tracked-hash matches  → auto-update (user hasn't edited)
+//  4. tracked-hash differs  → pending update (user edited)
+func TestReconcileMirroredSettingsCoversFourCases(t *testing.T) {
+	appDir := t.TempDir()
+	t.Setenv("APP_DATA_DIR", appDir)
+	settingsDir := filepath.Join(appDir, "settings")
+	stagingDir := filepath.Join(appDir, ".mirror-settings")
+	for _, d := range []string{settingsDir, stagingDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+
+	// Case 1: missing local.
+	mustWrite(t, filepath.Join(stagingDir, "case1-new.json"), `{"k":"new"}`)
+
+	// Case 2: identical local + mirror, tracker missing (will be added).
+	mustWrite(t, filepath.Join(stagingDir, "case2-same.json"), `{"k":"same"}`)
+	mustWrite(t, filepath.Join(settingsDir, "case2-same.json"), `{"k":"same"}`)
+
+	// Case 3: tracker matches local → user hasn't edited → auto-update.
+	mustWrite(t, filepath.Join(stagingDir, "case3-updatable.json"), `{"k":"new-upstream"}`)
+	mustWrite(t, filepath.Join(settingsDir, "case3-updatable.json"), `{"k":"old-tracked"}`)
+
+	// Case 4: tracker differs from local → user edited → pending.
+	mustWrite(t, filepath.Join(stagingDir, "case4-edited.json"), `{"k":"new-upstream"}`)
+	mustWrite(t, filepath.Join(settingsDir, "case4-edited.json"), `{"k":"user-edits"}`)
+
+	// Seed tracker: case3 records its current local hash (so auto-update
+	// is allowed); case4 records a hash that doesn't match the user's
+	// edits (so it's surfaced as pending).
+	tracker := map[string]string{
+		"case3-updatable.json": sha256Hex([]byte(`{"k":"old-tracked"}`)),
+		"case4-edited.json":    sha256Hex([]byte(`{"k":"original-shipped"}`)),
+	}
+	if err := saveInstalledDefaultsRecord(settingsDir, tracker); err != nil {
+		t.Fatalf("save tracker: %v", err)
+	}
+
+	// Reset the package-level pending slice; the reconciler treats it
+	// as the in-process state to extend.
+	pendingDefaultUpdates = nil
+	reconcileMirroredSettings(stagingDir, settingsDir)
+
+	// Case 1: installed.
+	if got, err := os.ReadFile(filepath.Join(settingsDir, "case1-new.json")); err != nil || strings.TrimSpace(string(got)) != `{"k":"new"}` {
+		t.Fatalf("case1: got %q, err %v", string(got), err)
+	}
+	// Case 2: unchanged on disk.
+	if got, _ := os.ReadFile(filepath.Join(settingsDir, "case2-same.json")); strings.TrimSpace(string(got)) != `{"k":"same"}` {
+		t.Fatalf("case2 changed unexpectedly: %q", string(got))
+	}
+	// Case 3: auto-updated to the new upstream.
+	if got, _ := os.ReadFile(filepath.Join(settingsDir, "case3-updatable.json")); strings.TrimSpace(string(got)) != `{"k":"new-upstream"}` {
+		t.Fatalf("case3 should auto-update, got %q", string(got))
+	}
+	// Case 4: local untouched + pending update added.
+	if got, _ := os.ReadFile(filepath.Join(settingsDir, "case4-edited.json")); strings.TrimSpace(string(got)) != `{"k":"user-edits"}` {
+		t.Fatalf("case4 must not be overwritten, got %q", string(got))
+	}
+	pending := PendingSettingsUpdates()
+	if len(pending) != 1 || pending[0].Name != "case4-edited.json" {
+		t.Fatalf("pending updates = %v, want exactly case4", pending)
+	}
+	if strings.TrimSpace(string(pending[0].LocalContent)) != `{"k":"user-edits"}` {
+		t.Fatalf("pending local = %q", string(pending[0].LocalContent))
+	}
+	if strings.TrimSpace(string(pending[0].UpstreamBytes)) != `{"k":"new-upstream"}` {
+		t.Fatalf("pending upstream = %q", string(pending[0].UpstreamBytes))
+	}
+
+	// Tracker should now show case1/2/3 at the new hash.
+	finalTracker := loadInstalledDefaultsRecord(settingsDir)
+	if finalTracker["case1-new.json"] != sha256Hex([]byte(`{"k":"new"}`)) {
+		t.Fatalf("tracker case1 = %q", finalTracker["case1-new.json"])
+	}
+	if finalTracker["case2-same.json"] != sha256Hex([]byte(`{"k":"same"}`)) {
+		t.Fatalf("tracker case2 = %q", finalTracker["case2-same.json"])
+	}
+	if finalTracker["case3-updatable.json"] != sha256Hex([]byte(`{"k":"new-upstream"}`)) {
+		t.Fatalf("tracker case3 = %q", finalTracker["case3-updatable.json"])
 	}
 }
 

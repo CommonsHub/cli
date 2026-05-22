@@ -351,6 +351,7 @@ func PushAllTargets(args []string) error {
 // PrintSyncCronHelp is the help shown for the all-in-one `chb sync`
 // command — the recommended cron entrypoint.
 func PrintSyncCronHelp() {
+	printMirrorModeHelpBanner()
 	fmt.Printf(`
 %schb sync%s — Full cron loop: pull from every source, then push to every target
 
