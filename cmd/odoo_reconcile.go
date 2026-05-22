@@ -1295,9 +1295,19 @@ func attributeBankLineToPartnerAfterReconcile(creds *OdooCredentials, uid int, s
 	if len(updates) == 0 {
 		return nil
 	}
+	// Pass the bypass context (same as v3.4.11's reconcile write):
+	// the statement line's move was reposted by the reconcile dance
+	// just above, and writing partner_id / partner_bank_id triggers
+	// Odoo's account.move synchronization which tries to unlink+
+	// recreate the underlying move.lines. On a posted move that
+	// fails with "Vous ne pouvez pas supprimer une écriture
+	// comptable validée. Veuillez d'abord la mettre en mode
+	// brouillon." Skipping the sync is safe — partner_id is metadata
+	// on the statement line, not part of the accounting balance.
 	if _, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
 		"account.bank.statement.line", "write",
-		[]interface{}{[]interface{}{statementLineID}, updates}, nil); err != nil {
+		[]interface{}{[]interface{}{statementLineID}, updates},
+		odooStatementLineMetadataWriteContext()); err != nil {
 		return fmt.Errorf("write statement line: %v", err)
 	}
 	return nil
