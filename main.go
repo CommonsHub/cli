@@ -408,13 +408,12 @@ func main() {
 			exitWithError(err)
 		}
 	case "pull":
-		// Mirror mode: instead of running every provider locally, rsync
-		// the trusted host's data/ and outbox into our APP_DATA_DIR. The
-		// `--no-mirror` flag (per-invocation override) keeps the legacy
-		// path available, e.g. on the trusted host running the same
-		// binary.
+		// Mirror mode: instead of running every provider locally,
+		// rsync the trusted host's data/ + settings/ + outbox into
+		// our APP_DATA_DIR. Falls through to the provider-driven
+		// path when CHB_SYNC_SOURCE is unset.
 		if cmd.MirrorEnabled(args[1:]) {
-			if err := cmd.MirrorPull(cmd.FilterMirrorFlags(args[1:])); err != nil {
+			if err := cmd.MirrorPull(args[1:]); err != nil {
 				exitWithError(err)
 			}
 			break
@@ -423,16 +422,10 @@ func main() {
 			exitWithError(err)
 		}
 	case "push":
-		// Push to every target (Odoo journals + Nostr outbox). Useful as
-		// the second half of `chb sync` and as a standalone "publish
-		// everything ready" call for cron jobs that pull continuously and
-		// push periodically.
-		if cmd.MirrorEnabled(args[1:]) {
-			if err := cmd.MirrorPushNostrOnly(cmd.FilterMirrorFlags(args[1:])); err != nil {
-				exitWithError(err)
-			}
-			break
-		}
+		// Push to every target (Odoo journals + Nostr outbox).
+		// Each target gates on its own credentials, so mirror mode
+		// doesn't need a special path — Odoo refuses on hosts
+		// without ODOO_PASSWORD; Nostr flushes if local keys exist.
 		if err := cmd.PushAllTargets(args[1:]); err != nil {
 			exitWithError(err)
 		}
@@ -448,15 +441,17 @@ func main() {
 			cmd.PrintSyncCronHelp()
 			return
 		}
-		// Mirror mode: pull from the trusted host, skip generate, push
-		// only what we can sign locally (Nostr).
+		// Mirror mode: rsync from the trusted host, skip generate,
+		// run the normal push path. Per-target credential gates
+		// (RequireOdooWriteCapability, etc.) ensure Odoo only
+		// fires when ODOO_PASSWORD is set; Nostr only when local
+		// keys exist.
 		if cmd.MirrorEnabled(args[1:]) {
-			mirrorArgs := cmd.FilterMirrorFlags(args[1:])
-			if err := cmd.MirrorPull(mirrorArgs); err != nil {
+			if err := cmd.MirrorPull(args[1:]); err != nil {
 				exitWithError(err)
 			}
 			cmd.PrintMirrorGenerateSkipped()
-			if err := cmd.MirrorPushNostrOnly(mirrorArgs); err != nil {
+			if err := cmd.PushAllTargets(args[1:]); err != nil {
 				exitWithError(err)
 			}
 			break

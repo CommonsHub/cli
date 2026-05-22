@@ -27,13 +27,10 @@ func TestMirrorSourceTrimsWhitespace(t *testing.T) {
 	}
 }
 
-func TestMirrorEnabledRespectsNoMirrorOverride(t *testing.T) {
+func TestMirrorEnabledTrackedByEnv(t *testing.T) {
 	t.Setenv("CHB_SYNC_SOURCE", "/tmp/foo")
 	if !MirrorEnabled(nil) {
 		t.Fatalf("MirrorEnabled(nil) = false, want true when CHB_SYNC_SOURCE set")
-	}
-	if MirrorEnabled([]string{"--no-mirror"}) {
-		t.Fatalf("MirrorEnabled with --no-mirror = true, want false")
 	}
 	t.Setenv("CHB_SYNC_SOURCE", "")
 	if MirrorEnabled(nil) {
@@ -42,31 +39,36 @@ func TestMirrorEnabledRespectsNoMirrorOverride(t *testing.T) {
 }
 
 func TestRequireOdooWriteCapability(t *testing.T) {
+	// No mirror, no password — refuse with the local-config hint.
 	t.Setenv("CHB_SYNC_SOURCE", "")
-	t.Setenv("ODOO_PASSWORD", "")
-	if err := RequireOdooWriteCapability(); err != nil {
-		t.Fatalf("not in mirror mode, want nil error, got %v", err)
-	}
-	t.Setenv("CHB_SYNC_SOURCE", "user@host:/path")
 	t.Setenv("ODOO_PASSWORD", "")
 	err := RequireOdooWriteCapability()
 	if err == nil {
+		t.Fatalf("no password (no mirror): want error, got nil")
+	}
+	if !strings.Contains(err.Error(), "ODOO_PASSWORD is unset") {
+		t.Fatalf("error %q should mention missing ODOO_PASSWORD", err.Error())
+	}
+
+	// Mirror, no password — refuse with the "run on trusted host" hint.
+	t.Setenv("CHB_SYNC_SOURCE", "user@host:/path")
+	t.Setenv("ODOO_PASSWORD", "")
+	err = RequireOdooWriteCapability()
+	if err == nil {
 		t.Fatalf("mirror+no password: want error, got nil")
 	}
-	if !strings.Contains(err.Error(), "mirror mode") {
-		t.Fatalf("error message %q should mention mirror mode", err.Error())
+	if !strings.Contains(err.Error(), "trusted host") {
+		t.Fatalf("mirror error %q should hint about the trusted host", err.Error())
 	}
+
+	// Password present — pass regardless of mirror mode.
 	t.Setenv("ODOO_PASSWORD", "secret")
 	if err := RequireOdooWriteCapability(); err != nil {
 		t.Fatalf("mirror+password set: want nil, got %v", err)
 	}
-}
-
-func TestFilterMirrorFlagsStripsNoMirror(t *testing.T) {
-	got := FilterMirrorFlags([]string{"--verbose", "--no-mirror", "--since", "2024-01"})
-	want := []string{"--verbose", "--since", "2024-01"}
-	if !equalStringSlice(got, want) {
-		t.Fatalf("FilterMirrorFlags = %v, want %v", got, want)
+	t.Setenv("CHB_SYNC_SOURCE", "")
+	if err := RequireOdooWriteCapability(); err != nil {
+		t.Fatalf("no mirror+password set: want nil, got %v", err)
 	}
 }
 
@@ -120,18 +122,7 @@ func TestMirrorPullSkippedWhenSourceUnset(t *testing.T) {
 	}
 }
 
-func TestMirrorPullSkippedWhenNoMirrorFlag(t *testing.T) {
-	t.Setenv("CHB_SYNC_SOURCE", "/tmp/source")
-	cap := withMirrorRunner(t)
-	if err := MirrorPull([]string{"--no-mirror"}); err != nil {
-		t.Fatalf("MirrorPull with --no-mirror: want nil err, got %v", err)
-	}
-	if len(cap.argSets) != 0 {
-		t.Fatalf("expected no rsync calls when --no-mirror is passed, got %d", len(cap.argSets))
-	}
-}
-
-func TestMirrorPullInvokesRsyncForDataOutboxAndSettings(t *testing.T) {
+func TestMirrorPullInvokesRsyncForEveryLeg(t *testing.T) {
 	appDir := filepath.Join(t.TempDir(), "app")
 	t.Setenv("APP_DATA_DIR", appDir)
 	src := filepath.Join(t.TempDir(), "source-mirror")
@@ -143,9 +134,11 @@ func TestMirrorPullInvokesRsyncForDataOutboxAndSettings(t *testing.T) {
 	if err := MirrorPull(nil); err != nil {
 		t.Fatalf("MirrorPull: %v", err)
 	}
-	// Phase 3: data + 4 outbox legs + settings → 6 invocations.
+	// Expected legs (in order): data/latest, data/months,
+	// nostr/outbox up+down, nostr/sent up+down, settings → 7.
 	wantLabels := []string{
-		"data",
+		"data/latest",
+		"data/months",
 		"nostr/outbox up", "nostr/outbox down",
 		"nostr/sent up", "nostr/sent down",
 		"settings",
@@ -153,11 +146,16 @@ func TestMirrorPullInvokesRsyncForDataOutboxAndSettings(t *testing.T) {
 	if !equalStringSlice(cap.labels, wantLabels) {
 		t.Fatalf("rsync labels = %v, want %v", cap.labels, wantLabels)
 	}
-	// data uses --delete; outbox/sent legs use --update.
+	// data/latest uses --delete (authoritative snapshot).
 	if !sliceContains(cap.argSets[0], "--delete") {
-		t.Fatalf("data rsync args = %v, want --delete", cap.argSets[0])
+		t.Fatalf("data/latest args = %v, want --delete", cap.argSets[0])
 	}
-	for i := 1; i <= 4; i++ {
+	// data/months does NOT use --delete (past months are immutable).
+	if sliceContains(cap.argSets[1], "--delete") {
+		t.Fatalf("data/months MUST NOT use --delete (immutable history), got %v", cap.argSets[1])
+	}
+	// Outbox/sent legs use --update, not --delete.
+	for i := 2; i <= 5; i++ {
 		if sliceContains(cap.argSets[i], "--delete") {
 			t.Fatalf("%s rsync used --delete; outbox legs must be --update", cap.labels[i])
 		}
@@ -165,9 +163,13 @@ func TestMirrorPullInvokesRsyncForDataOutboxAndSettings(t *testing.T) {
 			t.Fatalf("%s rsync did not use --update", cap.labels[i])
 		}
 	}
-	// Settings must exclude the per-machine files.
-	settingsArgs := cap.argSets[5]
-	for _, mustExclude := range []string{"config.env", "nostr.json", ".nostr-keys.json", ".installed-defaults.json"} {
+	// Settings uses --delete (master is source of truth) and
+	// excludes per-machine files.
+	settingsArgs := cap.argSets[6]
+	if !sliceContains(settingsArgs, "--delete") {
+		t.Fatalf("settings rsync args = %v, want --delete", settingsArgs)
+	}
+	for _, mustExclude := range []string{"config.env", "keys", ".installed_defaults"} {
 		if !sliceContains(settingsArgs, "--exclude="+mustExclude) {
 			t.Fatalf("settings rsync args %v missing --exclude=%s", settingsArgs, mustExclude)
 		}
@@ -200,10 +202,10 @@ func TestMirrorOutboxUpFailureContinuesToDown(t *testing.T) {
 	if err := MirrorPull(nil); err != nil {
 		t.Fatalf("MirrorPull: %v", err)
 	}
-	// Up failures should not abort the loop; we still expect every leg
-	// (data, 4 outbox legs, settings = 6 invocations).
-	if len(cap.labels) != 6 {
-		t.Fatalf("expected 6 invocations even when up legs fail, got %d (%v)", len(cap.labels), cap.labels)
+	// Up failures should not abort the loop; we still expect every
+	// leg: data/latest, data/months, 4 outbox legs, settings = 7.
+	if len(cap.labels) != 7 {
+		t.Fatalf("expected 7 invocations even when up legs fail, got %d (%v)", len(cap.labels), cap.labels)
 	}
 }
 
@@ -318,6 +320,10 @@ func TestMirrorOutboxBidirectionalRoundtrip(t *testing.T) {
 		t.Fatalf("mkdir sent: %v", err)
 	}
 	mustWrite(t, filepath.Join(srcDir, "data/2026/05/providers/stripe/balance.json"), `{}`)
+	// data/latest is a hard-fail leg, so populate it on the source so
+	// the test asserts the bidirectional outbox roundtrip not the
+	// missing-dir failure.
+	mustWrite(t, filepath.Join(srcDir, "data/latest/generated/summary.txt"), "summary")
 
 	if err := MirrorPull(nil); err != nil {
 		t.Fatalf("MirrorPull: %v", err)
@@ -335,98 +341,72 @@ func TestMirrorOutboxBidirectionalRoundtrip(t *testing.T) {
 	}
 }
 
-// TestReconcileMirroredSettingsCoversFourCases drives the per-file decision
-// tree directly. Four staged files representing each branch:
-//
-//  1. missing locally       → installed (no tracker entry yet)
-//  2. identical to mirror   → no-op
-//  3. tracked-hash matches  → auto-update (user hasn't edited)
-//  4. tracked-hash differs  → pending update (user edited)
-func TestReconcileMirroredSettingsCoversFourCases(t *testing.T) {
-	appDir := t.TempDir()
+// TestMirrorPastMonthsImmutable verifies the simplest invariant of
+// the data/months leg: even when the trusted host has fewer files
+// than the local cache, the local files stay. Past months are
+// immutable history; we never blow them away from the mirror leg.
+func TestMirrorPastMonthsImmutable(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not on PATH")
+	}
+	srcDir := filepath.Join(t.TempDir(), "src")
+	appDir := filepath.Join(t.TempDir(), "app")
 	t.Setenv("APP_DATA_DIR", appDir)
-	settingsDir := filepath.Join(appDir, "settings")
-	stagingDir := filepath.Join(appDir, ".mirror-settings")
-	for _, d := range []string{settingsDir, stagingDir} {
-		if err := os.MkdirAll(d, 0755); err != nil {
-			t.Fatalf("mkdir %s: %v", d, err)
-		}
-	}
+	t.Setenv("CHB_SYNC_SOURCE", srcDir)
 
-	// Case 1: missing local.
-	mustWrite(t, filepath.Join(stagingDir, "case1-new.json"), `{"k":"new"}`)
+	// Local has a historical file the trusted host doesn't.
+	mustWrite(t, filepath.Join(appDir, "data/2023/01/providers/stripe/old.json"), `{"local-only":true}`)
+	// Trusted host has the same month with a different shape.
+	mustWrite(t, filepath.Join(srcDir, "data/2023/01/providers/stripe/new.json"), `{"remote":true}`)
+	mustWrite(t, filepath.Join(srcDir, "data/latest/generated/summary.txt"), "summary")
+	// Empty outbox/sent dirs so the bidirectional legs have something to talk to.
+	_ = os.MkdirAll(filepath.Join(srcDir, "nostr/outbox"), 0755)
+	_ = os.MkdirAll(filepath.Join(srcDir, "nostr/sent"), 0755)
 
-	// Case 2: identical local + mirror, tracker missing (will be added).
-	mustWrite(t, filepath.Join(stagingDir, "case2-same.json"), `{"k":"same"}`)
-	mustWrite(t, filepath.Join(settingsDir, "case2-same.json"), `{"k":"same"}`)
-
-	// Case 3: tracker matches local → user hasn't edited → auto-update.
-	mustWrite(t, filepath.Join(stagingDir, "case3-updatable.json"), `{"k":"new-upstream"}`)
-	mustWrite(t, filepath.Join(settingsDir, "case3-updatable.json"), `{"k":"old-tracked"}`)
-
-	// Case 4: tracker differs from local → user edited → pending.
-	mustWrite(t, filepath.Join(stagingDir, "case4-edited.json"), `{"k":"new-upstream"}`)
-	mustWrite(t, filepath.Join(settingsDir, "case4-edited.json"), `{"k":"user-edits"}`)
-
-	// Seed tracker: case3 records its current local hash (so auto-update
-	// is allowed); case4 records a hash that doesn't match the user's
-	// edits (so it's surfaced as pending).
-	tracker := map[string]string{
-		"case3-updatable.json": sha256Hex([]byte(`{"k":"old-tracked"}`)),
-		"case4-edited.json":    sha256Hex([]byte(`{"k":"original-shipped"}`)),
+	if err := MirrorPull(nil); err != nil {
+		t.Fatalf("MirrorPull: %v", err)
 	}
-	if err := saveInstalledDefaultsRecord(settingsDir, tracker); err != nil {
-		t.Fatalf("save tracker: %v", err)
+	// Local-only file must survive.
+	if _, err := os.Stat(filepath.Join(appDir, "data/2023/01/providers/stripe/old.json")); err != nil {
+		t.Fatalf("data/months leg deleted a local-only file: %v", err)
 	}
-
-	// Reset the package-level pending slice; the reconciler treats it
-	// as the in-process state to extend.
-	pendingDefaultUpdates = nil
-	reconcileMirroredSettings(stagingDir, settingsDir)
-
-	// Case 1: installed.
-	if got, err := os.ReadFile(filepath.Join(settingsDir, "case1-new.json")); err != nil || strings.TrimSpace(string(got)) != `{"k":"new"}` {
-		t.Fatalf("case1: got %q, err %v", string(got), err)
-	}
-	// Case 2: unchanged on disk.
-	if got, _ := os.ReadFile(filepath.Join(settingsDir, "case2-same.json")); strings.TrimSpace(string(got)) != `{"k":"same"}` {
-		t.Fatalf("case2 changed unexpectedly: %q", string(got))
-	}
-	// Case 3: auto-updated to the new upstream.
-	if got, _ := os.ReadFile(filepath.Join(settingsDir, "case3-updatable.json")); strings.TrimSpace(string(got)) != `{"k":"new-upstream"}` {
-		t.Fatalf("case3 should auto-update, got %q", string(got))
-	}
-	// Case 4: local untouched + pending update added.
-	if got, _ := os.ReadFile(filepath.Join(settingsDir, "case4-edited.json")); strings.TrimSpace(string(got)) != `{"k":"user-edits"}` {
-		t.Fatalf("case4 must not be overwritten, got %q", string(got))
-	}
-	pending := PendingSettingsUpdates()
-	if len(pending) != 1 || pending[0].Name != "case4-edited.json" {
-		t.Fatalf("pending updates = %v, want exactly case4", pending)
-	}
-	if strings.TrimSpace(string(pending[0].LocalContent)) != `{"k":"user-edits"}` {
-		t.Fatalf("pending local = %q", string(pending[0].LocalContent))
-	}
-	if strings.TrimSpace(string(pending[0].UpstreamBytes)) != `{"k":"new-upstream"}` {
-		t.Fatalf("pending upstream = %q", string(pending[0].UpstreamBytes))
-	}
-
-	// Tracker should now show case1/2/3 at the new hash.
-	finalTracker := loadInstalledDefaultsRecord(settingsDir)
-	if finalTracker["case1-new.json"] != sha256Hex([]byte(`{"k":"new"}`)) {
-		t.Fatalf("tracker case1 = %q", finalTracker["case1-new.json"])
-	}
-	if finalTracker["case2-same.json"] != sha256Hex([]byte(`{"k":"same"}`)) {
-		t.Fatalf("tracker case2 = %q", finalTracker["case2-same.json"])
-	}
-	if finalTracker["case3-updatable.json"] != sha256Hex([]byte(`{"k":"new-upstream"}`)) {
-		t.Fatalf("tracker case3 = %q", finalTracker["case3-updatable.json"])
+	// Remote file must have arrived.
+	if _, err := os.Stat(filepath.Join(appDir, "data/2023/01/providers/stripe/new.json")); err != nil {
+		t.Fatalf("data/months leg failed to pull remote file: %v", err)
 	}
 }
 
-// TestPrintMirrorModeHelpBannerOnlyWhenEnabled verifies the help banner
-// only renders when CHB_SYNC_SOURCE is set — operators on the trusted
-// host see vanilla help, thin clients see the mirror-mode summary first.
+// TestMirrorLatestAuthoritative verifies the inverse: data/latest/
+// uses --delete, so a file present locally but absent on the
+// trusted host gets removed.
+func TestMirrorLatestAuthoritative(t *testing.T) {
+	if _, err := exec.LookPath("rsync"); err != nil {
+		t.Skip("rsync not on PATH")
+	}
+	srcDir := filepath.Join(t.TempDir(), "src")
+	appDir := filepath.Join(t.TempDir(), "app")
+	t.Setenv("APP_DATA_DIR", appDir)
+	t.Setenv("CHB_SYNC_SOURCE", srcDir)
+
+	// Local has a stale latest/ file the trusted host no longer carries.
+	mustWrite(t, filepath.Join(appDir, "data/latest/stale.json"), `{"stale":true}`)
+	mustWrite(t, filepath.Join(srcDir, "data/latest/fresh.json"), `{"fresh":true}`)
+	_ = os.MkdirAll(filepath.Join(srcDir, "nostr/outbox"), 0755)
+	_ = os.MkdirAll(filepath.Join(srcDir, "nostr/sent"), 0755)
+
+	if err := MirrorPull(nil); err != nil {
+		t.Fatalf("MirrorPull: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(appDir, "data/latest/stale.json")); !os.IsNotExist(err) {
+		t.Fatalf("data/latest leg failed to --delete the stale file: err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(appDir, "data/latest/fresh.json")); err != nil {
+		t.Fatalf("data/latest leg failed to pull the fresh file: %v", err)
+	}
+}
+
+// TestPrintMirrorModeHelpBannerOnlyWhenEnabled verifies the help
+// banner only renders when CHB_SYNC_SOURCE is set.
 func TestPrintMirrorModeHelpBannerOnlyWhenEnabled(t *testing.T) {
 	t.Setenv("CHB_SYNC_SOURCE", "")
 	out := captureStdout(t, printMirrorModeHelpBanner)
@@ -440,9 +420,6 @@ func TestPrintMirrorModeHelpBannerOnlyWhenEnabled(t *testing.T) {
 	}
 	if !strings.Contains(out, "ops@host:/srv/chb") {
 		t.Fatalf("banner missing source URL: %q", out)
-	}
-	if !strings.Contains(out, "--no-mirror") {
-		t.Fatalf("banner missing --no-mirror hint: %q", out)
 	}
 }
 

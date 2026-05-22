@@ -2,7 +2,6 @@ package cmd
 
 import (
 	"bufio"
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -29,66 +28,65 @@ import (
 //   - `chb pull`      → rsync from remote (data + settings + outbox)
 //                       instead of running every provider locally.
 //   - `chb generate`  → no-op; the trusted host already generated.
-//   - `chb push`      → only push Nostr (if a local NOSTR_SECRET_KEY exists).
-//                       Refuse Odoo push: that requires credentials only the
-//                       trusted host has.
-//   - `chb sync`      → mirror-pull, then flush local Nostr if keys are
-//                       present. Odoo writes refuse.
+//   - `chb push`      → normal push path. Each target gates on its
+//                       own credentials, so Odoo refuses on hosts
+//                       without ODOO_PASSWORD and Nostr flushes if
+//                       a local NOSTR identity exists. Nothing
+//                       mirror-specific.
+//   - `chb sync`      → mirror-pull + normal push (same credential
+//                       gating). Generate is skipped.
 //   - read-only       → unchanged.
 //     commands
 //
-// Per-invocation override: passing `--no-mirror` on `pull` / `sync` / `push`
-// ignores CHB_SYNC_SOURCE. Useful for the trusted host running the same
-// binary.
+// Credentials, not mirror mode, gate writes. A thin-client without
+// ODOO_PASSWORD refuses Odoo writes regardless of CHB_SYNC_SOURCE;
+// a host with ODOO_PASSWORD writes regardless of mirror mode. The
+// simpler rule keeps the mental model small.
 //
-// SSH auth is delegated entirely to the user's ssh-agent / keys; chb does
-// not manage credentials.
+// SSH auth is delegated entirely to the user's ssh-agent / keys; chb
+// does not manage credentials.
 //
-// Lock: a flock-protected lock file at $APP_DATA_DIR/.sync.lock is held for
-// the entire rsync sequence so two concurrent mirror pulls can't corrupt the
-// local copy.
+// Lock: a flock-protected lock file at $APP_DATA_DIR/.sync.lock is
+// held for the entire rsync sequence so two concurrent mirror pulls
+// can't corrupt the local copy.
 //
 // See docs/mirror-mode.md for the architecture rationale.
 func MirrorSource() string {
 	return strings.TrimSpace(os.Getenv("CHB_SYNC_SOURCE"))
 }
 
-// MirrorEnabled reports whether mirror mode is active for this invocation.
-// It returns true only when CHB_SYNC_SOURCE is set AND --no-mirror is not
-// present in args.
+// MirrorEnabled reports whether mirror mode is active for this
+// invocation — i.e. CHB_SYNC_SOURCE is set. The args slice is kept
+// in the signature so future per-invocation overrides can hook in
+// without changing every call site.
 func MirrorEnabled(args []string) bool {
-	if MirrorSource() == "" {
-		return false
-	}
-	if HasFlag(args, "--no-mirror") {
-		return false
-	}
-	return true
+	_ = args
+	return MirrorSource() != ""
 }
 
-// FilterMirrorFlags strips mirror-mode-only flags from args before they
-// reach sub-commands. Mirror flags are handled at the dispatcher level.
-func FilterMirrorFlags(args []string) []string {
-	return filterFlag(args, "--no-mirror")
-}
-
-// RequireOdooWriteCapability fails fast when mirror mode is active and the
-// local environment doesn't have an Odoo password. The trusted host has the
-// credentials; thin clients should refuse to attempt the write so the operator
-// gets a clear "run this on the trusted host" message instead of a cryptic
-// auth failure.
+// RequireOdooWriteCapability fails fast when this machine has no
+// Odoo credentials. The check is now credential-only — mirror mode
+// is irrelevant: a thin-client without ODOO_PASSWORD refuses, and a
+// trusted host with ODOO_PASSWORD writes regardless of whether
+// CHB_SYNC_SOURCE is set.
 //
-// Safe to call from every Odoo-write entry point (push, reconcile, journal
-// sync, …); returns nil when not in mirror mode or when credentials are
-// available, so existing single-host setups stay unchanged.
+// The motivation for the simpler semantic: an operator running on a
+// thin-client doesn't care WHY the write would fail (mirror mode vs
+// missing creds) — only that it would. Treating both as the same
+// refusal keeps the mental model small.
+//
+// Safe to call from every Odoo write entry point (push, reconcile,
+// journal sync, …). Returns nil when credentials are present.
 func RequireOdooWriteCapability() error {
-	if MirrorSource() == "" {
-		return nil
-	}
 	if strings.TrimSpace(os.Getenv("ODOO_PASSWORD")) != "" {
 		return nil
 	}
-	return fmt.Errorf("Odoo writes are disabled in mirror mode (CHB_SYNC_SOURCE is set and ODOO_PASSWORD is unset).\n  ↪ Run this command on the trusted host, or unset CHB_SYNC_SOURCE locally if you have credentials")
+	if MirrorSource() != "" {
+		return fmt.Errorf("Odoo writes are disabled: ODOO_PASSWORD is unset.\n  ↪ This thin-client mirrors from %s. Run the write on the trusted host instead.",
+			MirrorSource())
+	}
+	return fmt.Errorf("Odoo writes are disabled: ODOO_PASSWORD is unset.\n  ↪ Run `chb setup odoo` or add ODOO_PASSWORD to %s/config.env",
+		AppSettingsDir())
 }
 
 // mirrorRunner is the shell-out indirection that lets tests stub rsync.
@@ -192,16 +190,23 @@ func localSubpath(sub string) string {
 	return filepath.Join(dir, sub)
 }
 
-// MirrorPull runs the read-side of mirror mode: it rsyncs the trusted host's
-// data/ tree into the local AppDataDir and prints a compact summary. Returns
-// nil when CHB_SYNC_SOURCE is unset (a no-op so the caller can invoke it
-// unconditionally inside main.go's dispatch).
+// MirrorPull runs the read-side of mirror mode: rsyncs the trusted
+// host's tree into the local AppDataDir and prints a compact summary.
+// Returns nil when CHB_SYNC_SOURCE is unset (a no-op so the caller can
+// invoke it unconditionally inside main.go's dispatch).
 //
-// Phase 3 scope: data/ is mirrored authoritatively (--delete), the nostr
-// outbox + sent are synced bidirectionally (--update), and settings/ runs
-// through the merge-with-pending-updates reconciler — unedited files
-// auto-update, locally-edited files surface as PendingDefaultUpdates so
-// `chb settings` shows a diff the operator can accept.
+// Three rsync legs run under the same flock:
+//
+//   - data/latest/         → --delete (authoritative snapshot)
+//   - data/<YYYY>/<MM>/    → NO --delete (immutable historical archive;
+//                            past months never get blown away even if
+//                            the source has them gone)
+//   - settings/            → --delete (master is source of truth);
+//                            config.env + keys/ + .installed_defaults
+//                            stay local
+//   - nostr/outbox/ + sent → bidirectional --update (queued
+//                            annotations from any teammate get
+//                            picked up by the next push)
 func MirrorPull(args []string) error {
 	if !MirrorEnabled(args) {
 		return nil
@@ -214,16 +219,15 @@ func MirrorPull(args []string) error {
 		return fmt.Errorf("rsync is required for mirror mode but was not found on PATH — install rsync (e.g. `sudo apt install rsync`) and retry")
 	}
 	err := withMirrorLock(func() error {
-		// data/ — authoritative pull. The trusted host always wins.
-		if err := mirrorRsyncData(src, verbose); err != nil {
+		if err := mirrorRsyncDataLatest(src, verbose); err != nil {
 			return err
 		}
-		// Outbox: bidirectional (preserve queued local annotations).
+		if err := mirrorRsyncDataMonths(src, verbose); err != nil {
+			return err
+		}
 		if err := mirrorRsyncOutbox(src, verbose); err != nil {
 			return err
 		}
-		// Settings: merge-with-pending-updates. Per-machine files
-		// (secrets, identity, tracker) are excluded.
 		return mirrorRsyncSettings(src, verbose)
 	})
 	elapsed := time.Since(started).Round(100 * time.Millisecond)
@@ -237,19 +241,37 @@ func MirrorPull(args []string) error {
 	return nil
 }
 
-// mirrorRsyncData pulls $remote/data/ → $local/data/ with --delete. The
-// trusted host owns the canonical generated state; locally-modified files
-// in data/ are blown away on every pull. This is intentional: data/ is a
-// pure read-only mirror of provider output.
-func mirrorRsyncData(src string, verbose bool) error {
+// mirrorRsyncDataLatest pulls data/latest/ with --delete. The latest
+// snapshot is authoritative — files missing on the source should
+// disappear locally too. Hard-fails: if the trusted host's
+// data/latest is missing or unreachable, the operator should know
+// rather than silently end up with stale data.
+func mirrorRsyncDataLatest(src string, verbose bool) error {
+	remote := mirrorRemoteSubpath(src, "data/latest") + "/"
+	local := filepath.Join(localSubpath("data"), "latest") + "/"
+	if err := os.MkdirAll(local, 0755); err != nil {
+		return err
+	}
+	rsyncArgs := baseRsyncFlags(verbose)
+	rsyncArgs = append(rsyncArgs, "--delete", remote, local)
+	return mirrorRunRsync(rsyncArgs, "data/latest")
+}
+
+// mirrorRsyncDataMonths pulls every dated month under data/<YYYY>/<MM>/
+// WITHOUT --delete. Past months are immutable history — if the
+// trusted host's backup is partial or a teammate has months we
+// don't, we keep both. `--exclude=/latest` keeps the latest/ tree
+// out of this leg; it has its own dedicated rsync above.
+func mirrorRsyncDataMonths(src string, verbose bool) error {
 	remote := mirrorRemoteSubpath(src, "data") + "/"
 	local := localSubpath("data") + "/"
 	if err := os.MkdirAll(local, 0755); err != nil {
 		return err
 	}
 	rsyncArgs := baseRsyncFlags(verbose)
-	rsyncArgs = append(rsyncArgs, "--delete", remote, local)
-	return mirrorRunRsync(rsyncArgs, "data")
+	// No --delete on this leg. Past months are immutable history.
+	rsyncArgs = append(rsyncArgs, "--exclude=/latest", remote, local)
+	return mirrorRunRsync(rsyncArgs, "data/months")
 }
 
 // mirrorRsyncOutbox does a bidirectional sync of the nostr outbox:
@@ -292,142 +314,46 @@ func mirrorRsyncOutbox(src string, verbose bool) error {
 	return nil
 }
 
-// mirrorRsyncSettings pulls $remote/settings/ into a staging dir under
-// $APP_DATA_DIR/.mirror-settings/, then runs reconcileMirroredSettings to
-// merge unedited locals (auto-update) and surface edited locals as pending
-// updates. Per-machine files are excluded from the rsync entirely:
+// mirrorRsyncSettings pulls $remote/settings/ into $local/settings/
+// with --delete. The trusted host is the source of truth for
+// rules.json / accounts.json / categories / collectives / etc.
+// Per-machine files stay local — never overwritten, never sent:
 //
-//   - config.env             — secrets (API keys); each machine owns its own.
-//   - nostr.json             — local Nostr identity.
-//   - .nostr-keys.json       — legacy Nostr identity path.
-//   - .installed-defaults.json — tracker for the embedded-defaults
-//     bootstrap; reused by the mirror reconciler but never sent over
-//     the wire.
+//   - config.env         — API keys + CHB_SYNC_SOURCE itself; per-host.
+//   - keys/              — Nostr identity (and any other secret material).
+//                          Lives outside settings/, but excluded here as
+//                          belt-and-suspenders in case the trusted host
+//                          ever lays it differently.
+//   - .installed_defaults — embedded-defaults bootstrap tracker; per-host.
 //
-// rsync errors are surfaced as a warning (best-effort, like the outbox)
-// so a transient settings rsync failure can't block the data/ pull.
+// rsync errors are surfaced as a warning and the function returns
+// nil so a transient settings rsync failure (e.g. SSH hiccup mid-
+// transfer) can't block the data/ pull, which is the load-bearing
+// half of the mirror.
 func mirrorRsyncSettings(src string, verbose bool) error {
 	localSettings := AppSettingsDir()
 	if err := os.MkdirAll(localSettings, 0755); err != nil {
 		return err
 	}
-	stagingDir := filepath.Join(AppDataDir(), ".mirror-settings")
-	if err := os.MkdirAll(stagingDir, 0755); err != nil {
-		return err
-	}
 	remoteSettings := mirrorRemoteSubpath(src, "settings") + "/"
 	rsyncArgs := baseRsyncFlags(verbose)
 	rsyncArgs = append(rsyncArgs,
+		"--delete",
 		"--exclude=config.env",
-		"--exclude=nostr.json",
-		"--exclude=.nostr-keys.json",
-		"--exclude=.installed-defaults.json",
-		"--delete-excluded",
+		"--exclude=keys",
+		"--exclude=.installed_defaults",
+		"--exclude=.installed_defaults.json",
+		remoteSettings, localSettings+"/",
 	)
-	rsyncArgs = append(rsyncArgs, remoteSettings, stagingDir+"/")
 	if err := mirrorRunRsync(rsyncArgs, "settings"); err != nil {
 		Warnf("%s⚠ mirror settings: %v (continuing)%s", Fmt.Yellow, err, Fmt.Reset)
-		return nil
 	}
-	reconcileMirroredSettings(stagingDir, localSettings)
 	return nil
 }
 
-// reconcileMirroredSettings walks the staging dir and decides what to do
-// with each file. The decision tree mirrors reconcileDefaultSettings in
-// cmd/settings.go — the .installed-defaults.json tracker records the last
-// content we installed (regardless of whether the upstream was the embedded
-// defaults or the mirror), so an unedited local file auto-updates and an
-// edited local file is preserved with a pending update for `chb settings`.
-//
-// Per file:
-//
-//   - missing locally          → install from mirror, record its hash.
-//   - identical to mirror      → no-op (refresh tracker).
-//   - tracked-hash matches     → user hasn't edited; auto-update.
-//   - tracked-hash differs     → user edited; surface as pending update.
-//
-// If a file is already pending from the embedded-defaults reconciler, the
-// mirror's version wins (the trusted host's settings are the canonical
-// upstream for thin clients; the embedded defaults are the fallback).
-func reconcileMirroredSettings(stagingDir, localSettingsDir string) {
-	tracker := loadInstalledDefaultsRecord(localSettingsDir)
-	pending := append([]PendingDefaultUpdate(nil), pendingDefaultUpdates...)
-	trackerDirty := false
-	entries, err := os.ReadDir(stagingDir)
-	if err != nil {
-		return
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			// Settings nesting isn't used today; skip for now.
-			continue
-		}
-		name := entry.Name()
-		stagedPath := filepath.Join(stagingDir, name)
-		mirrorBytes, err := os.ReadFile(stagedPath)
-		if err != nil {
-			continue
-		}
-		mirrorHash := sha256Hex(mirrorBytes)
-		target := filepath.Join(localSettingsDir, name)
-		localBytes, statErr := os.ReadFile(target)
-		if errors.Is(statErr, os.ErrNotExist) {
-			if err := writeDefaultFile(target, mirrorBytes); err != nil {
-				continue
-			}
-			tracker[name] = mirrorHash
-			trackerDirty = true
-			fmt.Printf("  %s✓%s mirrored %s\n", Fmt.Green, Fmt.Reset, name)
-			continue
-		} else if statErr != nil {
-			continue
-		}
-		localHash := sha256Hex(localBytes)
-		if localHash == mirrorHash {
-			if tracker[name] != mirrorHash {
-				tracker[name] = mirrorHash
-				trackerDirty = true
-			}
-			continue
-		}
-		trackedHash, hadTracker := tracker[name]
-		userEdited := hadTracker && trackedHash != localHash
-		if !userEdited {
-			if err := writeDefaultFile(target, mirrorBytes); err != nil {
-				continue
-			}
-			tracker[name] = mirrorHash
-			trackerDirty = true
-			fmt.Printf("  %s↑%s updated %s from mirror\n", Fmt.Green, Fmt.Reset, name)
-			continue
-		}
-		pending = appendOrReplacePending(pending, PendingDefaultUpdate{
-			Name:          name,
-			LocalContent:  localBytes,
-			UpstreamBytes: mirrorBytes,
-		})
-	}
-	if trackerDirty {
-		_ = saveInstalledDefaultsRecord(localSettingsDir, tracker)
-	}
-	pendingDefaultUpdates = pending
-}
-
-func appendOrReplacePending(list []PendingDefaultUpdate, item PendingDefaultUpdate) []PendingDefaultUpdate {
-	for i, existing := range list {
-		if existing.Name == item.Name {
-			list[i] = item
-			return list
-		}
-	}
-	return append(list, item)
-}
-
-// printMirrorModeHelpBanner prints a short note about mirror mode at the
-// top of `chb pull --help` and `chb sync --help` when CHB_SYNC_SOURCE is
-// set. Operators running on the trusted host see normal help; thin clients
-// see "you're in mirror mode, here's what that means for this command".
+// printMirrorModeHelpBanner prints a short note about mirror mode
+// at the top of `chb pull --help` and `chb sync --help` when
+// CHB_SYNC_SOURCE is set.
 func printMirrorModeHelpBanner() {
 	src := MirrorSource()
 	if src == "" {
@@ -437,17 +363,15 @@ func printMirrorModeHelpBanner() {
 %sMIRROR MODE — CHB_SYNC_SOURCE is set%s
   %sSource:%s %s
   %sBehaviour:%s
-    - pull / sync rsync data + nostr outbox from the trusted host
-      instead of running every provider locally.
+    - pull / sync rsync data + settings + nostr outbox from the trusted
+      host instead of running every provider locally.
     - generate is a no-op (the trusted host already generated).
-    - push only flushes the local Nostr outbox; Odoo writes refuse.
-    - %s--no-mirror%s on the same command falls back to the legacy
-      provider-driven path (used on the trusted host itself).
+    - push goes through the normal path; each target refuses if its
+      credentials are missing on this machine.
 
 `, Fmt.Bold, Fmt.Reset,
 		Fmt.Dim, Fmt.Reset, src,
 		Fmt.Dim, Fmt.Reset,
-		Fmt.Yellow, Fmt.Reset,
 	)
 }
 
@@ -459,40 +383,11 @@ func PrintMirrorGenerateSkipped() {
 		Fmt.Dim, Fmt.Reset)
 }
 
-// MirrorPushNostrOnly is the push-side of mirror mode: Odoo is refused
-// (the trusted host owns it), but local Nostr annotations are signed and
-// pushed up so other teammates' relays see them too. If no local Nostr
-// keys are configured, this is effectively a no-op with a friendly hint.
-func MirrorPushNostrOnly(args []string) error {
-	if MirrorSource() == "" {
-		// Defensive: callers should already check MirrorEnabled, but
-		// guard anyway so an accidental direct call doesn't change
-		// behaviour for normal users.
-		return nil
-	}
-	verbose := HasFlag(args, "--verbose", "-v") || HasFlag(args, "--debug")
-	keys := LoadNostrKeys()
-	if keys == nil || strings.TrimSpace(keys.PrivHex) == "" {
-		fmt.Printf("\n  %s↳ Odoo push skipped: no credentials on this host (run on the trusted host instead).%s\n", Fmt.Dim, Fmt.Reset)
-		fmt.Printf("  %s↳ Nostr push skipped: no local Nostr keys configured (run `chb setup nostr`).%s\n\n", Fmt.Dim, Fmt.Reset)
-		return nil
-	}
-	fmt.Printf("\n  %sMirror push — Nostr only%s\n", Fmt.Bold, Fmt.Reset)
-	fmt.Printf("  %s↳ Odoo push skipped: no credentials on this host.%s\n", Fmt.Dim, Fmt.Reset)
-	if verbose {
-		return NostrPush(args)
-	}
-	// Compact: silence chatter, just print a one-line summary.
-	restore := silenceStdout()
-	err := NostrPush(args)
-	restore()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "  %s✗ Nostr push: %v%s\n", Fmt.Red, err, Fmt.Reset)
-		return err
-	}
-	fmt.Printf("  %s✓ Nostr outbox flushed%s\n\n", Fmt.Green, Fmt.Reset)
-	return nil
-}
+// (MirrorPushNostrOnly was removed: PushAllTargets gates each
+// target on its own credentials, so the mirror dispatcher just
+// calls into the normal push path. Odoo refuses if creds are
+// missing, Nostr flushes if local keys exist — no special path
+// needed.)
 
 // baseRsyncFlags returns the flag set every mirror rsync uses. `--archive`
 // preserves timestamps/permissions; `--safe-links` refuses to follow links
