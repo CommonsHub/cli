@@ -424,6 +424,28 @@ func TestReconcileMirroredSettingsCoversFourCases(t *testing.T) {
 	}
 }
 
+// TestPrintMirrorModeHelpBannerOnlyWhenEnabled verifies the help banner
+// only renders when CHB_SYNC_SOURCE is set — operators on the trusted
+// host see vanilla help, thin clients see the mirror-mode summary first.
+func TestPrintMirrorModeHelpBannerOnlyWhenEnabled(t *testing.T) {
+	t.Setenv("CHB_SYNC_SOURCE", "")
+	out := captureStdout(t, printMirrorModeHelpBanner)
+	if out != "" {
+		t.Fatalf("expected no output when CHB_SYNC_SOURCE unset, got %q", out)
+	}
+	t.Setenv("CHB_SYNC_SOURCE", "ops@host:/srv/chb")
+	out = captureStdout(t, printMirrorModeHelpBanner)
+	if !strings.Contains(out, "MIRROR MODE") {
+		t.Fatalf("banner missing MIRROR MODE heading: %q", out)
+	}
+	if !strings.Contains(out, "ops@host:/srv/chb") {
+		t.Fatalf("banner missing source URL: %q", out)
+	}
+	if !strings.Contains(out, "--no-mirror") {
+		t.Fatalf("banner missing --no-mirror hint: %q", out)
+	}
+}
+
 func mustWrite(t *testing.T, path, body string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
