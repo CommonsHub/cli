@@ -552,6 +552,10 @@ func OdooJournals(args []string) error {
 			return err
 		}
 		if targetArg := GetOption(args, "--merge-with"); targetArg != "" {
+			if HasFlag(args, "--convert-invoice-payments") {
+				return odooJournalConvertInvoicePayments(creds, uid, journalID, targetArg,
+					HasFlag(args, "--dry-run"), HasFlag(args, "--verbose", "-v"), HasFlag(args, "--yes", "-y"))
+			}
 			return odooJournalMerge(creds, uid, journalID, targetArg, HasFlag(args, "--dry-run"), HasFlag(args, "--verbose", "-v"), HasFlag(args, "--yes", "-y"))
 		}
 		if len(args) >= 2 && (args[1] == "push" || args[1] == "sync") {
@@ -1088,6 +1092,20 @@ referencing the source journal are listed and can be moved too.
   %s-v%s, %s--verbose%s  List skipped, missing, and already-present source lines
   %s-y%s, %s--yes%s      Skip move confirmation and per-line override prompts
                  Adding missing lines and deleting the source still ask
+  %s--convert-invoice-payments%s
+                 Instead of moving reconciliation records (which assumes
+                 both journals use the A/R-via-partial-reconcile pattern),
+                 walk every reconciled source line that pays a real
+                 invoice/bill, find the equivalent target line by
+                 (date, amount), and reconcile that target line against
+                 the same invoice. The reconcile path rewrites the
+                 target's revenue counterpart to A/R first — so a j48
+                 line that was previously direct-posted to revenue
+                 (e.g. 700150 VENTE TICKETS) ends up paying the same
+                 invoice the j30 line was paying. Stripe fees and lines
+                 reconciled to non-invoice moves are skipped. Same-
+                 date+amount ambiguity is resolved by chronological line
+                 id pairing within each (date, amount) bucket.
 `,
 			f.Bold, f.Reset,
 			f.Bold, f.Reset,
@@ -1097,6 +1115,7 @@ referencing the source journal are listed and can be moved too.
 			f.Yellow, f.Reset,
 			f.Yellow, f.Reset, f.Yellow, f.Reset,
 			f.Yellow, f.Reset, f.Yellow, f.Reset,
+			f.Yellow, f.Reset,
 		)
 	default:
 		// `chb odoo journals --help` or `chb odoo journals <id> --help`.
