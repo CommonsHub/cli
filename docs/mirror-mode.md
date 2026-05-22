@@ -32,75 +32,100 @@ When `CHB_SYNC_SOURCE` is set:
 
 | Command | Behaviour |
 |---|---|
-| `chb pull` | rsync data/ + outbox + settings from the trusted host. No provider calls. |
+| `chb pull` | rsync data/ + settings + outbox from the trusted host. No provider calls. |
 | `chb generate` | no-op; the trusted host already generated. |
-| `chb push` | Odoo writes refuse with "no credentials, run on the trusted host". Nostr outbox is flushed if local keys are configured. |
-| `chb sync` | pull → (skip generate) → push-nostr-only. |
+| `chb push` | normal push path. Each target gates on its own credentials, so Odoo refuses on hosts without `ODOO_PASSWORD`; Nostr flushes if local keys exist. |
+| `chb sync` | pull → (skip generate) → push (Odoo skipped if no creds, Nostr flushes if keys present). |
 | read-only commands | unchanged (`chb invoices`, `chb income`, `chb stats`, `chb report`, …). |
 
-Per-invocation override: passing `--no-mirror` on `pull` / `sync` / `push`
-bypasses mirror mode. The trusted host runs the same binary, so this
-escape hatch is how it does its own `chb sync` without trying to rsync
-from itself.
+**Credentials, not mirror mode, gate writes.** A thin-client without
+`ODOO_PASSWORD` refuses Odoo writes regardless of `CHB_SYNC_SOURCE`;
+a host with `ODOO_PASSWORD` writes regardless of mirror mode. The
+simpler rule keeps the mental model small — there's no `--no-mirror`
+escape hatch to remember.
 
 ## What gets synced
 
-`$APP_DATA_DIR` is split into three buckets, each with its own sync policy:
+`$APP_DATA_DIR` is split into four buckets, each with its own sync policy:
 
 ```
 $APP_DATA_DIR/
-  data/             # bucket 1: authoritative pull (--delete)
-    <YYYY>/<MM>/providers/...
-    <YYYY>/<MM>/generated/
-    latest/
-    logs/
-  settings/         # bucket 2: merge-with-pending-updates
-    accounts.json   #   ↑ auto-update if unedited, surface pending if edited
+  data/
+    latest/                # bucket 1: authoritative pull (--delete)
+    <YYYY>/<MM>/...        # bucket 2: append-only (no --delete; past months are immutable history)
+  settings/                # bucket 3: authoritative pull (--delete)
+    accounts.json
     rules.json
     categories.json
     collectives.json
     rooms.json
+    odoo_mapping.json
+    tokens.json
     settings.json
-    config.env              # EXCLUDED — secrets, per-machine
-    .installed-defaults.json # EXCLUDED — tracker, per-machine
-    nostr.json              # EXCLUDED — local Nostr identity
+    config.env             # EXCLUDED — secrets, per-machine
+    .installed_defaults    # EXCLUDED — embedded-defaults tracker, per-machine
+  keys/                    # NEVER synced (kept entirely out of the rsync scope)
+    nostr.json             # local Nostr identity, SSH-style key dir
   nostr/
-    outbox/         # bucket 3: bidirectional (--update)
-    sent/           # bucket 3: bidirectional (--update)
-  cache/            # never synced — per-machine derived caches
+    outbox/                # bucket 4: bidirectional (--update)
+    sent/                  # bucket 4: bidirectional (--update)
+  cache/                   # never synced — per-machine derived caches
 ```
 
-Bucket 1 — **data/**: rsync `--delete --safe-links`. The trusted host's
-state wins. Local edits to anything under `data/` are erased on the next
-pull. This is fine: data/ is provider output + generated artefacts, never
-operator state.
+**Bucket 1 — `data/latest/`**: rsync `--delete --safe-links`. The latest
+snapshot is authoritative. Files removed on the trusted host disappear
+locally.
 
-Bucket 2 — **settings/**: the per-file decision tree mirrors the
-embedded-defaults reconciler in `cmd/settings.go`. Unedited files
-auto-update; edited files are preserved and surfaced via
-`PendingSettingsUpdates()` so `chb settings` shows the diff. The
-`.installed-defaults.json` tracker records the last content we installed
-on this machine, so a freshly-cloned settings file is recognised as
-"unedited" until the operator changes it.
+**Bucket 2 — `data/<YYYY>/<MM>/`**: rsync WITHOUT `--delete`. Past
+months are immutable history. If the trusted host's backup is partial
+or a teammate has months we don't, we keep both. New files arrive,
+existing files update — nothing is ever deleted from this leg.
 
-Bucket 3 — **nostr/outbox** and **nostr/sent**: bidirectional rsync
-`--update`. The order is: up first (preserve queued local annotations),
-then down (learn about teammates' queued events). Both legs are
-best-effort — a read-only mount or a missing remote dir warns but doesn't
-abort the pull. The Nostr relay deduplicates by event ID, so the worst
-case is "we re-push something already published".
+**Bucket 3 — `settings/`**: rsync `--delete`, master is source of
+truth. The exclusion list keeps per-machine state in place:
+
+  - `config.env` — secrets + `CHB_SYNC_SOURCE` itself.
+  - `keys/` — Nostr identity (and any future key material). Lives
+    outside `settings/`, but excluded here as belt-and-suspenders.
+  - `.installed_defaults` — the embedded-defaults bootstrap tracker.
+
+Earlier prototypes did a "merge-with-pending-updates" dance for
+settings. We dropped it: the trusted host is the source of truth.
+Edit `rules.json` / `accounts.json` on the master, not on a thin
+client — a thin-client edit gets clobbered on the next pull.
+
+**Bucket 4 — `nostr/outbox` and `nostr/sent`**: bidirectional rsync
+`--update`. The order is: up first (preserve queued local
+annotations), then down (learn about teammates' queued events). Both
+legs are best-effort — a read-only mount or a missing remote dir
+warns but doesn't abort the pull. The Nostr relay deduplicates by
+event ID, so the worst case is "we re-push something already
+published".
+
+## Nostr keys
+
+Keys live at `$APP_DATA_DIR/keys/nostr.json` (SSH convention:
+private material in its own dedicated tree, 0600 + 0700 mode). Mirror
+mode never rsyncs the `keys/` tree, so a thin-client setup keeps its
+own Nostr identity even when the rest of the data dir is a read-only
+mirror of the trusted host.
+
+Legacy locations (`settings/nostr.json`, `.nostr-keys.json` at the
+top level) are still read on a one-shot fallback path that
+auto-migrates to the canonical location. After migration, remove the
+legacy file manually.
 
 ## Lock file
 
 Concurrent mirror operations are serialised via a flock on
-`$APP_DATA_DIR/.sync.lock`. A second `chb pull` or `chb sync` waits for
-the first to finish, so two cron jobs colliding can't corrupt the local
-copy mid-rsync.
+`$APP_DATA_DIR/.sync.lock`. A second `chb pull` or `chb sync` waits
+for the first to finish, so two cron jobs colliding can't corrupt the
+local copy mid-rsync.
 
 ## Hard rule from CLAUDE.md is preserved
 
 The "sync vs generate" invariant — sync downloads raw, generate
 transforms — is unchanged. Mirror mode SKIPS both phases locally: the
-trusted host runs the real pipeline; thin clients only rsync the output.
-The invariant still holds on the trusted host, which is the only place
-where data/ is authored.
+trusted host runs the real pipeline; thin clients only rsync the
+output. The invariant still holds on the trusted host, which is the
+only place where data/ is authored.
