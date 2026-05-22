@@ -117,8 +117,8 @@ func TransactionsStats(args []string) {
 				ms.Count++
 				totalCount++
 
-				// Skip internal transfers and token transfers from In/Out totals
-				if tx.Type == "INTERNAL" || tx.Type == "TRANSFER" {
+				// Skip internal transfers from In/Out totals.
+				if tx.Type == "INTERNAL" {
 					continue
 				}
 

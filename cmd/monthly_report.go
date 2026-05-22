@@ -567,8 +567,6 @@ func buildMonthlyReportAccounts(dataDir, year, month string) []MonthlyReportAcco
 			}
 		case "INTERNAL":
 			acct.Counts.Internal++
-		case "TRANSFER":
-			acct.Counts.Transfers++
 		default:
 			acct.Counts.Transfers++
 		}

@@ -232,7 +232,7 @@ func (m *ruleEditorModel) buildMatchTable() *stickertable.Table {
 				amtStr = styleRed.Render(fmt.Sprintf("-€%.2f", absAmt))
 			}
 		} else {
-			if tx.Type == "CREDIT" || tx.Type == "TRANSFER" {
+			if tx.Type == "CREDIT" || tx.Type == "DEBIT" {
 				amtStr = styleGreen.Render(fmt.Sprintf("+%.2f %s", absAmt, tx.Currency))
 			} else {
 				amtStr = styleRed.Render(fmt.Sprintf("-%.2f %s", absAmt, tx.Currency))

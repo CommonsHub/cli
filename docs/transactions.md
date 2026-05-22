@@ -33,7 +33,7 @@ other side) + the sign of `amount`.
 | `netAmount` | float | Signed amount after provider fees. Equals `amount` for fee-less providers. For Stripe: customer pays `amount`, Stripe takes `fee`, balance moves by `netAmount`. |
 | `normalizedAmount` | float | Signed **balance impact** — what the account balance moved by. Same as `netAmount` today; the separate field exists so future currency-normalization (e.g. EUR-equivalent for CHT) can plug in here without disturbing the gross/net pair. |
 | `fee` | float | Positive fee magnitude. `0` for providers without separate fees. |
-| `type` | string | One of `CREDIT` / `DEBIT` / `MINT` / `BURN` / `INTERNAL` / `TRANSFER`. Redundant with `sign(amount)` for CREDIT/DEBIT/MINT/BURN; `INTERNAL` and `TRANSFER` rely on the sign + `metadata.direction`. |
+| `type` | string | One of `CREDIT` / `DEBIT` / `MINT` / `BURN` / `INTERNAL`. Redundant with `sign(amount)` for CREDIT/DEBIT/MINT/BURN; `INTERNAL` relies on the sign + `metadata.direction`. Token-wide transfers between two non-tracked addresses are recorded as `DEBIT` from the sender's perspective. |
 | `timestamp` | int64 | Unix seconds. |
 | `metadata.category` / `metadata.collective` | string | Semantic tags from `rules.json` + Nostr annotations. |
 | `metadata.description` | string | Free-text description (Stripe BT description, Monerium memo, KBC narration). Used by `description:` rules. Does NOT carry sender/receiver names. |
@@ -50,6 +50,7 @@ other side) + the sign of `amount`.
 | `sender` / `receiver` | Same as above. The rule engine has `sender` and `recipient` match keys that target `tx.counterparty` filtered by direction — they're matcher inputs, not data fields. |
 | `fromName` / `toName` | `accountName` (perspective) and `counterparty` (other side). |
 | Direction as a boolean | `type` (CREDIT/DEBIT/…) or `sign(amount)`. |
+| `TRANSFER` type | Token-wide transfers between two non-tracked addresses are `DEBIT` from the sender's perspective. The receiver is in `counterpartyId`. |
 
 ## Signed-amount cheatsheet
 
@@ -63,7 +64,7 @@ other side) + the sign of `amount`.
 | Etherscan burn of 10 EURb from savings | `ethereum:100:address:0x…savings` | `-10` | `BURN` | — |
 | Internal transfer 10000 EURe savings → checking, savings-side entry | `ethereum:100:address:0x…savings` | `-10000` | `INTERNAL` | `DEBIT` |
 | Internal transfer 10000 EURe savings → checking, checking-side entry | `ethereum:100:address:0x…checking` | `+10000` | `INTERNAL` | `CREDIT` |
-| Token-wide CHT transfer Alice → Bob | `ethereum:42220:address:0x…alice` | `-amount` | `TRANSFER` | — |
+| Token-wide CHT transfer Alice → Bob | `ethereum:42220:address:0x…alice` | `-amount` | `DEBIT` | — |
 
 For the internal-transfer case, the **two entries share the same `id`** (the
 on-chain tx hash). Disambiguate by `accountId` (or `logIndex` when multiple

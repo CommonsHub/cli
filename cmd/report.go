@@ -1038,17 +1038,17 @@ func printTransactionsSummary(dataDir, year, month string) {
 
 // calculateMonthTransactions returns EUR-family income/expense totals for a
 // month, sourced from the generated transactions.json so that tx.Type is
-// honored. INTERNAL and TRANSFER rows (movements between accounts we own) are
-// excluded so a Gnosis→Polygon EURe transfer doesn't get double-counted as
-// both income and expense — matching the policy used by `chb transactions
-// stats` (see cmd/transactions_stats.go).
+// honored. INTERNAL rows (movements between accounts we own) are excluded so a
+// Gnosis→Polygon EURe transfer doesn't get double-counted as both income and
+// expense — matching the policy used by `chb transactions stats`
+// (see cmd/transactions_stats.go).
 func calculateMonthTransactions(dataDir, year, month string) (income, expenses float64) {
 	txFile := LoadTransactionsWithPII(dataDir, year, month)
 	if txFile == nil {
 		return 0, 0
 	}
 	for _, tx := range txFile.Transactions {
-		if tx.Type == "INTERNAL" || tx.Type == "TRANSFER" {
+		if tx.Type == "INTERNAL" {
 			continue
 		}
 		if !isEURCurrency(tx.Currency) {

@@ -203,7 +203,7 @@ func TransactionsSyncNostr(args []string) error {
 		if tx.Category == "" {
 			continue
 		}
-		if tx.Type == "INTERNAL" || tx.Type == "TRANSFER" {
+		if tx.Type == "INTERNAL" {
 			continue
 		}
 		if publishedIDs[t.URI] {

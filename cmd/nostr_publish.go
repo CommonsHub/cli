@@ -93,7 +93,7 @@ func TransactionsPublish(args []string) error {
 				if tx.Category == "" {
 					continue // nothing to publish
 				}
-				if tx.Type == "INTERNAL" || tx.Type == "TRANSFER" {
+				if tx.Type == "INTERNAL" {
 					continue
 				}
 

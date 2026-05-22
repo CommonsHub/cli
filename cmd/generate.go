@@ -2559,7 +2559,10 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 						accountSide = tx.From
 						counterparty = tx.To
 					} else {
-						txType = "TRANSFER" // regular transfer between addresses
+						// Token-wide transfer between two non-tracked
+						// addresses. From the sender's perspective this
+						// is just a DEBIT — no separate type needed.
+						txType = "DEBIT"
 						accountSide = tx.From
 						counterparty = tx.To
 					}
@@ -2617,11 +2620,6 @@ func generateTransactionsGo(dataDir, year, month string, settings *Settings) int
 					if internalDirection == "DEBIT" {
 						signedAmount = -amount
 					}
-				case "TRANSFER":
-					// Token-wide transfer between two arbitrary
-					// addresses — accountId is the sender, so this
-					// is "money OUT of the sender" → negative.
-					signedAmount = -amount
 				}
 
 				entry := TransactionEntry{

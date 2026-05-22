@@ -96,7 +96,7 @@ func runIncomeExpenseReport(direction string, args []string) error {
 			continue
 		}
 		for _, tx := range txFile.Transactions {
-			if tx.Type == "INTERNAL" || tx.Type == "TRANSFER" {
+			if tx.Type == "INTERNAL" {
 				continue
 			}
 			if !isEURCurrency(tx.Currency) {

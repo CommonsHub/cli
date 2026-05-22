@@ -209,21 +209,20 @@ func Stats(args []string) {
 				}
 			}
 
-			if tx.Type == "TRANSFER" {
+			if !isEUR && tx.Type == "DEBIT" {
+				// Token-wide transfer (former TRANSFER type) — counted
+				// separately from real outgoing money.
 				ss.Transfers++
-				// Track per-month token transfers
-				if !isEUR {
-					if monthToken[m.label] == nil {
-						monthToken[m.label] = map[string]*txSummary{}
-					}
-					mt, ok := monthToken[m.label][currency]
-					if !ok {
-						mt = &txSummary{}
-						monthToken[m.label][currency] = mt
-					}
-					mt.Count++
-					mt.Transfers++
+				if monthToken[m.label] == nil {
+					monthToken[m.label] = map[string]*txSummary{}
 				}
+				mt, ok := monthToken[m.label][currency]
+				if !ok {
+					mt = &txSummary{}
+					monthToken[m.label][currency] = mt
+				}
+				mt.Count++
+				mt.Transfers++
 			} else if tx.Type == "CREDIT" {
 				ss.In += absAmount
 				if isEUR {

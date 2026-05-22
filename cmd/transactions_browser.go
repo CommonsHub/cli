@@ -80,7 +80,9 @@ func txAmountCell(tx TransactionEntry, styled bool) string {
 	amt := txAmount(tx)
 	absAmt := math.Abs(amt)
 	positive := tx.IsIncoming()
-	if !isEURCurrency(tx.Currency) && tx.Type == "TRANSFER" {
+	if !isEURCurrency(tx.Currency) && tx.Type == "DEBIT" {
+		// Token-wide transfer between two non-tracked addresses.
+		// Display as a positive token movement rather than an outflow.
 		positive = true
 	}
 

@@ -42,7 +42,7 @@ func findUncategorizedBuckets(txs []TransactionEntry) []txBucket {
 	groups := map[string]*bucketData{}
 
 	for _, tx := range txs {
-		if tx.Type == "INTERNAL" || tx.Type == "TRANSFER" {
+		if tx.Type == "INTERNAL" {
 			continue
 		}
 		// Skip if any assignment is set (category, collective, or event)
