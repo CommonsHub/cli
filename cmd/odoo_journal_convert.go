@@ -383,6 +383,39 @@ func printOdooJournalConvertPlan(plan *odooJournalConvertPlan, dryRun, verbose b
 func applyOdooJournalConvertPlan(creds *OdooCredentials, uid int, plan *odooJournalConvertPlan) (applied, failed int) {
 	for i, pair := range plan.Pairs {
 		fmt.Printf("  %d/%d %sconverting%s line #%d → invoice %s\n", i+1, len(plan.Pairs), Fmt.Dim, Fmt.Reset, pair.Target.ID, pair.InvoiceLabel)
+
+		// Step 1: Properly unreconcile the source (j30) statement
+		// line via Odoo's blessed button_undo_reconciliation method.
+		// This drops the j30→invoice partial.reconcile AND triggers
+		// the recompute of account.bank.statement.line.is_reconciled
+		// (which a direct partial.reconcile unlink does NOT trigger
+		// when the bypass context skips Odoo's auto-sync). After
+		// this, the source line shows is_reconciled=false in the UI
+		// and the invoice's A/R line is open.
+		if err := undoStatementLineReconciliation(creds, uid, pair.Source.ID); err != nil {
+			failed++
+			Warnf("  %s⚠ pair %d: undo source line #%d reconciliation: %v%s", Fmt.Yellow, i+1, pair.Source.ID, err, Fmt.Reset)
+			continue
+		}
+
+		// Step 2: Defensive cleanup on the target side. Drops any
+		// partial.reconcile records on the target move's non-bank
+		// counterpart line — recovers from a prior v3.4.12 run that
+		// mis-routed the reconciliation via the now-fixed
+		// findOutstandingPaymentLineForInvoice fallback (those bad
+		// partials linked the target counterpart to a source-journal
+		// line). No-op on fresh state.
+		if err := dropPartialsOnNonBankCounterpart(creds, uid, pair.Target.MoveID); err != nil {
+			failed++
+			Warnf("  %s⚠ pair %d: cleanup counterpart partials on move #%d: %v%s", Fmt.Yellow, i+1, pair.Target.MoveID, err, Fmt.Reset)
+			continue
+		}
+
+		// Step 3: Now the invoice's A/R line is open. Call the
+		// standard reconcile flow; it takes the open-A/R path
+		// (no fallback heuristics fire) and rewrites the target's
+		// non-bank counterpart from revenue/suspense to A/R, then
+		// reconciles against the invoice.
 		targetForReconcile := odooStatementLineForReconcile{
 			ID:     pair.Target.ID,
 			MoveID: pair.Target.MoveID,
@@ -396,4 +429,86 @@ func applyOdooJournalConvertPlan(creds *OdooCredentials, uid int, plan *odooJour
 		applied++
 	}
 	return applied, failed
+}
+
+// undoStatementLineReconciliation calls
+// account.bank.statement.line.action_undo_reconciliation() — Odoo's
+// blessed "undo the reconcile" entry point. Unlike a direct
+// account.partial.reconcile.unlink() this triggers the proper
+// recompute chain on `is_reconciled`, so the UI immediately
+// reflects the new state.
+//
+// (Earlier Odoo versions exposed this as button_undo_reconciliation;
+// the test instance at chb has action_undo_reconciliation. Probed
+// via odooExec dispatch error before settling on this name.)
+//
+// Returns nil when the line had no reconcile chain (Odoo treats
+// the call as a no-op in that case).
+func undoStatementLineReconciliation(creds *OdooCredentials, uid int, lineID int) error {
+	if lineID == 0 {
+		return nil
+	}
+	_, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
+		"account.bank.statement.line", "action_undo_reconciliation",
+		[]interface{}{[]interface{}{lineID}}, nil)
+	return err
+}
+
+// dropPartialsOnNonBankCounterpart removes every account.partial.reconcile
+// touching the non-bank counterpart line(s) of a bank statement move.
+// "Non-bank" = anything that ISN'T the line on the journal's
+// default_account_id. The bank line itself is left alone — Odoo's
+// _check_journal_consistency requires it.
+//
+// Used by the converter to:
+//  1. Recover from a prior bad run where the counterpart was
+//     reconciled to a source-journal line (v3.4.12 bug fixed in v3.4.15).
+//  2. Re-run idempotently: a target whose counterpart has already
+//     been reconciled to the right invoice gets re-reconciled
+//     cleanly without "line already in a reconcile" errors.
+//
+// Returns nil when there's nothing to drop (the common fresh-case).
+func dropPartialsOnNonBankCounterpart(creds *OdooCredentials, uid int, moveID int) error {
+	if moveID == 0 {
+		return nil
+	}
+	defaultAccountID, err := fetchJournalDefaultAccount(creds, uid, moveID)
+	if err != nil {
+		return fmt.Errorf("resolve journal default account: %v", err)
+	}
+	lines, err := odooSearchReadAllMaps(creds, uid, "account.move.line",
+		[]interface{}{[]interface{}{"move_id", "=", moveID}},
+		[]string{"id", "account_id", "matched_debit_ids", "matched_credit_ids"},
+		"id asc")
+	if err != nil {
+		return err
+	}
+	partialIDs := map[int]bool{}
+	for _, row := range lines {
+		if defaultAccountID > 0 && odooFieldID(row["account_id"]) == defaultAccountID {
+			continue
+		}
+		for _, key := range []string{"matched_debit_ids", "matched_credit_ids"} {
+			if arr, ok := row[key].([]interface{}); ok {
+				for _, v := range arr {
+					if id := odooInt(v); id > 0 {
+						partialIDs[id] = true
+					}
+				}
+			}
+		}
+	}
+	if len(partialIDs) == 0 {
+		return nil
+	}
+	ids := make([]interface{}, 0, len(partialIDs))
+	for id := range partialIDs {
+		ids = append(ids, id)
+	}
+	if _, err := odooExec(creds.URL, creds.DB, uid, creds.Password,
+		"account.partial.reconcile", "unlink",
+		[]interface{}{ids}, nil); err != nil {
+		return fmt.Errorf("unlink %d partial.reconcile(s): %v", len(ids), err)
+	}
+	return nil
 }

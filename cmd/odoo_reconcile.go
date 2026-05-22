@@ -1597,6 +1597,34 @@ func findOutstandingPaymentLineForInvoice(creds *OdooCredentials, uid int, invoi
 		return 0, 0, false, nil
 	}
 
+	// 4b. Filter out bank statement moves. A genuine payment record's
+	// move has statement_line_id=false; a bank statement move has
+	// statement_line_id != false. Without this filter, an invoice
+	// that was paid DIRECTLY by a bank statement line (not via an
+	// intermediate account.payment) would have its bank-move
+	// counterpart misclassified as the "outstanding payment line",
+	// and a downstream rewrite would land on the wrong account —
+	// observed during journal merges where j30 was the bank move
+	// reconciled directly to the invoice's A/R.
+	pmIDFilter := make([]interface{}, 0, len(paymentMoveIDs))
+	for id := range paymentMoveIDs {
+		pmIDFilter = append(pmIDFilter, id)
+	}
+	bankMoveRows, err := odooSearchReadAllMaps(creds, uid, "account.move",
+		[]interface{}{
+			[]interface{}{"id", "in", pmIDFilter},
+			[]interface{}{"statement_line_id", "!=", false},
+		},
+		[]string{"id"}, "")
+	if err == nil {
+		for _, r := range bankMoveRows {
+			delete(paymentMoveIDs, odooInt(r["id"]))
+		}
+	}
+	if len(paymentMoveIDs) == 0 {
+		return 0, 0, false, nil
+	}
+
 	// 5. The payment move has 2 lines: the A/R side (reconciled=true,
 	//    matched with the invoice) and the outstanding side
 	//    (reconciled=false, waiting for the bank). Return the latter.
